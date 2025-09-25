@@ -92,3 +92,97 @@ export async function listPersonsForTree(phone) {
 
   return { tree, people: data };
 }
+
+// --- Relationship helpers ---
+
+/** Get or create a person by name in the given tree (case-insensitive). */
+export async function upsertPersonByName(treeId, name) {
+  const trimmed = name.trim();
+  const { data: found, error: selErr } = await db
+    .from("persons")
+    .select("*")
+    .eq("tree_id", treeId)
+    .ilike("primary_name", trimmed)
+    .limit(1);
+  if (selErr) throw selErr;
+  if (found?.[0]) return found[0];
+
+  const { data: created, error: insErr } = await db
+    .from("persons")
+    .insert({ tree_id: treeId, primary_name: trimmed })
+    .select()
+    .single();
+  if (insErr) throw insErr;
+  return created;
+}
+
+/** Create a relationship; ignores exact duplicates. */
+export async function addRelationship(treeId, aId, kind, bId) {
+  // prevent dupes (very simple)
+  const { data: existing, error: qErr } = await db
+    .from("relationships")
+    .select("id")
+    .eq("tree_id", treeId)
+    .eq("a", aId)
+    .eq("b", bId)
+    .eq("kind", kind)
+    .limit(1);
+  if (qErr) throw qErr;
+  if (existing?.[0]) return existing[0];
+
+  const { data, error } = await db
+    .from("relationships")
+    .insert({ tree_id: treeId, a: aId, b: bId, kind })
+    .select()
+    .single();
+  if (error) throw error;
+
+  // For symmetric spouse/partner, also add reverse if missing
+  if (kind === "spouse_of" || kind === "partner_of") {
+    const { data: back, error: backErr } = await db
+      .from("relationships")
+      .select("id")
+      .eq("tree_id", treeId)
+      .eq("a", bId)
+      .eq("b", aId)
+      .eq("kind", kind)
+      .limit(1);
+    if (backErr) throw backErr;
+    if (!back?.[0]) {
+      await db.from("relationships").insert({ tree_id: treeId, a: bId, b: aId, kind });
+    }
+  }
+  return data;
+}
+
+/** Build a simple summary: spouses, parents, children. */
+export async function personSummary(treeId, personId) {
+  const spouseKinds = ["spouse_of", "partner_of"];
+  const { data: spouses } = await db
+    .from("relationships")
+    .select("a,b,kind, persons: b (primary_name)")
+    .eq("tree_id", treeId)
+    .eq("a", personId)
+    .in("kind", spouseKinds);
+
+  const { data: parents } = await db
+    .from("relationships")
+    .select("a,b, persons: a (primary_name)")
+    .eq("tree_id", treeId)
+    .eq("b", personId)
+    .eq("kind", "parent_of");
+
+  const { data: children } = await db
+    .from("relationships")
+    .select("a,b, persons: b (primary_name)")
+    .eq("tree_id", treeId)
+    .eq("a", personId)
+    .eq("kind", "parent_of");
+
+  return {
+    spouses: spouses?.map(r => r.persons?.primary_name).filter(Boolean) || [],
+    parents: parents?.map(r => r.persons?.primary_name).filter(Boolean) || [],
+    children: children?.map(r => r.persons?.primary_name).filter(Boolean) || [],
+  };
+}
+
