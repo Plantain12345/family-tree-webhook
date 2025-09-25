@@ -4,13 +4,23 @@ import { createClient } from "@supabase/supabase-js";
 
 export const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
-/** Generate a simple 6-char join code. */
+/* ----------------------------- utils ----------------------------- */
+
 export function makeJoinCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
 
-/** Create a tree and add creator as member. */
+export function normalizeName(name) {
+  return (name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/* --------------------------- core entities --------------------------- */
+
 export async function createTree(name, ownerPhone) {
   const code = makeJoinCode();
   const { data: tree, error } = await db
@@ -20,13 +30,14 @@ export async function createTree(name, ownerPhone) {
     .single();
   if (error) throw error;
 
+  // create membership
   const { error: mErr } = await db.from("members").insert({ tree_id: tree.id, phone: ownerPhone });
   if (mErr) throw mErr;
 
   return tree;
 }
 
-/** Join a tree by code (idempotent). */
+/** Join OR switch to a tree by code (idempotent). */
 export async function joinTreeByCode(code, phone) {
   const { data: tree, error } = await db
     .from("trees")
@@ -35,23 +46,28 @@ export async function joinTreeByCode(code, phone) {
     .single();
 
   if (error) {
-    // If not found, return null; other errors bubble up.
-    if (error.code === "PGRST116") return null;
+    if (error.code === "PGRST116") return null; // not found
     throw error;
   }
   if (!tree) return null;
 
-  const { error: mErr } = await db
+  // try insert membership
+  const { error: insErr } = await db
     .from("members")
-    .insert({ tree_id: tree.id, phone })
-    .onConflict("tree_id,phone")
-    .ignore();
-  if (mErr) throw mErr;
+    .insert({ tree_id: tree.id, phone });
+  if (insErr?.code === "23505") {
+    // already a member -> "switch" by bumping joined_at
+    await db.from("members")
+      .update({ joined_at: new Date().toISOString() })
+      .eq("tree_id", tree.id)
+      .eq("phone", phone);
+  } else if (insErr) {
+    throw insErr;
+  }
 
   return tree;
 }
 
-/** Most recently joined/created tree for this phone. */
 export async function latestTreeFor(phone) {
   const { data, error } = await db
     .from("members")
@@ -63,7 +79,9 @@ export async function latestTreeFor(phone) {
   return data?.[0]?.trees || null;
 }
 
-/** Find a person by (partial) name in the user’s latest tree. */
+/* --------------------------- people helpers -------------------------- */
+
+/** Find a person by partial name in a tree. */
 export async function findPersonByName(phone, name) {
   const tree = await latestTreeFor(phone);
   if (!tree) return null;
@@ -71,8 +89,9 @@ export async function findPersonByName(phone, name) {
   const { data, error } = await db
     .from("persons")
     .select("*")
-    .ilike("primary_name", `%${name}%`)
     .eq("tree_id", tree.id)
+    .ilike("primary_name", `%${name}%`)
+    .order("created_at", { ascending: true })
     .limit(1);
   if (error) throw error;
   return data?.[0] || null;
@@ -85,41 +104,78 @@ export async function listPersonsForTree(phone) {
 
   const { data, error } = await db
     .from("persons")
-    .select("primary_name,dob_dmy")
+    .select("id,primary_name,dob_dmy")
     .eq("tree_id", tree.id)
     .order("primary_name", { ascending: true });
   if (error) throw error;
-
   return { tree, people: data };
 }
 
-// --- Relationship helpers ---
-
-/** Get or create a person by name in the given tree (case-insensitive). */
+/** Strict find by normalized name; otherwise create. */
 export async function upsertPersonByName(treeId, name) {
-  const trimmed = name.trim();
-  const { data: found, error: selErr } = await db
+  const norm = normalizeName(name);
+  if (!norm) throw new Error("Name required");
+
+  // try exact normalized match
+  const { data: existing, error: qErr } = await db
     .from("persons")
     .select("*")
     .eq("tree_id", treeId)
-    .ilike("primary_name", trimmed)
+    .ilike("primary_name", name.trim())
     .limit(1);
-  if (selErr) throw selErr;
-  if (found?.[0]) return found[0];
+  if (qErr) throw qErr;
+  if (existing?.[0]) return existing[0];
 
+  // fall back: simple prefix match on normalized form
+  const { data: all, error: allErr } = await db
+    .from("persons")
+    .select("*")
+    .eq("tree_id", treeId);
+  if (allErr) throw allErr;
+
+  const maybe = all?.find(p => normalizeName(p.primary_name) === norm);
+  if (maybe) return maybe;
+
+  // create new
   const { data: created, error: insErr } = await db
     .from("persons")
-    .insert({ tree_id: treeId, primary_name: trimmed })
+    .insert({ tree_id: treeId, primary_name: name.trim() })
     .select()
     .single();
   if (insErr) throw insErr;
   return created;
 }
 
-/** Create a relationship; ignores exact duplicates. */
+/** Merge B into A (keepId <- dupId): move relationships & delete dup. */
+export async function mergePersons(treeId, keepId, dupId) {
+  if (keepId === dupId) return { merged: false };
+
+  // re-point relationships
+  await db.from("relationships").update({ a: keepId }).eq("tree_id", treeId).eq("a", dupId);
+  await db.from("relationships").update({ b: keepId }).eq("tree_id", treeId).eq("b", dupId);
+
+  // delete duplicate
+  await db.from("persons").delete().eq("tree_id", treeId).eq("id", dupId);
+  return { merged: true };
+}
+
+/** Simple edit: rename and/or set dob_dmy */
+export async function editPerson(treeId, personId, { newName, dob_dmy }) {
+  const patch = {};
+  if (newName) patch.primary_name = newName.trim();
+  if (dob_dmy !== undefined) patch.dob_dmy = dob_dmy;
+  if (!Object.keys(patch).length) return { ok: true };
+
+  const { error } = await db.from("persons").update(patch).eq("tree_id", treeId).eq("id", personId);
+  if (error) throw error;
+  return { ok: true };
+}
+
+/* ------------------------- relationship helpers ------------------------ */
+
 export async function addRelationship(treeId, aId, kind, bId) {
-  // prevent dupes (very simple)
-  const { data: existing, error: qErr } = await db
+  // Prevent exact duplicate
+  const { data: existing } = await db
     .from("relationships")
     .select("id")
     .eq("tree_id", treeId)
@@ -127,19 +183,12 @@ export async function addRelationship(treeId, aId, kind, bId) {
     .eq("b", bId)
     .eq("kind", kind)
     .limit(1);
-  if (qErr) throw qErr;
-  if (existing?.[0]) return existing[0];
-
-  const { data, error } = await db
-    .from("relationships")
-    .insert({ tree_id: treeId, a: aId, b: bId, kind })
-    .select()
-    .single();
-  if (error) throw error;
-
-  // For symmetric spouse/partner, also add reverse if missing
+  if (!existing?.[0]) {
+    await db.from("relationships").insert({ tree_id: treeId, a: aId, b: bId, kind });
+  }
+  // Add reverse for symmetric kinds
   if (kind === "spouse_of" || kind === "partner_of") {
-    const { data: back, error: backErr } = await db
+    const { data: back } = await db
       .from("relationships")
       .select("id")
       .eq("tree_id", treeId)
@@ -147,17 +196,17 @@ export async function addRelationship(treeId, aId, kind, bId) {
       .eq("b", aId)
       .eq("kind", kind)
       .limit(1);
-    if (backErr) throw backErr;
     if (!back?.[0]) {
       await db.from("relationships").insert({ tree_id: treeId, a: bId, b: aId, kind });
     }
   }
-  return data;
+  return { ok: true };
 }
 
-/** Build a simple summary: spouses, parents, children. */
+/** Mini summary for a person. */
 export async function personSummary(treeId, personId) {
   const spouseKinds = ["spouse_of", "partner_of"];
+
   const { data: spouses } = await db
     .from("relationships")
     .select("a,b,kind, persons: b (primary_name)")
@@ -186,3 +235,12 @@ export async function personSummary(treeId, personId) {
   };
 }
 
+/* --------------------------- membership mgmt --------------------------- */
+
+export async function leaveCurrentTree(phone) {
+  const tree = await latestTreeFor(phone);
+  if (!tree) return { left: false };
+  const { error } = await db.from("members").delete().eq("tree_id", tree.id).eq("phone", phone);
+  if (error) throw error;
+  return { left: true, tree };
+}
