@@ -1,8 +1,13 @@
-
 import {
-  db, createTree, joinTreeByCode, latestTreeFor,
-  findPersonByName, listPersonsForTree,
-  upsertPersonByName, addRelationship, personSummary
+  db,
+  createTree,
+  joinTreeByCode,
+  latestTreeFor,
+  findPersonByName,
+  listPersonsForTree,
+  upsertPersonByName,
+  addRelationship,
+  personSummary,
 } from "./_db.js";
 
 export default async function handler(req, res) {
@@ -27,7 +32,13 @@ export default async function handler(req, res) {
       if (/^help$/i.test(text)) {
         await sendText(
           from,
-          "Commands:\n• NEW <Tree Name>\n• JOIN <Code>\n• ADD: <person details>\n• VIEW TREE\n• VIEW <Name>"
+          "Commands:\n" +
+            "• NEW <Tree Name>\n" +
+            "• JOIN <Code>\n" +
+            "• ADD: <person details>\n" +
+            "• LINK: Alice spouse Bob | Alice parent_of Carol\n" +
+            "• VIEW TREE\n" +
+            "• VIEW <Name>"
         );
         await sendMenu(from);
 
@@ -81,6 +92,43 @@ export default async function handler(req, res) {
           }
         }
 
+      } else if (/^link:\s*/i.test(text)) {
+        // LINK: Alice spouse Bob
+        // LINK: Alice partner Bob
+        // LINK: Alice married to Bob
+        // LINK: Jane parent_of John
+        // LINK: Jane parent of John
+        const tree = await latestTreeFor(from);
+        if (!tree) {
+          await sendText(from, "Create or join a tree first (HELP).");
+        } else {
+          const body = text.replace(/^link:\s*/i, "").trim();
+
+          // spouse/partner/married to
+          let m = body.match(/^(.+?)\s+(spouse|partner|married to)\s+(.+)$/i);
+          if (m) {
+            const aName = m[1];
+            const bName = m[3];
+            const a = await upsertPersonByName(tree.id, aName);
+            const b = await upsertPersonByName(tree.id, bName);
+            await addRelationship(tree.id, a.id, "spouse_of", b.id);
+            await sendText(from, `✅ Linked ${a.primary_name} ↔ ${b.primary_name} as spouses/partners.`);
+          } else {
+            // parent_of (supports "parent_of" and "parent of")
+            m = body.match(/^(.+?)\s+(parent[_\s]?of)\s+(.+)$/i);
+            if (m) {
+              const parentName = m[1];
+              const childName = m[3];
+              const parent = await upsertPersonByName(tree.id, parentName);
+              const child = await upsertPersonByName(tree.id, childName);
+              await addRelationship(tree.id, parent.id, "parent_of", child.id);
+              await sendText(from, `✅ Linked ${parent.primary_name} → ${child.primary_name} (parent_of).`);
+            } else {
+              await sendText(from, "Try:\nLINK: Alice spouse Bob\nLINK: Jane parent_of John");
+            }
+          }
+        }
+
       } else if (/^view\s+tree$/i.test(text)) {
         const result = await listPersonsForTree(from);
         if (!result) {
@@ -100,10 +148,15 @@ export default async function handler(req, res) {
         if (!person) {
           await sendText(from, `❌ No match found for “${name}”.`);
         } else {
-          let details = `${person.primary_name}`;
-          if (person.dob_dmy) details += `, b. ${person.dob_dmy}`;
-          // TODO: enrich with spouses/children/parents from relationships
-          await sendText(from, `ℹ️ ${details}`);
+          const tree = await latestTreeFor(from);
+          const rels = await personSummary(tree.id, person.id);
+          const lines = [
+            `ℹ️ ${person.primary_name}${person.dob_dmy ? `, b. ${person.dob_dmy}` : ""}`,
+            rels.spouses?.length ? `• Spouse(s): ${rels.spouses.join(", ")}` : null,
+            rels.parents?.length ? `• Parent(s): ${rels.parents.join(", ")}` : null,
+            rels.children?.length ? `• Children: ${rels.children.join(", ")}` : null,
+          ].filter(Boolean);
+          await sendText(from, lines.join("\n"));
         }
 
       } else {
