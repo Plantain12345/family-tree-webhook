@@ -8,6 +8,10 @@ import {
   upsertPersonByName,
   addRelationship,
   personSummary,
+  mergePersons,
+  editPerson,
+  leaveCurrentTree,
+  normalizeName,
 } from "./_db.js";
 
 export default async function handler(req, res) {
@@ -20,25 +24,31 @@ export default async function handler(req, res) {
     return res.status(403).send("Forbidden");
   }
 
-  // Handle WhatsApp events
+  // WhatsApp events
   if (req.method === "POST") {
     const change = req.body?.entry?.[0]?.changes?.[0]?.value;
     const msg = change?.messages?.[0];
 
     if (msg?.from) {
       const from = msg.from;
-      const text = (msg.text?.body || msg.interactive?.button_reply?.id || "").trim();
+      const textRaw = (msg.text?.body || msg.interactive?.button_reply?.id || "").trim();
+      const text = textRaw.replace(/\s+/g, " "); // normalize spaces
 
       if (/^help$/i.test(text)) {
         await sendText(
           from,
-          "Commands:\n" +
-            "• NEW <Tree Name>\n" +
-            "• JOIN <Code>\n" +
-            "• ADD: <person details>\n" +
-            "• LINK: Alice spouse Bob | Alice parent_of Carol\n" +
-            "• VIEW TREE\n" +
-            "• VIEW <Name>"
+          [
+            "Commands:",
+            "• NEW <Tree Name>",
+            "• JOIN <Code> (also switches to that tree)",
+            "• LEAVE (leave your current tree)",
+            "• ADD: <person details>",
+            "• LINK: Alice spouse Bob | Alice parent_of Carol",
+            "• EDIT: Old Name -> New Name",
+            "• EDIT: Name, b. 1960",
+            "• VIEW TREE",
+            "• VIEW <Name>",
+          ].join("\n")
         );
         await sendMenu(from);
 
@@ -67,48 +77,68 @@ export default async function handler(req, res) {
         if (!tree) {
           await sendText(from, "❌ Code not found. Ask the owner to re-share.");
         } else {
-          await sendText(from, `✅ Joined “${tree.name}”. Now send: ADD: <person details>`);
+          await sendText(from, `✅ Switched to “${tree.name}”. You can ADD / VIEW / LINK now.`);
         }
 
+      } else if (/^leave$/i.test(text)) {
+        const result = await leaveCurrentTree(from);
+        if (!result.left) await sendText(from, "You’re not in any tree yet.");
+        else await sendText(from, `✅ You left “${result.tree.name}”.`);
+
       } else if (/^add:/i.test(text)) {
-        // Capture & store a single person under member’s latest tree
-        const details = text.slice(4).trim();
+        // ADD: <name>, b. 19xx  (very simple capture)
+        const details = text.replace(/^add:\s*/i, "");
         const tree = await latestTreeFor(from);
         if (!tree) {
           await sendText(from, "Create or join a tree first (type HELP).");
         } else {
-          const [namePart, maybeDob] = details.split(",").map((s) => s.trim());
-          const person = {
-            tree_id: tree.id,
-            primary_name: namePart || "Unknown person",
-            dob_dmy: maybeDob?.replace(/^b\.\s*/i, "") || null,
-          };
-          const { error } = await db.from("persons").insert(person);
-          if (error) {
-            console.error(error);
-            await sendText(from, "❌ Couldn't add that person.");
+          const [namePart, maybeDob] = details.split(",").map(s => s.trim());
+          const norm = normalizeName(namePart);
+          if (!norm) { await sendText(from, "Please include a name."); return; }
+
+          // MERGE RULE: try to reuse/merge by normalized name
+          // 1) look for existing with same normalized name
+          const { data: all } = await db.from("persons").select("*").eq("tree_id", tree.id);
+          let existing = all?.find(p => normalizeName(p.primary_name) === norm);
+
+          if (existing) {
+            // update missing DOB if provided
+            if (maybeDob && !existing.dob_dmy) {
+              await db.from("persons").update({ dob_dmy: maybeDob.replace(/^b\.\s*/i, "") }).eq("id", existing.id);
+            }
+            await sendText(from, `ℹ️ Using existing person: ${existing.primary_name}.`);
           } else {
-            await sendText(from, `✅ Added ${person.primary_name} to “${tree.name}”.`);
+            // create new
+            const { data: created, error } = await db
+              .from("persons")
+              .insert({ tree_id: tree.id, primary_name: namePart.trim(), dob_dmy: maybeDob?.replace(/^b\.\s*/i, "") || null })
+              .select()
+              .single();
+            if (error) { console.error(error); await sendText(from, "❌ Couldn't add that person."); return; }
+            existing = created;
+            await sendText(from, `✅ Added ${existing.primary_name} to “${tree.name}”.`);
+          }
+
+          // If a different record already exists that looks the same, merge (very conservative)
+          const dup = all?.find(p => p.id !== existing.id && normalizeName(p.primary_name) === norm);
+          if (dup) {
+            await mergePersons(tree.id, existing.id, dup.id);
+            await sendText(from, `🔁 Merged duplicate “${dup.primary_name}” into “${existing.primary_name}”.`);
           }
         }
 
       } else if (/^link:\s*/i.test(text)) {
-        // LINK: Alice spouse Bob
-        // LINK: Alice partner Bob
-        // LINK: Alice married to Bob
-        // LINK: Jane parent_of John
-        // LINK: Jane parent of John
+        // LINK: Alice spouse Bob | partner | married to
+        // LINK: Jane parent_of John  (also "parent of")
         const tree = await latestTreeFor(from);
-        if (!tree) {
-          await sendText(from, "Create or join a tree first (HELP).");
-        } else {
+        if (!tree) { await sendText(from, "Create or join a tree first (HELP)."); }
+        else {
           const body = text.replace(/^link:\s*/i, "").trim();
 
           // spouse/partner/married to
           let m = body.match(/^(.+?)\s+(spouse|partner|married to)\s+(.+)$/i);
           if (m) {
-            const aName = m[1];
-            const bName = m[3];
+            const aName = m[1], bName = m[3];
             const a = await upsertPersonByName(tree.id, aName);
             const b = await upsertPersonByName(tree.id, bName);
             await addRelationship(tree.id, a.id, "spouse_of", b.id);
@@ -117,14 +147,40 @@ export default async function handler(req, res) {
             // parent_of (supports "parent_of" and "parent of")
             m = body.match(/^(.+?)\s+(parent[_\s]?of)\s+(.+)$/i);
             if (m) {
-              const parentName = m[1];
-              const childName = m[3];
+              const parentName = m[1], childName = m[3];
               const parent = await upsertPersonByName(tree.id, parentName);
-              const child = await upsertPersonByName(tree.id, childName);
+              const child  = await upsertPersonByName(tree.id, childName);
               await addRelationship(tree.id, parent.id, "parent_of", child.id);
               await sendText(from, `✅ Linked ${parent.primary_name} → ${child.primary_name} (parent_of).`);
             } else {
               await sendText(from, "Try:\nLINK: Alice spouse Bob\nLINK: Jane parent_of John");
+            }
+          }
+        }
+
+      } else if (/^edit:\s*/i.test(text)) {
+        // EDIT: Old Name -> New Name
+        // EDIT: Name, b. 1960
+        const tree = await latestTreeFor(from);
+        if (!tree) { await sendText(from, "Create or join a tree first (HELP)."); }
+        else {
+          const body = text.replace(/^edit:\s*/i, "").trim();
+          let m = body.match(/^(.+?)\s*->\s*(.+)$/); // rename
+          if (m) {
+            const fromName = m[1], toName = m[2];
+            const person = await upsertPersonByName(tree.id, fromName); // find or create
+            await editPerson(tree.id, person.id, { newName: toName });
+            await sendText(from, `✏️ Renamed “${fromName}” → “${toName}”.`);
+          } else {
+            // set birth year
+            m = body.match(/^(.+?),\s*b\.\s*(.+)$/i);
+            if (m) {
+              const who = m[1], dob = m[2];
+              const person = await upsertPersonByName(tree.id, who);
+              await editPerson(tree.id, person.id, { dob_dmy: dob });
+              await sendText(from, `✏️ Updated ${person.primary_name}: b. ${dob}.`);
+            } else {
+              await sendText(from, "Try:\nEDIT: Old Name -> New Name\nEDIT: Name, b. 1960");
             }
           }
         }
@@ -171,7 +227,7 @@ export default async function handler(req, res) {
   return res.status(404).send("Not found");
 }
 
-// --- WhatsApp send helpers ---
+/* ----------------------- WhatsApp send helpers ----------------------- */
 async function sendText(to, body) {
   const resp = await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
     method: "POST",
