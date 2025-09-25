@@ -91,3 +91,50 @@ export async function latestTreeFor(phone) {
   if (error) throw error;
   return data?.[0]?.trees || null;
 }
+
+export async function latestTreeFor(phone) {
+  const { data, error } = await db
+    .from("members")
+    .select("tree_id, joined_at, trees!inner(id,name,join_code,created_at)")
+    .eq("phone", phone)
+    .order("joined_at", { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  return data?.[0]?.trees || null;
+}
+
+/**
+ * Find a person by name (case-insensitive) in the latest tree for this phone.
+ */
+export async function findPersonByName(phone, name) {
+  const tree = await latestTreeFor(phone);
+  if (!tree) return null;
+
+  const { data, error } = await db
+    .from("persons")
+    .select("*")
+    .ilike("primary_name", `%${name}%`)
+    .eq("tree_id", tree.id)
+    .limit(1);
+
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
+/**
+ * Get all people in the latest tree for this phone.
+ */
+export async function listPersonsForTree(phone) {
+  const tree = await latestTreeFor(phone);
+  if (!tree) return null;
+
+  const { data, error } = await db
+    .from("persons")
+    .select("primary_name,dob_dmy")
+    .eq("tree_id", tree.id)
+    .order("primary_name", { ascending: true });
+
+  if (error) throw error;
+  return { tree, people: data };
+}
+
