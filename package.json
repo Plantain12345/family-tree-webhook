@@ -5,6 +5,7 @@
   "engines": { "node": ">=20" },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
-    "openai": "^4.56.0"
+    "openai": "^4.56.0",
+    "cytoscape": "^3.27.0"
   }
 }
