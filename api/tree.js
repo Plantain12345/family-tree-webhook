@@ -1,6 +1,4 @@
 // api/tree.js
-// GET /api/tree?code=ABC123  -> { tree, nodes, edges }
-
 import { db } from "./_db.js";
 
 export default async function handler(req, res) {
@@ -15,33 +13,40 @@ export default async function handler(req, res) {
       .select("id, name, join_code, created_at")
       .eq("join_code", code)
       .single();
-    if (tErr || !tree) return res.status(404).json({ error: "Tree not found" });
 
-    const [{ data: people }, { data: rels }] = await Promise.all([
+    if (tErr || !tree) {
+      console.log("API /tree: not found or error for code", code, tErr);
+      return res.status(404).json({ error: "Tree not found" });
+    }
+
+    const [{ data: people, error: pErr }, { data: rels, error: rErr }] = await Promise.all([
       db.from("persons").select("id, primary_name, dob_dmy").eq("tree_id", tree.id),
-      db.from("relationships").select("a, b, kind").eq("tree_id", tree.id)
+      db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
     ]);
 
-    // Build nodes/edges for Cytoscape
-    const nodes = (people || []).map(p => ({
-      data: {
-        id: p.id,
-        label: p.primary_name + (p.dob_dmy ? `\n(b. ${p.dob_dmy})` : "")
-      }
+    if (pErr || rErr) {
+      console.log("API /tree persons/relationships error", pErr, rErr);
+      return res.status(500).json({ error: "Query error" });
+    }
+
+    const nodes = (people || []).map((p) => ({
+      data: { id: p.id, label: p.primary_name + (p.dob_dmy ? `\n(b. ${p.dob_dmy})` : "") },
     }));
 
-    const edges = (rels || []).map(r => ({
-      data: {
-        id: `${r.a}_${r.kind}_${r.b}`,
-        source: r.a,
-        target: r.b,
-        kind: r.kind
-      }
+    const edges = (rels || []).map((r) => ({
+      data: { id: `${r.a}_${r.kind}_${r.b}`, source: r.a, target: r.b, kind: r.kind },
     }));
 
-    return res.status(200).json({ tree: { id: tree.id, name: tree.name, code: tree.join_code }, nodes, edges });
+    const hasData = nodes.length > 0 || edges.length > 0;
+
+    return res.status(200).json({
+      tree: { id: tree.id, name: tree.name, code: tree.join_code },
+      nodes,
+      edges,
+      hasData,
+    });
   } catch (e) {
-    console.error("tree api error:", e);
+    console.error("API /tree fatal error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 }
