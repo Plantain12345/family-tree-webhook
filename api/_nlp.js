@@ -6,6 +6,7 @@ import OpenAI from "openai";
 
 // Single client reused by serverless runtime
 const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+console.log("OPENAI key present?", !!process.env.OPENAI_API_KEY);
 
 // Define ONE tool the model can "call" with a strict schema
 const tools = [
