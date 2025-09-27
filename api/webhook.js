@@ -58,23 +58,25 @@ export default async function handler(req, res) {
   const replies = [];
 
   for (const op of ops) {
-    // help
+    // HELP
     if (op.op === "help") {
       replies.push(helpText());
       continue;
     }
 
+    // LEAVE
     if (op.op === "leave") {
       const r = await leaveCurrentTree(from);
       replies.push(r.left ? `✅ You left “${r.tree.name}”.` : "You’re not in any tree yet.");
       continue;
     }
 
+    // NEW TREE (now returns {tree, tip})
     if (op.op === "new_tree") {
       const name = (op.name || "My Family").slice(0, 80);
       try {
-        const tree = await createTree(name, from);
-        replies.push(`✅ Created “${tree.name}”. Code: ${tree.join_code}\nLive tree: ${treeUrl(tree.join_code)}\nOthers can reply: JOIN ${tree.join_code}`);
+        const { tree, tip } = await createTree(name, from);
+        replies.push(`✅ Created “${tree.name}”. Code: ${tree.join_code}\n${tip}`);
       } catch (e) {
         console.error(e);
         replies.push("❌ Couldn't create the tree. Try a different name.");
@@ -82,17 +84,19 @@ export default async function handler(req, res) {
       continue;
     }
 
+    // JOIN TREE (now returns {tree, tip})
     if (op.op === "join_tree") {
       const code = (op.code || "").toUpperCase();
-      const tree = await joinTreeByCode(code, from);
+      const { tree, tip } = await joinTreeByCode(code, from);
       replies.push(
         tree
-          ? `✅ Switched to “${tree.name}”. Live tree: ${treeUrl(tree.join_code)}\nYou can ADD / LINK / VIEW now.`
+          ? `✅ Switched to “${tree.name}”.\n${tip}`
           : "❌ Code not found. Ask the owner to re-share."
       );
       continue;
     }
 
+    // VIEW TREE
     if (op.op === "view_tree") {
       const result = await listPersonsForTree(from);
       if (!result) { replies.push("No tree found. Create or join one first."); continue; }
@@ -102,6 +106,7 @@ export default async function handler(req, res) {
       continue;
     }
 
+    // VIEW PERSON
     if (op.op === "view_person") {
       const result = await listPersonsForTree(from);
       if (!result) { replies.push("No tree found. Create or join one first."); continue; }
@@ -120,16 +125,18 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // all the following require an active tree
+    // ---------- All ops below require an active tree ----------
     const tree = await latestTreeFor(from);
     if (!tree) { replies.push("Create or join a tree first (type HELP)."); break; }
 
+    // ADD PERSON
     if (op.op === "add_person") {
       const p = await upsertPersonByName(tree.id, op.name, op.dob || null);
       replies.push(`✅ Added ${p.primary_name}${p.dob_dmy ? ` (b. ${p.dob_dmy})` : ""} to “${tree.name}”.`);
       continue;
     }
 
+    // LINK (spouse_of/partner_of/parent_of)
     if (op.op === "link") {
       const A = await upsertPersonByName(tree.id, op.a);
       const B = await upsertPersonByName(tree.id, op.b);
@@ -142,28 +149,30 @@ export default async function handler(req, res) {
       continue;
     }
 
+    // ADD CHILD (supports one or two parents)
     if (op.op === "add_child") {
       await addChildWithParents(tree.id, op.child, op.dob || null, op.parentA, op.parentB || null);
       replies.push(`✅ Added ${op.child}${op.dob ? ` (b. ${op.dob})` : ""} as child of ${op.parentA}${op.parentB ? " and " + op.parentB : ""}.`);
       continue;
     }
 
+    // SET DOB
     if (op.op === "set_dob") {
       const p = await upsertPersonByName(tree.id, op.name, op.dob || null);
       replies.push(`✅ Set ${p.primary_name}'s birth to ${op.dob}.`);
       continue;
     }
 
+    // RENAME (confirmation)
     if (op.op === "rename") {
-      // risky -> confirm
       const target = await findInTreeByName(tree.id, op.from) || await upsertPersonByName(tree.id, op.from);
       await savePending(from, tree.id, { type: "rename", personId: target.id, to: op.to });
       replies.push(`You want to rename “${target.primary_name}” to “${op.to}”. Reply YES to confirm, NO to cancel.`);
       continue;
     }
 
+    // DIVORCE (confirmation)
     if (op.op === "divorce") {
-      // risky -> confirm
       const A = await upsertPersonByName(tree.id, op.a);
       const B = await upsertPersonByName(tree.id, op.b);
       await savePending(from, tree.id, { type: "divorce", aId: A.id, bId: B.id });
@@ -197,50 +206,4 @@ async function runConfirmed(pending, phone) {
   await sendText(phone, "That action can't be completed.");
 }
 
-/* ---------- WhatsApp helpers ---------- */
-async function sendText(to, body) {
-  const resp = await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.WABA_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body } }),
-  });
-  if (!resp.ok) console.log("Send error:", resp.status, await resp.text());
-}
-
-async function sendMenu(to) {
-  await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.WABA_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: "What would you like to do?" },
-        action: {
-          buttons: [
-            { type: "reply", reply: { id: "NEW", title: "Start a tree" } },
-            { type: "reply", reply: { id: "JOIN", title: "Join a tree" } },
-            { type: "reply", reply: { id: "HELP", title: "Help" } }
-          ]
-        }
-      }
-    })
-  });
-}
-
-function helpText() {
-  return [
-    "I understand plain English. Try:",
-    "• “Start a new tree called Kintu Family”",
-    "• “Join code ABC123”",
-    "• “Add Alice born 1950”",
-    "• “Link Alice married to Bob”",
-    "• “Rename Link Alice to Jane”",
-    "• “Jane is Alice and Bob’s daughter born 1973”",
-    "• “Show Alice” or “Show the tree”",
-    "• “Divorce Alice and Bob” (will ask to confirm)",
-    "• “Leave tree”"
-  ].join("\n");
-}
+/* ---------- WhatsApp helpers -----*
