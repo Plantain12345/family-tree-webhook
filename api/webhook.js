@@ -34,13 +34,13 @@ export default async function handler(req, res) {
 
   // Handle YES/NO confirmations first
   const lower = text.toLowerCase();
-  if (["yes","y"].includes(lower)) {
+  if (["yes", "y"].includes(lower)) {
     const pending = await popPending(from);
     if (!pending) { await sendText(from, "Nothing pending to confirm."); return res.status(200).send("ok"); }
     await runConfirmed(pending, from);
     return res.status(200).send("ok");
   }
-  if (["no","n","cancel","stop"].includes(lower)) {
+  if (["no", "n", "cancel", "stop"].includes(lower)) {
     const pending = await popPending(from);
     if (!pending) { await sendText(from, "Nothing pending to cancel."); return res.status(200).send("ok"); }
     await sendText(from, "Okay, cancelled.");
@@ -71,7 +71,7 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // NEW TREE (now returns {tree, tip})
+    // NEW TREE (returns {tree, tip})
     if (op.op === "new_tree") {
       const name = (op.name || "My Family").slice(0, 80);
       try {
@@ -84,7 +84,7 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // JOIN TREE (now returns {tree, tip})
+    // JOIN TREE (returns {tree, tip})
     if (op.op === "join_tree") {
       const code = (op.code || "").toUpperCase();
       const { tree, tip } = await joinTreeByCode(code, from);
@@ -206,4 +206,50 @@ async function runConfirmed(pending, phone) {
   await sendText(phone, "That action can't be completed.");
 }
 
-/* ---------- WhatsApp helpers -----*
+/* ---------- WhatsApp helpers ---------- */
+async function sendText(to, body) {
+  const resp = await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.WABA_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body } }),
+  });
+  if (!resp.ok) console.log("Send error:", resp.status, await resp.text());
+}
+
+async function sendMenu(to) {
+  await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.WABA_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: "What would you like to do?" },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "NEW", title: "Start a tree" } },
+            { type: "reply", reply: { id: "JOIN", title: "Join a tree" } },
+            { type: "reply", reply: { id: "HELP", title: "Help" } }
+          ]
+        }
+      }
+    })
+  });
+}
+
+function helpText() {
+  return [
+    "I understand plain English. Try:",
+    "• “Start a new tree called Kintu Family”",
+    "• “Join code ABC123”",
+    "• “Add Alice born 1950”",
+    "• “Link Alice married to Bob”",
+    "• “Rename Link Alice to Jane”",
+    "• “Jane is Alice and Bob’s daughter born 1973”",
+    "• “Show Alice” or “Show the tree”",
+    "• “Divorce Alice and Bob” (will ask to confirm)",
+    "• “Leave tree”"
+  ].join("\n");
+}
