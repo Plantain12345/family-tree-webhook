@@ -1,7 +1,10 @@
 // api/_db.js
 import { createClient } from "@supabase/supabase-js";
 
-export const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+export const db = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 /* ------------------------------ utils ------------------------------ */
 
@@ -14,20 +17,39 @@ export function normalizeName(s) {
   return (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+// Used in tips we send back to WhatsApp users
+const BASE_URL = "https://family-tree-webhook.vercel.app";
+
+/* --------------------------- activation flow ------------------------ */
 /**
- * Insert a fresh membership row. Because latestTreeFor() orders by created_at DESC,
- * this makes the given tree the active tree for this phone.
+ * Insert a fresh membership row to mark a tree as the *active* one.
+ * We also upsert the (tree_id, phone) pair so the membership exists.
+ * Assumes members.joined_at defaults to now().
  */
 export async function activateTree(phone, treeId) {
-  // Ensure a membership exists (idempotent) then add a fresh row to activate.
-  await db.from("members").upsert({ tree_id: treeId, phone }, { onConflict: "tree_id,phone" });
-  await db.from("members").insert({ tree_id: treeId, phone }); // the "activation" row
+  const up = await db
+    .from("members")
+    .upsert({ tree_id: treeId, phone }, { onConflict: "tree_id,phone" })
+    .select()
+    .maybeSingle();
+  if (up.error) {
+    console.error("activateTree upsert error:", up.error);
+    throw up.error;
+  }
+
+  const ins = await db
+    .from("members")
+    .insert({ tree_id: treeId, phone }) // joined_at = now()
+    .select()
+    .maybeSingle();
+  if (ins.error) {
+    console.error("activateTree insert error:", ins.error);
+    throw ins.error;
+  }
 }
 
-/* --------------------------- tree selection -------------------------- */
-
 /**
- * Create a tree, make the creator an active member, and return a helpful tip to send.
+ * Create a tree, make creator active, return a helpful tip.
  * @returns {Promise<{tree: any, tip: string}>}
  */
 export async function createTree(name, ownerPhone) {
@@ -44,16 +66,21 @@ export async function createTree(name, ownerPhone) {
   const tip =
     `You’re now active in “${tree.name}”. ` +
     `Try: Add Alice born 1950\n` +
-    `Live tree: https://family-tree-webhook.vercel.app/tree.html?code=${tree.join_code}`;
+    `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
   return { tree, tip };
 }
 
 /**
- * Join by code, make this the active tree for the user, and return a helpful tip to send.
+ * Join by code, make that tree active, return a helpful tip.
  * @returns {Promise<{tree: any|null, tip?: string}>}
  */
 export async function joinTreeByCode(code, phone) {
-  const { data: tree } = await db.from("trees").select("*").eq("join_code", code).single();
+  const t = await db.from("trees").select("*").eq("join_code", code).maybeSingle();
+  if (t.error) {
+    console.error("joinTreeByCode lookup error:", t.error);
+    return { tree: null };
+  }
+  const tree = t.data;
   if (!tree) return { tree: null };
 
   await activateTree(phone, tree.id);
@@ -61,24 +88,43 @@ export async function joinTreeByCode(code, phone) {
   const tip =
     `You’re now active in “${tree.name}”. ` +
     `Try: Add Alice born 1950\n` +
-    `Live tree: https://family-tree-webhook.vercel.app/tree.html?code=${tree.join_code}`;
+    `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
   return { tree, tip };
 }
 
 /**
- * Returns the currently active (most recently “activated”) tree for this phone.
+ * Return the *currently active* (most recently “activated”) tree for a phone.
+ * Uses members.joined_at (your schema) instead of created_at.
  */
 export async function latestTreeFor(phone) {
-  const { data } = await db
+  const m = await db
     .from("members")
-    .select("tree_id, trees!inner(id, name, join_code)")
+    .select("tree_id, joined_at")
     .eq("phone", phone)
-    .order("created_at", { ascending: false })
-    .limit(1);
-  return data?.[0]?.trees || null;
+    .order("joined_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (m.error) {
+    console.error("latestTreeFor members error:", m.error);
+    return null;
+  }
+  if (!m.data) return null;
+
+  const t = await db
+    .from("trees")
+    .select("id, name, join_code")
+    .eq("id", m.data.tree_id)
+    .maybeSingle();
+
+  if (t.error) {
+    console.error("latestTreeFor trees error:", t.error);
+    return null;
+  }
+  return t.data || null;
 }
 
-/* ------------------------------ listing ----------------------------- */
+/* ------------------------------ listings --------------------------- */
 
 export async function listPersonsForTree(phone) {
   const tree = await latestTreeFor(phone);
@@ -90,7 +136,7 @@ export async function listPersonsForTree(phone) {
   return { tree, people: people || [], rels: rels || [] };
 }
 
-/* ------------------------------ persons ----------------------------- */
+/* ------------------------------ persons ---------------------------- */
 
 export async function findInTreeByName(treeId, q) {
   const norm = normalizeName(q);
@@ -118,14 +164,16 @@ export async function upsertPersonByName(treeId, name, dob = null) {
   return created;
 }
 
-/* --------------------------- relationships -------------------------- */
+/* --------------------------- relationships ------------------------- */
 
-function minmax(a, b) { return a < b ? [a, b] : [b, a]; }
+function minmax(a, b) {
+  return a < b ? [a, b] : [b, a];
+}
 
 /**
- * spouse_of / partner_of are stored as a single, undirected edge (no duplicates).
- * parent_of is directed (a -> b).
- * divorced_from deletes the spouse_of edge between the pair.
+ * spouse_of / partner_of: single undirected edge (no duplicates).
+ * parent_of: directed (a -> b).
+ * divorced_from: remove spouse_of between the pair.
  */
 export async function addRelationship(treeId, aId, kind, bId) {
   if (kind === "spouse_of" || kind === "partner_of") {
@@ -163,12 +211,15 @@ export async function editPerson(treeId, personId, { newName, dob_dmy }) {
   const patch = {};
   if (newName) patch.primary_name = newName.trim();
   if (dob_dmy) patch.dob_dmy = dob_dmy;
-  if (Object.keys(patch).length) await db.from("persons").update(patch).eq("id", personId);
+  if (Object.keys(patch).length) {
+    const r = await db.from("persons").update(patch).eq("id", personId);
+    if (r.error) throw r.error;
+  }
 }
 
 export async function personSummary(treeId, personId) {
   const [{ data: me }, { data: rels }, { data: ppl }] = await Promise.all([
-    db.from("persons").select("*").eq("id", personId).single(),
+    db.from("persons").select("*").eq("id", personId).maybeSingle(),
     db.from("relationships").select("a,b,kind").eq("tree_id", treeId),
     db.from("persons").select("id,primary_name").eq("tree_id", treeId),
   ]);
