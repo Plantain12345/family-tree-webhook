@@ -3,6 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 
 export const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
+/* ------------------------------ utils ------------------------------ */
+
 export function makeJoinCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
@@ -12,14 +14,60 @@ export function normalizeName(s) {
   return (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-export async function createTree(name, ownerPhone) {
-  const code = makeJoinCode();
-  const { data: tree, error } = await db.from("trees").insert({ name, join_code: code }).select().single();
-  if (error) throw error;
-  await db.from("members").insert({ tree_id: tree.id, phone: ownerPhone });
-  return tree;
+/**
+ * Insert a fresh membership row. Because latestTreeFor() orders by created_at DESC,
+ * this makes the given tree the active tree for this phone.
+ */
+export async function activateTree(phone, treeId) {
+  // Ensure a membership exists (idempotent) then add a fresh row to activate.
+  await db.from("members").upsert({ tree_id: treeId, phone }, { onConflict: "tree_id,phone" });
+  await db.from("members").insert({ tree_id: treeId, phone }); // the "activation" row
 }
 
+/* --------------------------- tree selection -------------------------- */
+
+/**
+ * Create a tree, make the creator an active member, and return a helpful tip to send.
+ * @returns {Promise<{tree: any, tip: string}>}
+ */
+export async function createTree(name, ownerPhone) {
+  const code = makeJoinCode();
+  const { data: tree, error } = await db
+    .from("trees")
+    .insert({ name, join_code: code })
+    .select()
+    .single();
+  if (error) throw error;
+
+  await activateTree(ownerPhone, tree.id);
+
+  const tip =
+    `You’re now active in “${tree.name}”. ` +
+    `Try: Add Alice born 1950\n` +
+    `Live tree: https://family-tree-webhook.vercel.app/tree.html?code=${tree.join_code}`;
+  return { tree, tip };
+}
+
+/**
+ * Join by code, make this the active tree for the user, and return a helpful tip to send.
+ * @returns {Promise<{tree: any|null, tip?: string}>}
+ */
+export async function joinTreeByCode(code, phone) {
+  const { data: tree } = await db.from("trees").select("*").eq("join_code", code).single();
+  if (!tree) return { tree: null };
+
+  await activateTree(phone, tree.id);
+
+  const tip =
+    `You’re now active in “${tree.name}”. ` +
+    `Try: Add Alice born 1950\n` +
+    `Live tree: https://family-tree-webhook.vercel.app/tree.html?code=${tree.join_code}`;
+  return { tree, tip };
+}
+
+/**
+ * Returns the currently active (most recently “activated”) tree for this phone.
+ */
 export async function latestTreeFor(phone) {
   const { data } = await db
     .from("members")
@@ -30,12 +78,7 @@ export async function latestTreeFor(phone) {
   return data?.[0]?.trees || null;
 }
 
-export async function joinTreeByCode(code, phone) {
-  const { data: tree } = await db.from("trees").select("*").eq("join_code", code).single();
-  if (!tree) return null;
-  await db.from("members").upsert({ tree_id: tree.id, phone }, { onConflict: "tree_id,phone" });
-  return tree;
-}
+/* ------------------------------ listing ----------------------------- */
 
 export async function listPersonsForTree(phone) {
   const tree = await latestTreeFor(phone);
@@ -46,6 +89,8 @@ export async function listPersonsForTree(phone) {
   ]);
   return { tree, people: people || [], rels: rels || [] };
 }
+
+/* ------------------------------ persons ----------------------------- */
 
 export async function findInTreeByName(treeId, q) {
   const norm = normalizeName(q);
@@ -73,11 +118,17 @@ export async function upsertPersonByName(treeId, name, dob = null) {
   return created;
 }
 
+/* --------------------------- relationships -------------------------- */
+
 function minmax(a, b) { return a < b ? [a, b] : [b, a]; }
 
+/**
+ * spouse_of / partner_of are stored as a single, undirected edge (no duplicates).
+ * parent_of is directed (a -> b).
+ * divorced_from deletes the spouse_of edge between the pair.
+ */
 export async function addRelationship(treeId, aId, kind, bId) {
   if (kind === "spouse_of" || kind === "partner_of") {
-    // store ONE undirected spouse edge
     const [x, y] = minmax(aId, bId);
     const { error } = await db
       .from("relationships")
@@ -139,6 +190,8 @@ export async function personSummary(treeId, personId) {
   };
 }
 
+/* ------------------------------ leaving ----------------------------- */
+
 export async function leaveCurrentTree(phone) {
   const tree = await latestTreeFor(phone);
   if (!tree) return { left: false };
@@ -146,7 +199,7 @@ export async function leaveCurrentTree(phone) {
   return { left: true, tree };
 }
 
-/* ---------- confirmations (pending actions) ---------- */
+/* --------------------------- confirmations -------------------------- */
 
 export async function savePending(phone, treeId, actionObj) {
   const { data, error } = await db
