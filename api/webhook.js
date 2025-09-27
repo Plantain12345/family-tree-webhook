@@ -1,19 +1,21 @@
 // api/webhook.js
 import {
-  db,
   createTree, joinTreeByCode, latestTreeFor,
   listPersonsForTree, findInTreeByName, upsertPersonByName,
   addRelationship, addChildWithParents, editPerson,
   personSummary, leaveCurrentTree,
-  savePending, popPending, normalizeName
+  savePending, popPending,
+  getUserState, setLastPerson, setActiveTreeState
 } from "./_db.js";
 
 import { parseOps } from "./_nlp.js";
 
 const BASE_URL = "https://family-tree-webhook.vercel.app";
 const VERIFY_TOKEN = "myfamilytree123";
-
 function treeUrl(code) { return `${BASE_URL}/tree.html?code=${encodeURIComponent(code)}`; }
+
+const PRONOUNS = new Set(["his","her","their","him","hers","theirs","my","our","me","i"]);
+const looksLikePronoun = s => PRONOUNS.has((s||"").trim().toLowerCase());
 
 export default async function handler(req, res) {
   // webhook verify
@@ -22,7 +24,6 @@ export default async function handler(req, res) {
     if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
     return res.status(403).send("Forbidden");
   }
-
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const change = req.body?.entry?.[0]?.changes?.[0]?.value;
@@ -31,51 +32,60 @@ export default async function handler(req, res) {
 
   const from = msg.from;
   const text = (msg.text?.body || msg.interactive?.button_reply?.id || "").trim();
-
-  // Handle YES/NO confirmations first
   const lower = text.toLowerCase();
-  if (["yes", "y"].includes(lower)) {
+
+  // YES/NO confirmations first
+  if (["yes","y"].includes(lower)) {
     const pending = await popPending(from);
     if (!pending) { await sendText(from, "Nothing pending to confirm."); return res.status(200).send("ok"); }
     await runConfirmed(pending, from);
     return res.status(200).send("ok");
   }
-  if (["no", "n", "cancel", "stop"].includes(lower)) {
+  if (["no","n","cancel","stop"].includes(lower)) {
     const pending = await popPending(from);
     if (!pending) { await sendText(from, "Nothing pending to cancel."); return res.status(200).send("ok"); }
     await sendText(from, "Okay, cancelled.");
     return res.status(200).send("ok");
   }
 
-  // Parse ops via LLM (LLM-first)
-  const ops = await parseOps(text);
+  // Build context for the LLM
+  const active = await latestTreeFor(from);            // may be null
+  const state  = await getUserState(from);             // { last_person_name, ... } or null
+
+  let ctx = { active_tree_name: active?.name || null, last_person_name: state?.last_person_name || null, people: [], relationships: [] };
+  if (active) {
+    const snap = await listPersonsForTree(from);       // returns { tree, people, rels }
+    ctx.people = (snap?.people || []).map(p => p.primary_name);
+    ctx.relationships = snap?.rels || [];
+  }
+
+  // LLM-first parsing (let the model resolve pronouns using ctx)
+  let ops = await parseOps(text, ctx);
   if (!ops || !ops.length) {
-    await sendText(from, "I didn’t get that. Try: “Start a new tree called Kintu Family”, “Join code ABC123”, “Add Alice born 1950”, “Link Alice married to Bob”, “Show Alice”. Type HELP for more.");
+    await sendText(from, "I didn’t get that. Try: “Start a new tree called Kintu Family”, “Join code ABC123”, “Add Alice born 1950”, “Add his son Zaake born 1983”, “Link Alice married to Bob”, “Show Alice”. Type HELP for more.");
     await sendMenu(from);
     return res.status(200).send("ok");
   }
 
+  // Safety: don't create a person literally named a pronoun.
+  ops = ops.filter(op => !(op.op === "add_person" && looksLikePronoun(op.name)));
+
   const replies = [];
 
   for (const op of ops) {
-    // HELP
-    if (op.op === "help") {
-      replies.push(helpText());
-      continue;
-    }
+    if (op.op === "help") { replies.push(helpText()); continue; }
 
-    // LEAVE
     if (op.op === "leave") {
       const r = await leaveCurrentTree(from);
       replies.push(r.left ? `✅ You left “${r.tree.name}”.` : "You’re not in any tree yet.");
       continue;
     }
 
-    // NEW TREE (returns {tree, tip})
     if (op.op === "new_tree") {
       const name = (op.name || "My Family").slice(0, 80);
       try {
         const { tree, tip } = await createTree(name, from);
+        await setActiveTreeState(from, tree.id);
         replies.push(`✅ Created “${tree.name}”. Code: ${tree.join_code}\n${tip}`);
       } catch (e) {
         console.error(e);
@@ -84,19 +94,14 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // JOIN TREE (returns {tree, tip})
     if (op.op === "join_tree") {
       const code = (op.code || "").toUpperCase();
       const { tree, tip } = await joinTreeByCode(code, from);
-      replies.push(
-        tree
-          ? `✅ Switched to “${tree.name}”.\n${tip}`
-          : "❌ Code not found. Ask the owner to re-share."
-      );
+      replies.push(tree ? `✅ Switched to “${tree.name}”.\n${tip}` : "❌ Code not found. Ask the owner to re-share.");
+      if (tree) await setActiveTreeState(from, tree.id);
       continue;
     }
 
-    // VIEW TREE
     if (op.op === "view_tree") {
       const result = await listPersonsForTree(from);
       if (!result) { replies.push("No tree found. Create or join one first."); continue; }
@@ -106,7 +111,6 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // VIEW PERSON
     if (op.op === "view_person") {
       const result = await listPersonsForTree(from);
       if (!result) { replies.push("No tree found. Create or join one first."); continue; }
@@ -122,21 +126,21 @@ export default async function handler(req, res) {
           `Live tree: ${treeUrl(result.tree.join_code)}`
         ].filter(Boolean).join("\n")
       );
+      await setLastPerson(from, result.tree.id, person.id, person.primary_name);
       continue;
     }
 
-    // ---------- All ops below require an active tree ----------
+    // ---- everything below needs an active tree
     const tree = await latestTreeFor(from);
     if (!tree) { replies.push("Create or join a tree first (type HELP)."); break; }
 
-    // ADD PERSON
     if (op.op === "add_person") {
       const p = await upsertPersonByName(tree.id, op.name, op.dob || null);
       replies.push(`✅ Added ${p.primary_name}${p.dob_dmy ? ` (b. ${p.dob_dmy})` : ""} to “${tree.name}”.`);
+      await setLastPerson(from, tree.id, p.id, p.primary_name);
       continue;
     }
 
-    // LINK (spouse_of/partner_of/parent_of)
     if (op.op === "link") {
       const A = await upsertPersonByName(tree.id, op.a);
       const B = await upsertPersonByName(tree.id, op.b);
@@ -146,24 +150,24 @@ export default async function handler(req, res) {
           ? `✅ Linked ${A.primary_name} → ${B.primary_name} (parent_of).`
           : `✅ Linked ${A.primary_name} ↔ ${B.primary_name} (${op.kind.replace("_"," ")}).`
       );
+      await setLastPerson(from, tree.id, B.id, B.primary_name);
       continue;
     }
 
-    // ADD CHILD (supports one or two parents)
     if (op.op === "add_child") {
-      await addChildWithParents(tree.id, op.child, op.dob || null, op.parentA, op.parentB || null);
+      const child = await addChildWithParents(tree.id, op.child, op.dob || null, op.parentA, op.parentB || null);
       replies.push(`✅ Added ${op.child}${op.dob ? ` (b. ${op.dob})` : ""} as child of ${op.parentA}${op.parentB ? " and " + op.parentB : ""}.`);
+      await setLastPerson(from, tree.id, child.id, child.primary_name);
       continue;
     }
 
-    // SET DOB
     if (op.op === "set_dob") {
       const p = await upsertPersonByName(tree.id, op.name, op.dob || null);
       replies.push(`✅ Set ${p.primary_name}'s birth to ${op.dob}.`);
+      await setLastPerson(from, tree.id, p.id, p.primary_name);
       continue;
     }
 
-    // RENAME (confirmation)
     if (op.op === "rename") {
       const target = await findInTreeByName(tree.id, op.from) || await upsertPersonByName(tree.id, op.from);
       await savePending(from, tree.id, { type: "rename", personId: target.id, to: op.to });
@@ -171,7 +175,6 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // DIVORCE (confirmation)
     if (op.op === "divorce") {
       const A = await upsertPersonByName(tree.id, op.a);
       const B = await upsertPersonByName(tree.id, op.b);
@@ -181,7 +184,6 @@ export default async function handler(req, res) {
     }
   }
 
-  // send combined reply (split if long)
   const out = replies.join("\n\n");
   await sendText(from, out.length > 3900 ? out.slice(0, 3900) : out);
   return res.status(200).send("ok");
@@ -219,7 +221,7 @@ async function sendText(to, body) {
 async function sendMenu(to) {
   await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${process.env.WABA_TOKEN}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${process.env.WABA_TOKEN}", "Content-Type": "application/json" },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
@@ -245,9 +247,8 @@ function helpText() {
     "• “Start a new tree called Kintu Family”",
     "• “Join code ABC123”",
     "• “Add Alice born 1950”",
+    "• “Add his son Zaake born 1983” (pronouns resolved to the last person you mentioned)",
     "• “Link Alice married to Bob”",
-    "• “Rename Link Alice to Jane”",
-    "• “Jane is Alice and Bob’s daughter born 1973”",
     "• “Show Alice” or “Show the tree”",
     "• “Divorce Alice and Bob” (will ask to confirm)",
     "• “Leave tree”"
