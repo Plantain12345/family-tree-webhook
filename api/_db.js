@@ -27,26 +27,29 @@ const BASE_URL = "https://family-tree-webhook.vercel.app";
  * Assumes members.joined_at defaults to now().
  */
 export async function activateTree(phone, treeId) {
-  const up = await db
+  // Ensure at least one membership exists (no UPSERT needed)
+  const existing = await db
     .from("members")
-    .upsert({ tree_id: treeId, phone }, { onConflict: "tree_id,phone" })
-    .select()
-    .maybeSingle();
-  if (up.error) {
-    console.error("activateTree upsert error:", up.error);
-    throw up.error;
+    .select("id")
+    .eq("tree_id", treeId)
+    .eq("phone", phone)
+    .limit(1);
+
+  if (existing.error) {
+    console.error("activateTree select error:", existing.error);
+    throw existing.error;
   }
 
-  const ins = await db
-    .from("members")
-    .insert({ tree_id: treeId, phone }) // joined_at = now()
-    .select()
-    .maybeSingle();
-  if (ins.error) {
-    console.error("activateTree insert error:", ins.error);
-    throw ins.error;
+  if (!existing.data?.length) {
+    const mk = await db.from("members").insert({ tree_id: treeId, phone }).select().maybeSingle();
+    if (mk.error) { console.error("activateTree ensure-insert error:", mk.error); throw mk.error; }
   }
+
+  // Insert a fresh row to mark this tree as the *active* one
+  const ins = await db.from("members").insert({ tree_id: treeId, phone }).select().maybeSingle();
+  if (ins.error) { console.error("activateTree activation-insert error:", ins.error); throw ins.error; }
 }
+
 
 /**
  * Create a tree, make creator active, return a helpful tip.
