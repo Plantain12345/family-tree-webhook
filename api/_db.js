@@ -1,246 +1,172 @@
 // api/_db.js
-// Requires Vercel env vars: SUPABASE_URL, SUPABASE_ANON_KEY
 import { createClient } from "@supabase/supabase-js";
 
 export const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-
-/* ----------------------------- utils ----------------------------- */
 
 export function makeJoinCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
 
-export function normalizeName(name) {
-  return (name || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+export function normalizeName(s) {
+  return (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
-
-/* --------------------------- core entities --------------------------- */
 
 export async function createTree(name, ownerPhone) {
   const code = makeJoinCode();
-  const { data: tree, error } = await db
-    .from("trees")
-    .insert({ name, join_code: code })
-    .select()
-    .single();
+  const { data: tree, error } = await db.from("trees").insert({ name, join_code: code }).select().single();
   if (error) throw error;
-
-  // create membership
-  const { error: mErr } = await db.from("members").insert({ tree_id: tree.id, phone: ownerPhone });
-  if (mErr) throw mErr;
-
-  return tree;
-}
-
-/** Join OR switch to a tree by code (idempotent). */
-export async function joinTreeByCode(code, phone) {
-  const { data: tree, error } = await db
-    .from("trees")
-    .select("*")
-    .eq("join_code", code.toUpperCase())
-    .single();
-
-  if (error) {
-    if (error.code === "PGRST116") return null; // not found
-    throw error;
-  }
-  if (!tree) return null;
-
-  // try insert membership
-  const { error: insErr } = await db
-    .from("members")
-    .insert({ tree_id: tree.id, phone });
-  if (insErr?.code === "23505") {
-    // already a member -> "switch" by bumping joined_at
-    await db.from("members")
-      .update({ joined_at: new Date().toISOString() })
-      .eq("tree_id", tree.id)
-      .eq("phone", phone);
-  } else if (insErr) {
-    throw insErr;
-  }
-
+  await db.from("members").insert({ tree_id: tree.id, phone: ownerPhone });
   return tree;
 }
 
 export async function latestTreeFor(phone) {
-  const { data, error } = await db
+  const { data } = await db
     .from("members")
-    .select("tree_id, joined_at, trees!inner(id,name,join_code,created_at)")
+    .select("tree_id, trees!inner(id, name, join_code)")
     .eq("phone", phone)
-    .order("joined_at", { ascending: false })
+    .order("created_at", { ascending: false })
     .limit(1);
-  if (error) throw error;
   return data?.[0]?.trees || null;
 }
 
-/* --------------------------- people helpers -------------------------- */
-
-/** Find a person by partial name in a tree. */
-export async function findPersonByName(phone, name) {
-  const tree = await latestTreeFor(phone);
+export async function joinTreeByCode(code, phone) {
+  const { data: tree } = await db.from("trees").select("*").eq("join_code", code).single();
   if (!tree) return null;
-
-  const { data, error } = await db
-    .from("persons")
-    .select("*")
-    .eq("tree_id", tree.id)
-    .ilike("primary_name", `%${name}%`)
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (error) throw error;
-  return data?.[0] || null;
+  await db.from("members").upsert({ tree_id: tree.id, phone }, { onConflict: "tree_id,phone" });
+  return tree;
 }
 
-/** List all people in the user’s latest tree. */
 export async function listPersonsForTree(phone) {
   const tree = await latestTreeFor(phone);
   if (!tree) return null;
-
-  const { data, error } = await db
-    .from("persons")
-    .select("id,primary_name,dob_dmy")
-    .eq("tree_id", tree.id)
-    .order("primary_name", { ascending: true });
-  if (error) throw error;
-  return { tree, people: data };
+  const [{ data: people }, { data: rels }] = await Promise.all([
+    db.from("persons").select("id, primary_name, dob_dmy").eq("tree_id", tree.id),
+    db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
+  ]);
+  return { tree, people: people || [], rels: rels || [] };
 }
 
-/** Strict find by normalized name; otherwise create. */
-export async function upsertPersonByName(treeId, name) {
+export async function findInTreeByName(treeId, q) {
+  const norm = normalizeName(q);
+  const { data: ppl } = await db.from("persons").select("*").eq("tree_id", treeId);
+  return ppl?.find((p) => normalizeName(p.primary_name) === norm) || null;
+}
+
+export async function upsertPersonByName(treeId, name, dob = null) {
   const norm = normalizeName(name);
-  if (!norm) throw new Error("Name required");
-
-  // try exact normalized match
-  const { data: existing, error: qErr } = await db
+  const { data: all } = await db.from("persons").select("*").eq("tree_id", treeId);
+  let person = all?.find((p) => normalizeName(p.primary_name) === norm);
+  if (person) {
+    if (dob && !person.dob_dmy) {
+      await db.from("persons").update({ dob_dmy: dob }).eq("id", person.id);
+      person.dob_dmy = dob;
+    }
+    return person;
+  }
+  const { data: created, error } = await db
     .from("persons")
-    .select("*")
-    .eq("tree_id", treeId)
-    .ilike("primary_name", name.trim())
-    .limit(1);
-  if (qErr) throw qErr;
-  if (existing?.[0]) return existing[0];
-
-  // fall back: simple prefix match on normalized form
-  const { data: all, error: allErr } = await db
-    .from("persons")
-    .select("*")
-    .eq("tree_id", treeId);
-  if (allErr) throw allErr;
-
-  const maybe = all?.find(p => normalizeName(p.primary_name) === norm);
-  if (maybe) return maybe;
-
-  // create new
-  const { data: created, error: insErr } = await db
-    .from("persons")
-    .insert({ tree_id: treeId, primary_name: name.trim() })
+    .insert({ tree_id: treeId, primary_name: name.trim(), dob_dmy: dob })
     .select()
     .single();
-  if (insErr) throw insErr;
+  if (error) throw error;
   return created;
 }
 
-/** Merge B into A (keepId <- dupId): move relationships & delete dup. */
-export async function mergePersons(treeId, keepId, dupId) {
-  if (keepId === dupId) return { merged: false };
+function minmax(a, b) { return a < b ? [a, b] : [b, a]; }
 
-  // re-point relationships
-  await db.from("relationships").update({ a: keepId }).eq("tree_id", treeId).eq("a", dupId);
-  await db.from("relationships").update({ b: keepId }).eq("tree_id", treeId).eq("b", dupId);
-
-  // delete duplicate
-  await db.from("persons").delete().eq("tree_id", treeId).eq("id", dupId);
-  return { merged: true };
+export async function addRelationship(treeId, aId, kind, bId) {
+  if (kind === "spouse_of" || kind === "partner_of") {
+    // store ONE undirected spouse edge
+    const [x, y] = minmax(aId, bId);
+    const { error } = await db
+      .from("relationships")
+      .upsert({ tree_id: treeId, a: x, b: y, kind: "spouse_of" }, { onConflict: "a,b,kind" });
+    if (error && error.code !== "23505") throw error;
+    return;
+  }
+  if (kind === "parent_of") {
+    const { error } = await db
+      .from("relationships")
+      .upsert({ tree_id: treeId, a: aId, b: bId, kind: "parent_of" }, { onConflict: "tree_id,a,b,kind" });
+    if (error && error.code !== "23505") throw error;
+    return;
+  }
+  if (kind === "divorced_from") {
+    const [x, y] = minmax(aId, bId);
+    await db.from("relationships").delete().match({ tree_id: treeId, a: x, b: y, kind: "spouse_of" });
+  }
 }
 
-/** Simple edit: rename and/or set dob_dmy */
+export async function addChildWithParents(treeId, childName, dob, parentAName, parentBName) {
+  const child = await upsertPersonByName(treeId, childName, dob || null);
+  const pa = await upsertPersonByName(treeId, parentAName);
+  let pb = null;
+  if (parentBName) pb = await upsertPersonByName(treeId, parentBName);
+  await addRelationship(treeId, pa.id, "parent_of", child.id);
+  if (pb) await addRelationship(treeId, pb.id, "parent_of", child.id);
+  return child;
+}
+
 export async function editPerson(treeId, personId, { newName, dob_dmy }) {
   const patch = {};
   if (newName) patch.primary_name = newName.trim();
-  if (dob_dmy !== undefined) patch.dob_dmy = dob_dmy;
-  if (!Object.keys(patch).length) return { ok: true };
-
-  const { error } = await db.from("persons").update(patch).eq("tree_id", treeId).eq("id", personId);
-  if (error) throw error;
-  return { ok: true };
+  if (dob_dmy) patch.dob_dmy = dob_dmy;
+  if (Object.keys(patch).length) await db.from("persons").update(patch).eq("id", personId);
 }
 
-/* ------------------------- relationship helpers ------------------------ */
-
-export async function addRelationship(treeId, aId, kind, bId) {
-  // Prevent exact duplicate
-  const { data: existing } = await db
-    .from("relationships")
-    .select("id")
-    .eq("tree_id", treeId)
-    .eq("a", aId)
-    .eq("b", bId)
-    .eq("kind", kind)
-    .limit(1);
-  if (!existing?.[0]) {
-    await db.from("relationships").insert({ tree_id: treeId, a: aId, b: bId, kind });
-  }
-  // Add reverse for symmetric kinds
-  if (kind === "spouse_of" || kind === "partner_of") {
-    const { data: back } = await db
-      .from("relationships")
-      .select("id")
-      .eq("tree_id", treeId)
-      .eq("a", bId)
-      .eq("b", aId)
-      .eq("kind", kind)
-      .limit(1);
-    if (!back?.[0]) {
-      await db.from("relationships").insert({ tree_id: treeId, a: bId, b: aId, kind });
+export async function personSummary(treeId, personId) {
+  const [{ data: me }, { data: rels }, { data: ppl }] = await Promise.all([
+    db.from("persons").select("*").eq("id", personId).single(),
+    db.from("relationships").select("a,b,kind").eq("tree_id", treeId),
+    db.from("persons").select("id,primary_name").eq("tree_id", treeId),
+  ]);
+  const nameById = new Map((ppl || []).map((p) => [p.id, p.primary_name]));
+  const spouses = new Set(), parents = new Set(), children = new Set();
+  for (const r of rels || []) {
+    if (r.kind === "spouse_of" && (r.a === personId || r.b === personId))
+      spouses.add(nameById.get(r.a === personId ? r.b : r.a));
+    if (r.kind === "parent_of") {
+      if (r.a === personId) children.add(nameById.get(r.b));
+      if (r.b === personId) parents.add(nameById.get(r.a));
     }
   }
-  return { ok: true };
-}
-
-/** Mini summary for a person. */
-export async function personSummary(treeId, personId) {
-  const spouseKinds = ["spouse_of", "partner_of"];
-
-  const { data: spouses } = await db
-    .from("relationships")
-    .select("a,b,kind, persons: b (primary_name)")
-    .eq("tree_id", treeId)
-    .eq("a", personId)
-    .in("kind", spouseKinds);
-
-  const { data: parents } = await db
-    .from("relationships")
-    .select("a,b, persons: a (primary_name)")
-    .eq("tree_id", treeId)
-    .eq("b", personId)
-    .eq("kind", "parent_of");
-
-  const { data: children } = await db
-    .from("relationships")
-    .select("a,b, persons: b (primary_name)")
-    .eq("tree_id", treeId)
-    .eq("a", personId)
-    .eq("kind", "parent_of");
-
   return {
-    spouses: spouses?.map(r => r.persons?.primary_name).filter(Boolean) || [],
-    parents: parents?.map(r => r.persons?.primary_name).filter(Boolean) || [],
-    children: children?.map(r => r.persons?.primary_name).filter(Boolean) || [],
+    me: me?.primary_name,
+    spouses: [...spouses].filter(Boolean),
+    parents: [...parents].filter(Boolean),
+    children: [...children].filter(Boolean),
   };
 }
-
-/* --------------------------- membership mgmt --------------------------- */
 
 export async function leaveCurrentTree(phone) {
   const tree = await latestTreeFor(phone);
   if (!tree) return { left: false };
-  const { error } = await db.from("members").delete().eq("tree_id", tree.id).eq("phone", phone);
-  if (error) throw error;
+  await db.from("members").delete().match({ tree_id: tree.id, phone });
   return { left: true, tree };
+}
+
+/* ---------- confirmations (pending actions) ---------- */
+
+export async function savePending(phone, treeId, actionObj) {
+  const { data, error } = await db
+    .from("pending_actions")
+    .insert({ phone, tree_id: treeId || null, action: actionObj })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function popPending(phone) {
+  const { data } = await db
+    .from("pending_actions")
+    .select("*")
+    .eq("phone", phone)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const pending = data?.[0];
+  if (!pending) return null;
+  await db.from("pending_actions").delete().eq("id", pending.id);
+  return pending;
 }
