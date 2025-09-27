@@ -53,22 +53,37 @@ export async function activateTree(phone, treeId) {
  * @returns {Promise<{tree: any, tip: string}>}
  */
 export async function createTree(name, ownerPhone) {
-  const code = makeJoinCode();
-  const { data: tree, error } = await db
-    .from("trees")
-    .insert({ name, join_code: code })
-    .select()
-    .single();
-  if (error) throw error;
+  // up to 8 attempts to avoid rare join_code collisions
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const code = makeJoinCode();
+    const ins = await db
+      .from("trees")
+      .insert({ name, join_code: code })
+      .select()
+      .maybeSingle();
 
-  await activateTree(ownerPhone, tree.id);
+    if (!ins.error && ins.data) {
+      const tree = ins.data;
+      await activateTree(ownerPhone, tree.id);
+      const tip =
+        `You’re now active in “${tree.name}”. ` +
+        `Try: Add Alice born 1950\n` +
+        `Live tree: https://family-tree-webhook.vercel.app/tree.html?code=${tree.join_code}`;
+      return { tree, tip };
+    }
 
-  const tip =
-    `You’re now active in “${tree.name}”. ` +
-    `Try: Add Alice born 1950\n` +
-    `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-  return { tree, tip };
+    // If it wasn't a unique-code collision, bubble the error immediately
+    if (ins.error?.code !== "23505") {
+      console.error("createTree insert error:", ins.error);
+      throw ins.error;
+    }
+    // else: loop and try a new code
+  }
+
+  // If we somehow failed all attempts
+  throw new Error("join_code generation collided repeatedly");
 }
+
 
 /**
  * Join by code, make that tree active, return a helpful tip.
