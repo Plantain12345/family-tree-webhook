@@ -1,349 +1,341 @@
-// api/webhook.js
-import {
-  createTree, joinTreeByCode, latestTreeFor,
-  listPersonsForTree, findInTreeByName, upsertPersonByName,
-  addRelationship, addChildWithParents, editPerson,
-  personSummary, leaveCurrentTree,
-  savePending, popPending,
-  getUserState, setLastPerson, setActiveTreeState
-} from "./_db.js";
+// api/_db.js
+import { createClient } from "@supabase/supabase-js";
 
-import { parseOps } from "./_nlp.js";
+export const db = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
+/* ------------------------------ utils ------------------------------ */
+
+export function makeJoinCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+}
+
+export function normalizeName(s) {
+  return (s || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+// Used in tips we send back to WhatsApp users
 const BASE_URL = "https://family-tree-webhook.vercel.app";
-const VERIFY_TOKEN = "myfamilytree123";
-function treeUrl(code) { return `${BASE_URL}/tree.html?code=${encodeURIComponent(code)}`; }
 
-const PRONOUNS = new Set(["his","her","their","him","hers","theirs","my","our","me","i"]);
-const looksLikePronoun = s => PRONOUNS.has((s||"").trim().toLowerCase());
-
-export default async function handler(req, res) {
-  // webhook verify
-  if (req.method === "GET") {
-    const { "hub.mode": mode, "hub.verify_token": token, "hub.challenge": challenge } = req.query;
-    if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
-    return res.status(403).send("Forbidden");
-  }
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
-
-  try {
-    const change = req.body?.entry?.[0]?.changes?.[0]?.value;
-    const msg = change?.messages?.[0];
-    if (!msg?.from) return res.status(200).send("no-op");
-
-    const from = msg.from;
-    const text = (msg.text?.body || msg.interactive?.button_reply?.id || "").trim();
-    const lower = text.toLowerCase();
-
-    console.log(`[${new Date().toISOString()}] Message from ${from}: ${text}`);
-
-    // YES/NO confirmations first
-    if (["yes","y"].includes(lower)) {
-      const pending = await popPending(from);
-      if (!pending) { 
-        await sendText(from, "Nothing pending to confirm."); 
-        return res.status(200).send("ok"); 
-      }
-      await runConfirmed(pending, from);
-      return res.status(200).send("ok");
-    }
-    if (["no","n","cancel","stop"].includes(lower)) {
-      const pending = await popPending(from);
-      if (!pending) { 
-        await sendText(from, "Nothing pending to cancel."); 
-        return res.status(200).send("ok"); 
-      }
-      await sendText(from, "Okay, cancelled.");
-      return res.status(200).send("ok");
-    }
-
-    // Build context for the LLM
-    const active = await latestTreeFor(from);            // may be null
-    const state  = await getUserState(from);             // { last_person_name, ... } or null
-
-    let ctx = { 
-      active_tree_name: active?.name || null, 
-      last_person_name: state?.last_person_name || null, 
-      people: [], 
-      relationships: [] 
-    };
-    
-    if (active) {
-      const snap = await listPersonsForTree(from);       // returns { tree, people, rels }
-      ctx.people = (snap?.people || []).map(p => p.primary_name);
-      ctx.relationships = snap?.rels || [];
-    }
-
-    console.log(`[${new Date().toISOString()}] Context for ${from}:`, JSON.stringify(ctx));
-
-    // LLM-first parsing (let the model resolve pronouns using ctx)
-    let ops = await parseOps(text, ctx);
-    
-    console.log(`[${new Date().toISOString()}] Parsed ops:`, JSON.stringify(ops));
-    
-    if (!ops || !ops.length) {
-      await sendText(from, "I didn't get that. Try: "Start a new tree called Kintu Family", "Join code ABC123", "Add Alice born 1950", "Add his son Zaake born 1983", "Link Alice married to Bob", "Show Alice". Type HELP for more.");
-      await sendMenu(from);
-      return res.status(200).send("ok");
-    }
-
-    // Safety: don't create a person literally named a pronoun.
-    ops = ops.filter(op => !(op.op === "add_person" && looksLikePronoun(op.name)));
-
-    const replies = [];
-
-    for (const op of ops) {
-      console.log(`[${new Date().toISOString()}] Processing op:`, JSON.stringify(op));
-      
-      if (op.op === "help") { 
-        replies.push(helpText()); 
-        continue; 
-      }
-
-      if (op.op === "leave") {
-        const r = await leaveCurrentTree(from);
-        replies.push(r.left ? `You left "${r.tree.name}".` : "You're not in any tree yet.");
-        continue;
-      }
-
-      if (op.op === "new_tree") {
-        const name = (op.name || "My Family").slice(0, 80);
-        try {
-          const { tree, tip } = await createTree(name, from);
-          await setActiveTreeState(from, tree.id);
-          replies.push(`Created "${tree.name}". Code: ${tree.join_code}\n${tip}`);
-        } catch (e) {
-          console.error("Error creating tree:", e);
-          replies.push("Couldn't create the tree. Try a different name.");
-        }
-        continue;
-      }
-
-      if (op.op === "join_tree") {
-        const code = (op.code || "").toUpperCase();
-        const { tree, tip } = await joinTreeByCode(code, from);
-        replies.push(tree ? `Switched to "${tree.name}".\n${tip}` : "Code not found. Ask the owner to re-share.");
-        if (tree) await setActiveTreeState(from, tree.id);
-        continue;
-      }
-
-      if (op.op === "view_tree") {
-        const result = await listPersonsForTree(from);
-        if (!result) { 
-          replies.push("No tree found. Create or join one first."); 
-          continue; 
-        }
-        if (!result.people.length) { 
-          replies.push(`Tree "${result.tree.name}" is empty.\nLive tree: ${treeUrl(result.tree.join_code)}`); 
-          continue; 
-        }
-        const lines = result.people.map(p => `• ${p.primary_name}${p.dob_dmy ? " (b. " + p.dob_dmy + ")" : ""}`);
-        replies.push(`Tree: ${result.tree.name}\n${lines.join("\n")}\n\nLive tree: ${treeUrl(result.tree.join_code)}`);
-        continue;
-      }
-
-      if (op.op === "view_person") {
-        const result = await listPersonsForTree(from);
-        if (!result) { 
-          replies.push("No tree found. Create or join one first."); 
-          continue; 
-        }
-        const person = await findInTreeByName(result.tree.id, op.name);
-        if (!person) { 
-          replies.push(`No match found for "${op.name}".`); 
-          continue; 
-        }
-        const rels = await personSummary(result.tree.id, person.id);
-        replies.push(
-          [
-            `${person.primary_name}${person.dob_dmy ? `, b. ${person.dob_dmy}` : ""}`,
-            rels.spouses?.length ? `• Spouse(s): ${rels.spouses.join(", ")}` : null,
-            rels.parents?.length ? `• Parent(s): ${rels.parents.join(", ")}` : null,
-            rels.children?.length ? `• Children: ${rels.children.join(", ")}` : null,
-            `Live tree: ${treeUrl(result.tree.join_code)}`
-          ].filter(Boolean).join("\n")
-        );
-        await setLastPerson(from, result.tree.id, person.id, person.primary_name);
-        continue;
-      }
-
-      // ---- everything below needs an active tree
-      const tree = await latestTreeFor(from);
-      if (!tree) { 
-        replies.push("Create or join a tree first (type HELP)."); 
-        break; 
-      }
-
-      if (op.op === "add_person") {
-        const p = await upsertPersonByName(tree.id, op.name, op.dob || null);
-        replies.push(`Added ${p.primary_name}${p.dob_dmy ? ` (b. ${p.dob_dmy})` : ""} to "${tree.name}".`);
-        await setLastPerson(from, tree.id, p.id, p.primary_name);
-        continue;
-      }
-
-      if (op.op === "link") {
-        const A = await upsertPersonByName(tree.id, op.a);
-        const B = await upsertPersonByName(tree.id, op.b);
-        await addRelationship(tree.id, A.id, op.kind, B.id);
-        replies.push(
-          op.kind === "parent_of"
-            ? `Linked ${A.primary_name} → ${B.primary_name} (parent_of).`
-            : `Linked ${A.primary_name} ↔ ${B.primary_name} (${op.kind.replace("_"," ")}).`
-        );
-        await setLastPerson(from, tree.id, B.id, B.primary_name);
-        continue;
-      }
-
-      if (op.op === "add_child") {
-        const child = await addChildWithParents(tree.id, op.child, op.dob || null, op.parentA, op.parentB || null);
-        replies.push(`Added ${op.child}${op.dob ? ` (b. ${op.dob})` : ""} as child of ${op.parentA}${op.parentB ? " and " + op.parentB : ""}.`);
-        await setLastPerson(from, tree.id, child.id, child.primary_name);
-        continue;
-      }
-
-      if (op.op === "set_dob") {
-        const p = await upsertPersonByName(tree.id, op.name, op.dob || null);
-        replies.push(`Set ${p.primary_name}'s birth to ${op.dob}.`);
-        await setLastPerson(from, tree.id, p.id, p.primary_name);
-        continue;
-      }
-
-      if (op.op === "rename") {
-        const target = await findInTreeByName(tree.id, op.from) || await upsertPersonByName(tree.id, op.from);
-        await savePending(from, tree.id, { type: "rename", personId: target.id, to: op.to });
-        replies.push(`You want to rename "${target.primary_name}" to "${op.to}". Reply YES to confirm, NO to cancel.`);
-        continue;
-      }
-
-      if (op.op === "divorce") {
-        const A = await upsertPersonByName(tree.id, op.a);
-        const B = await upsertPersonByName(tree.id, op.b);
-        await savePending(from, tree.id, { type: "divorce", aId: A.id, bId: B.id });
-        replies.push(`You want to remove the spouse link between "${A.primary_name}" and "${B.primary_name}". Reply YES to confirm, NO to cancel.`);
-        continue;
-      }
-    }
-
-    const out = replies.join("\n\n");
-    const finalMessage = out.length > 3900 ? out.slice(0, 3900) : out;
-    
-    console.log(`[${new Date().toISOString()}] Sending reply to ${from}: ${finalMessage.substring(0, 100)}...`);
-    
-    await sendText(from, finalMessage);
-    return res.status(200).send("ok");
-    
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Fatal error in webhook:`, error);
-    
-    // Try to notify the user of the error
-    try {
-      const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
-      if (from) {
-        await sendText(from, "Sorry, something went wrong. Please try again.");
-      }
-    } catch (notifyError) {
-      console.error("Failed to notify user of error:", notifyError);
-    }
-    
-    return res.status(500).json({ error: "Internal server error" });
+/* --------------------------- activation flow ------------------------ */
+/**
+ * Mark a tree as *active* by upserting (tree_id,phone) and bumping joined_at.
+ * Assumes members.joined_at defaults to now(); we force a newer timestamp to
+ * make this membership the latest row chosen by latestTreeFor().
+ */
+export async function activateTree(phone, treeId) {
+  const nowIso = new Date().toISOString();
+  const up = await db
+    .from("members")
+    .upsert(
+      { tree_id: treeId, phone, joined_at: nowIso },
+      { onConflict: "tree_id,phone" }
+    )
+    .select()
+  ;
+  if (up.error) {
+    console.error("activateTree upsert error:", up.error);
+    throw up.error;
   }
 }
 
-/* ---------- run confirmed actions ---------- */
-async function runConfirmed(pending, phone) {
-  const action = pending.action || {};
-  const treeId = pending.tree_id;
-  if (!action.type || !treeId) { 
-    await sendText(phone, "That action can't be completed."); 
-    return; 
-  }
+/**
+ * Create a tree, make creator active, return a helpful tip.
+ * @returns {Promise<{tree: any, tip: string}>}
+ */
+export async function createTree(name, ownerPhone) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const code = makeJoinCode();
+    const ins = await db
+      .from("trees")
+      .insert({ name, join_code: code })
+      .select()
+      .maybeSingle();
 
-  if (action.type === "rename") {
-    await editPerson(treeId, action.personId, { newName: action.to });
-    await sendText(phone, `Renamed successfully to "${action.to}".`);
+    if (!ins.error && ins.data) {
+      const tree = ins.data;
+      await activateTree(ownerPhone, tree.id);
+      const tip =
+        `You’re now active in “${tree.name}”. ` +
+        `Try: Add Alice born 1950\n` +
+        `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
+      return { tree, tip };
+    }
+
+    if (ins.error?.code !== "23505") {
+      console.error("createTree insert error:", ins.error);
+      throw ins.error;
+    }
+    // otherwise a rare join_code collision: try again
+  }
+  throw new Error("join_code generation collided repeatedly");
+}
+
+/**
+ * Join by code, make that tree active, return a helpful tip.
+ * @returns {Promise<{tree: any|null, tip?: string}>}
+ */
+export async function joinTreeByCode(code, phone) {
+  const t = await db.from("trees").select("*").eq("join_code", code).maybeSingle();
+  if (t.error) {
+    console.error("joinTreeByCode lookup error:", t.error);
+    return { tree: null };
+  }
+  const tree = t.data;
+  if (!tree) return { tree: null };
+
+  await activateTree(phone, tree.id);
+
+  const tip =
+    `You’re now active in “${tree.name}”. ` +
+    `Try: Add Alice born 1950\n` +
+    `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
+  return { tree, tip };
+}
+
+/**
+ * Return the *currently active* (most recent) tree for a phone.
+ * We sort by members.joined_at DESC (your schema has joined_at).
+ */
+export async function latestTreeFor(phone) {
+  const m = await db
+    .from("members")
+    .select("tree_id, joined_at")
+    .eq("phone", phone)
+    .order("joined_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (m.error) {
+    console.error("latestTreeFor members error:", m.error);
+    return null;
+  }
+  if (!m.data) return null;
+
+  const t = await db
+    .from("trees")
+    .select("id, name, join_code")
+    .eq("id", m.data.tree_id)
+    .maybeSingle();
+
+  if (t.error) {
+    console.error("latestTreeFor trees error:", t.error);
+    return null;
+  }
+  return t.data || null;
+}
+
+/* ------------------------------ listings --------------------------- */
+
+export async function listPersonsForTree(phone) {
+  const tree = await latestTreeFor(phone);
+  if (!tree) return null;
+  const [{ data: people }, { data: rels }] = await Promise.all([
+    db.from("persons").select("id, primary_name, dob_dmy").eq("tree_id", tree.id),
+    db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
+  ]);
+  return { tree, people: people || [], rels: rels || [] };
+}
+
+/* ------------------------------ persons ---------------------------- */
+
+export async function findInTreeByName(treeId, q) {
+  const norm = normalizeName(q);
+  const { data: ppl } = await db.from("persons").select("*").eq("tree_id", treeId);
+  return ppl?.find((p) => normalizeName(p.primary_name) === norm) || null;
+}
+
+export async function upsertPersonByName(treeId, name, dob = null) {
+  const norm = normalizeName(name);
+  const { data: all } = await db.from("persons").select("*").eq("tree_id", treeId);
+  let person = all?.find((p) => normalizeName(p.primary_name) === norm);
+  if (person) {
+    if (dob && !person.dob_dmy) {
+      await db.from("persons").update({ dob_dmy: dob }).eq("id", person.id);
+      person.dob_dmy = dob;
+    }
+    return person;
+  }
+  const { data: created, error } = await db
+    .from("persons")
+    .insert({ tree_id: treeId, primary_name: name.trim(), dob_dmy: dob })
+    .select()
+    .single();
+  if (error) throw error;
+  return created;
+}
+
+/* --------------------------- relationships ------------------------- */
+
+function minmax(a, b) {
+  return a < b ? [a, b] : [b, a];
+}
+
+/**
+ * spouse_of / partner_of: single undirected edge (no duplicates).
+ * parent_of: directed (a -> b).
+ * divorced_from: remove spouse_of between the pair.
+ */
+export async function addRelationship(treeId, aId, kind, bId) {
+  if (kind === "spouse_of" || kind === "partner_of") {
+    const [x, y] = minmax(aId, bId);
+    const { error } = await db
+      .from("relationships")
+      .upsert({ tree_id: treeId, a: x, b: y, kind: "spouse_of" }, { onConflict: "a,b,kind" });
+    if (error && error.code !== "23505") throw error;
     return;
   }
-  if (action.type === "divorce") {
-    await addRelationship(treeId, action.aId, "divorced_from", action.bId);
-    await sendText(phone, "Spouse link removed.");
+  if (kind === "parent_of") {
+    const { error } = await db
+      .from("relationships")
+      .upsert({ tree_id: treeId, a: aId, b: bId, kind: "parent_of" }, { onConflict: "tree_id,a,b,kind" });
+    if (error && error.code !== "23505") throw error;
     return;
   }
-  await sendText(phone, "That action can't be completed.");
-}
-
-/* ---------- WhatsApp helpers ---------- */
-async function sendText(to, body) {
-  try {
-    const resp = await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
-      method: "POST",
-      headers: { 
-        "Authorization": `Bearer ${process.env.WABA_TOKEN}`, 
-        "Content-Type": "application/json" 
-      },
-      body: JSON.stringify({ 
-        messaging_product: "whatsapp", 
-        to, 
-        type: "text", 
-        text: { body } 
-      }),
-    });
-    
-    if (!resp.ok) {
-      const errorText = await resp.text();
-      console.error(`[${new Date().toISOString()}] Send error:`, resp.status, errorText);
-    } else {
-      console.log(`[${new Date().toISOString()}] Message sent successfully to ${to}`);
-    }
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Failed to send message:`, error);
+  if (kind === "divorced_from") {
+    const [x, y] = minmax(aId, bId);
+    await db.from("relationships").delete().match({ tree_id: treeId, a: x, b: y, kind: "spouse_of" });
   }
 }
 
-async function sendMenu(to) {
-  try {
-    const resp = await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
-      method: "POST",
-      headers: { 
-        "Authorization": `Bearer ${process.env.WABA_TOKEN}`, 
-        "Content-Type": "application/json" 
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "button",
-          body: { text: "What would you like to do?" },
-          action: {
-            buttons: [
-              { type: "reply", reply: { id: "NEW", title: "Start a tree" } },
-              { type: "reply", reply: { id: "JOIN", title: "Join a tree" } },
-              { type: "reply", reply: { id: "HELP", title: "Help" } }
-            ]
-          }
-        }
-      })
-    });
-    
-    if (!resp.ok) {
-      const errorText = await resp.text();
-      console.error(`[${new Date().toISOString()}] Send menu error:`, resp.status, errorText);
-    }
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Failed to send menu:`, error);
+export async function addChildWithParents(treeId, childName, dob, parentAName, parentBName) {
+  const child = await upsertPersonByName(treeId, childName, dob || null);
+  const pa = await upsertPersonByName(treeId, parentAName);
+  let pb = null;
+  if (parentBName) pb = await upsertPersonByName(treeId, parentBName);
+  await addRelationship(treeId, pa.id, "parent_of", child.id);
+  if (pb) await addRelationship(treeId, pb.id, "parent_of", child.id);
+  return child;
+}
+
+export async function editPerson(treeId, personId, { newName, dob_dmy }) {
+  const patch = {};
+  if (newName) patch.primary_name = newName.trim();
+  if (dob_dmy) patch.dob_dmy = dob_dmy;
+  if (Object.keys(patch).length) {
+    const r = await db.from("persons").update(patch).eq("id", personId);
+    if (r.error) throw r.error;
   }
 }
 
-function helpText() {
-  return [
-    "I understand plain English. Try:",
-    "• "Start a new tree called Kintu Family"",
-    "• "Join code ABC123"",
-    "• "Add Alice born 1950"",
-    "• "Add his son Zaake born 1983" (pronouns resolved to the last person you mentioned)",
-    "• "Link Alice married to Bob"",
-    "• "Show Alice" or "Show the tree"",
-    "• "Divorce Alice and Bob" (will ask to confirm)",
-    "• "Leave tree""
-  ].join("\n");
+export async function personSummary(treeId, personId) {
+  const [{ data: me }, { data: rels }, { data: ppl }] = await Promise.all([
+    db.from("persons").select("*").eq("id", personId).maybeSingle(),
+    db.from("relationships").select("a,b,kind").eq("tree_id", treeId),
+    db.from("persons").select("id,primary_name").eq("tree_id", treeId),
+  ]);
+  const nameById = new Map((ppl || []).map((p) => [p.id, p.primary_name]));
+  const spouses = new Set(), parents = new Set(), children = new Set();
+  for (const r of rels || []) {
+    if (r.kind === "spouse_of" && (r.a === personId || r.b === personId))
+      spouses.add(nameById.get(r.a === personId ? r.b : r.a));
+    if (r.kind === "parent_of") {
+      if (r.a === personId) children.add(nameById.get(r.b));
+      if (r.b === personId) parents.add(nameById.get(r.a));
+    }
+  }
+  return {
+    me: me?.primary_name,
+    spouses: [...spouses].filter(Boolean),
+    parents: [...parents].filter(Boolean),
+    children: [...children].filter(Boolean),
+  };
+}
+
+/* ------------------------------ leaving ----------------------------- */
+
+export async function leaveCurrentTree(phone) {
+  const tree = await latestTreeFor(phone);
+  if (!tree) return { left: false };
+  await db.from("members").delete().match({ tree_id: tree.id, phone });
+  return { left: true, tree };
+}
+
+/* --------------------------- confirmations -------------------------- */
+
+export async function savePending(phone, treeId, actionObj) {
+  const { data, error } = await db
+    .from("pending_actions")
+    .insert({ phone, tree_id: treeId || null, action: actionObj })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function popPending(phone) {
+  const { data } = await db
+    .from("pending_actions")
+    .select("*")
+    .eq("phone", phone)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const pending = data?.[0];
+  if (!pending) return null;
+  await db.from("pending_actions").delete().eq("id", pending.id);
+  return pending;
+}
+
+/* --------------------------- user state management ------------------ */
+
+/**
+ * Get user state (last person mentioned, etc.)
+ */
+export async function getUserState(phone) {
+  const { data, error } = await db
+    .from("user_states")
+    .select("*")
+    .eq("phone", phone)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getUserState error:", error);
+    return null;
+  }
+  return data;
+}
+
+/**
+ * Set the last person the user mentioned
+ */
+export async function setLastPerson(phone, treeId, personId, personName) {
+  const { error } = await db
+    .from("user_states")
+    .upsert(
+      {
+        phone,
+        tree_id: treeId,
+        last_person_id: personId,
+        last_person_name: personName,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "phone" }
+    );
+
+  if (error) {
+    console.error("setLastPerson error:", error);
+  }
+}
+
+/**
+ * Set active tree state
+ */
+export async function setActiveTreeState(phone, treeId) {
+  const { error } = await db
+    .from("user_states")
+    .upsert(
+      {
+        phone,
+        tree_id: treeId,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "phone" }
+    );
+
+  if (error) {
+    console.error("setActiveTreeState error:", error);
+  }
 }
