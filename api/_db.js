@@ -175,31 +175,48 @@ function minmax(a, b) {
 }
 
 /**
- * spouse_of / partner_of: single undirected edge (no duplicates).
- * parent_of: directed (a -> b).
- * divorced_from: remove spouse_of between the pair.
+ * spouse_of / partner_of are stored as a single, undirected edge (normalized a<b)
+ * parent_of is directed (a -> b).
+ * divorced_from deletes the spouse_of edge between the pair.
+ * The DB has partial unique indexes:
+ *  - spouse_of: unique(tree_id,a,b,kind) where kind='spouse_of'
+ *  - parent_of: unique(tree_id,a,b,kind) where kind='parent_of'
  */
 export async function addRelationship(treeId, aId, kind, bId) {
   if (kind === "spouse_of" || kind === "partner_of") {
+    // Normalize undirected edge so it matches the DB unique index
     const [x, y] = minmax(aId, bId);
     const { error } = await db
       .from("relationships")
-      .upsert({ tree_id: treeId, a: x, b: y, kind: "spouse_of" }, { onConflict: "a,b,kind" });
-    if (error && error.code !== "23505") throw error;
+      .upsert(
+        { tree_id: treeId, a: x, b: y, kind: "spouse_of" }, // store partner_of as spouse_of
+        { onConflict: "tree_id,a,b,kind" }
+      );
+    if (error && error.code !== "23505") throw error; // ignore dup
     return;
   }
+
   if (kind === "parent_of") {
     const { error } = await db
       .from("relationships")
-      .upsert({ tree_id: treeId, a: aId, b: bId, kind: "parent_of" }, { onConflict: "tree_id,a,b,kind" });
-    if (error && error.code !== "23505") throw error;
+      .upsert(
+        { tree_id: treeId, a: aId, b: bId, kind: "parent_of" },
+        { onConflict: "tree_id,a,b,kind" }
+      );
+    if (error && error.code !== "23505") throw error; // ignore dup
     return;
   }
+
   if (kind === "divorced_from") {
     const [x, y] = minmax(aId, bId);
-    await db.from("relationships").delete().match({ tree_id: treeId, a: x, b: y, kind: "spouse_of" });
+    await db
+      .from("relationships")
+      .delete()
+      .match({ tree_id: treeId, a: x, b: y, kind: "spouse_of" });
+    return;
   }
 }
+
 
 export async function addChildWithParents(treeId, childName, dob, parentAName, parentBName) {
   const child = await upsertPersonByName(treeId, childName, dob || null);
