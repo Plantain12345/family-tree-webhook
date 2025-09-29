@@ -63,7 +63,7 @@ export async function createTree(name, ownerPhone) {
       const tree = ins.data;
       await activateTree(ownerPhone, tree.id);
       const tip =
-        `You’re now active in “${tree.name}”. ` +
+        `You're now active in "${tree.name}". ` +
         `Try: Add Alice born 1950\n` +
         `Live tree: https://family-tree-webhook.vercel.app/tree.html?code=${tree.join_code}`;
       return { tree, tip };
@@ -98,14 +98,14 @@ export async function joinTreeByCode(code, phone) {
   await activateTree(phone, tree.id);
 
   const tip =
-    `You’re now active in “${tree.name}”. ` +
+    `You're now active in "${tree.name}". ` +
     `Try: Add Alice born 1950\n` +
     `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
   return { tree, tip };
 }
 
 /**
- * Return the *currently active* (most recently “activated”) tree for a phone.
+ * Return the *currently active* (most recently "activated") tree for a phone.
  * Uses members.joined_at (your schema) instead of created_at.
  */
 export async function latestTreeFor(phone) {
@@ -285,4 +285,66 @@ export async function popPending(phone) {
   if (!pending) return null;
   await db.from("pending_actions").delete().eq("id", pending.id);
   return pending;
+}
+
+/* --------------------------- user state management -------------------------- */
+
+/**
+ * Get user state (last person mentioned, etc.)
+ */
+export async function getUserState(phone) {
+  const { data, error } = await db
+    .from("user_states")
+    .select("*")
+    .eq("phone", phone)
+    .maybeSingle();
+  
+  if (error) {
+    console.error("getUserState error:", error);
+    return null;
+  }
+  
+  return data;
+}
+
+/**
+ * Set the last person the user mentioned
+ */
+export async function setLastPerson(phone, treeId, personId, personName) {
+  const { error } = await db
+    .from("user_states")
+    .upsert(
+      { 
+        phone, 
+        tree_id: treeId, 
+        last_person_id: personId,
+        last_person_name: personName,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "phone" }
+    );
+  
+  if (error) {
+    console.error("setLastPerson error:", error);
+  }
+}
+
+/**
+ * Set active tree state
+ */
+export async function setActiveTreeState(phone, treeId) {
+  const { error } = await db
+    .from("user_states")
+    .upsert(
+      { 
+        phone, 
+        tree_id: treeId,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "phone" }
+    );
+  
+  if (error) {
+    console.error("setActiveTreeState error:", error);
+  }
 }
