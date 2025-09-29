@@ -465,7 +465,7 @@ async function sendMenu(to) {
             body: { text: "What would you like to do?" },
             action: {
               buttons: [
-                { type: "reply", reply: { id: "NEW", title: "Start a tree" } },
+                { type: "reply", reply: { id: "NEW",  title: "Start a tree" } },
                 { type: "reply", reply: { id: "JOIN", title: "Join a tree" } },
                 { type: "reply", reply: { id: "HELP", title: "Help" } },
               ],
@@ -485,4 +485,22 @@ async function sendMenu(to) {
     }
   } catch (error) {
     console.error(
-      `[${new Date().toISOString()}]
+      `[${new Date().toISOString()}] Failed to send menu:`,
+      error
+    );
+  }
+}
+
+function helpText() {
+  return [
+    "I understand plain English. Try:",
+    "• \"Start a new tree called Kintu Family\"",
+    "• \"Join code ABC123\"",
+    "• \"Add Alice born 1950\"",
+    "• \"Add his son Zaake born 1983\"",
+    "• \"Link Alice married to Bob\"",
+    "• \"Show Alice\" or \"Show the tree\"",
+    "• \"Divorce Alice and Bob\" (will ask to confirm)",
+    "• \"Leave tree\"",
+  ].join("\n");
+}
