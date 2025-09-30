@@ -40,46 +40,474 @@
       throw new Error("bad code");
     }
 
+    const LEVEL_HEIGHT = 180;
+    const SPOUSE_GAP = 140;
+    const UNIT_GAP = 240;
+    const CHILD_GAP = 130;
+    const DROP_GAP = 80;
+    const DROP_SEGMENT = DROP_GAP / 2;
+    const DIVORCE_OFFSET = 32;
+
     const cy = cytoscape({
       container: document.getElementById('cy'),
       elements: [],
       style: [
-        { selector: 'node',
+        {
+          selector: 'node[type = "person"]',
           style: {
             'shape': 'round-rectangle',
+            'width': 120,
+            'height': 120,
             'background-color': '#fff',
-            'border-color': '#777',
-            'border-width': 1,
+            'border-color': '#222',
+            'border-width': 2,
             'label': 'data(label)',
             'text-wrap': 'wrap',
-            'text-max-width': 180,
-            'padding': '8px',
-            'font-size': 12
+            'text-max-width': 90,
+            'padding': '12px',
+            'font-size': 12,
+            'text-valign': 'center',
+            'text-halign': 'center'
           }
         },
-        { selector: 'edge',
+        {
+          selector: 'node[type = "person"][gender = "male"]',
+          style: { 'shape': 'square' }
+        },
+        {
+          selector: 'node[type = "person"][gender = "female"]',
+          style: { 'shape': 'ellipse' }
+        },
+        {
+          selector: 'node.connector',
           style: {
-            'width': 1,
-            'line-color': '#bbb',
-            'target-arrow-color': '#bbb',
-            'curve-style': 'bezier',
-            'target-arrow-shape': 'triangle',
-            'label': 'data(kind)',
-            'font-size': 9,
-            'text-rotation': 'autorotate',
-            'text-margin-y': -6,
-            'opacity': 0.9
+            'width': 2,
+            'height': 2,
+            'opacity': 0,
+            'border-width': 0,
+            'background-opacity': 0,
+            'events': 'no'
           }
         },
-        { selector: 'edge[kind = "spouse_of"], edge[kind = "partner_of"]',
-          style: { 'target-arrow-shape': 'none', 'line-style': 'solid' }
+        {
+          selector: 'edge',
+          style: {
+            'width': 2,
+            'line-color': '#222',
+            'target-arrow-shape': 'none',
+            'source-arrow-shape': 'none',
+            'curve-style': 'straight',
+            'opacity': 1,
+            'line-cap': 'round'
+          }
         },
-        { selector: 'edge[kind = "parent_of"]',
-          style: { 'target-arrow-shape': 'triangle' }
+        {
+          selector: 'edge[kind = "marriage"]',
+          style: { 'width': 3, 'line-color': '#111' }
+        },
+        {
+          selector: 'edge[kind = "descent"]',
+          style: { 'line-color': '#111' }
+        },
+        {
+          selector: 'edge[kind = "sibling"]',
+          style: { 'line-color': '#111' }
+        },
+        {
+          selector: 'edge[kind = "child"]',
+          style: { 'line-color': '#111' }
+        },
+        {
+          selector: 'edge[kind = "divorce"]',
+          style: {
+            'line-color': '#b00',
+            'width': 2,
+            'z-index-compare': 'manual',
+            'z-index': 10
+          }
         }
       ],
-      layout: { name: 'breadthfirst', directed: true, padding: 20, spacingFactor: 1.2 }
+      layout: { name: 'preset' },
+      wheelSensitivity: 0.1
     });
+
+    function buildPedigreeLayout(apiNodes, apiEdges, apiFamilies) {
+      const nodeMap = new Map(apiNodes.map((n) => [n.data.id, n]));
+      const families = (apiFamilies || [])
+        .map((f) => ({
+          id: f.id,
+          spouses: Array.isArray(f.spouses) ? f.spouses.filter((id) => nodeMap.has(id)) : [],
+          children: dedupeOrdered(Array.isArray(f.children) ? f.children.filter((id) => nodeMap.has(id)) : []),
+          status: f.status || null,
+        }))
+        .filter((f) => f.spouses.length || f.children.length);
+
+      const { generation } = computeGenerations(apiNodes, apiEdges, families);
+      const { positions } = computePositions(apiNodes, families, generation);
+      const connectors = buildConnectorElements(families, positions);
+
+      const personElements = apiNodes.map((n) => ({
+        data: { ...n.data, type: 'person' },
+        position: positions.get(n.data.id) || { x: 0, y: 0 },
+        locked: true,
+        grabbable: false,
+      }));
+
+      return {
+        personElements,
+        connectorNodes: connectors.nodes,
+        connectorEdges: connectors.edges,
+      };
+    }
+
+    function dedupeOrdered(list) {
+      const seen = new Set();
+      const out = [];
+      for (const item of list) {
+        if (!seen.has(item)) {
+          seen.add(item);
+          out.push(item);
+        }
+      }
+      return out;
+    }
+
+    function computeGenerations(nodes, edges, families) {
+      const ids = new Set(nodes.map((n) => n.data.id));
+      const parentsByChild = new Map();
+      const childrenByParent = new Map();
+
+      const addRelation = (parent, child) => {
+        if (!ids.has(parent) || !ids.has(child)) return;
+        if (!parentsByChild.has(child)) parentsByChild.set(child, new Set());
+        parentsByChild.get(child).add(parent);
+        if (!childrenByParent.has(parent)) childrenByParent.set(parent, new Set());
+        childrenByParent.get(parent).add(child);
+      };
+
+      for (const edge of edges || []) {
+        const kind = edge.data?.kind;
+        if (kind === 'parent_of') addRelation(edge.data.source, edge.data.target);
+        else if (kind === 'child_of') addRelation(edge.data.target, edge.data.source);
+      }
+
+      const generation = new Map();
+      const indegree = new Map();
+
+      nodes.forEach((n) => {
+        const id = n.data.id;
+        const indeg = parentsByChild.get(id)?.size || 0;
+        indegree.set(id, indeg);
+        if (indeg === 0) generation.set(id, 0);
+      });
+
+      const queue = nodes.filter((n) => (indegree.get(n.data.id) || 0) === 0).map((n) => n.data.id);
+      const seen = new Set(queue);
+
+      while (queue.length) {
+        const current = queue.shift();
+        const gen = generation.get(current) ?? 0;
+        const children = childrenByParent.get(current);
+        if (!children) continue;
+        children.forEach((child) => {
+          const nextGen = gen + 1;
+          const prevGen = generation.get(child);
+          if (prevGen === undefined || nextGen > prevGen) generation.set(child, nextGen);
+          const newIn = (indegree.get(child) || 0) - 1;
+          indegree.set(child, newIn);
+          if (newIn <= 0 && !seen.has(child)) {
+            queue.push(child);
+            seen.add(child);
+          }
+        });
+      }
+
+      nodes.forEach((n) => {
+        if (!generation.has(n.data.id)) generation.set(n.data.id, 0);
+      });
+
+      families.forEach((f) => {
+        const spouseGens = f.spouses.map((id) => generation.get(id)).filter((g) => g !== undefined);
+        if (!spouseGens.length) return;
+        const level = Math.min(...spouseGens);
+        f.spouses.forEach((id) => generation.set(id, level));
+      });
+
+      return { generation };
+    }
+
+    function computePositions(nodes, families, generation) {
+      const labelById = new Map(nodes.map((n) => [n.data.id, n.data.label || '']));
+      const levels = Array.from(new Set(Array.from(generation.values()))).sort((a, b) => a - b);
+      const positions = new Map();
+      const positionHints = new Map();
+      const orderHints = new Map();
+
+      levels.forEach((level) => {
+        const y = level * LEVEL_HEIGHT;
+        const idsAtLevel = nodes.filter((n) => generation.get(n.data.id) === level).map((n) => n.data.id);
+        const placed = new Set();
+
+        const familiesAtLevel = families.filter((f) => f.spouses.length && f.spouses.every((id) => generation.get(id) === level));
+        const familyEntries = familiesAtLevel.map((f) => {
+          const hints = f.spouses.map((id) => positionHints.get(id)).filter((v) => v !== undefined);
+          const centerHint = hints.length ? hints.reduce((sum, v) => sum + v, 0) / hints.length : undefined;
+          const orderHint = Math.min(...f.spouses.map((id) => orderHints.get(id) ?? Infinity));
+          return { family: f, centerHint, orderHint };
+        });
+
+        familyEntries.sort((a, b) => {
+          const aHasCenter = a.centerHint !== undefined;
+          const bHasCenter = b.centerHint !== undefined;
+          if (aHasCenter && bHasCenter && a.centerHint !== b.centerHint) return a.centerHint - b.centerHint;
+          if (aHasCenter !== bHasCenter) return aHasCenter ? -1 : 1;
+          const orderA = a.orderHint ?? Infinity;
+          const orderB = b.orderHint ?? Infinity;
+          if (orderA !== orderB) return orderA - orderB;
+          const labelA = (a.family.spouses.map((id) => labelById.get(id) || '').sort()[0]) || '';
+          const labelB = (b.family.spouses.map((id) => labelById.get(id) || '').sort()[0]) || '';
+          return labelA.localeCompare(labelB);
+        });
+
+        let xCursor = 0;
+        let familyIndex = 0;
+
+        familyEntries.forEach(({ family, centerHint }) => {
+          const spouseIds = family.spouses.filter((id) => generation.get(id) === level);
+          if (!spouseIds.length) return;
+
+          const span = (spouseIds.length - 1) * SPOUSE_GAP;
+          let centerX = centerHint;
+          if (centerX === undefined) centerX = xCursor + span / 2;
+          if (centerX < xCursor + span / 2) centerX = xCursor + span / 2;
+          const startX = centerX - span / 2;
+
+          spouseIds.forEach((id, idx) => {
+            const x = startX + idx * SPOUSE_GAP;
+            positions.set(id, { x, y });
+            positionHints.set(id, x);
+            orderHints.set(id, familyIndex + idx * 0.01);
+            placed.add(id);
+          });
+
+          const center = centerX;
+          const uniqueChildren = family.children || [];
+          if (uniqueChildren.length) {
+            const base = -((uniqueChildren.length - 1) / 2) * CHILD_GAP;
+            uniqueChildren.forEach((childId, idx) => {
+              const hintX = center + base + idx * CHILD_GAP;
+              const existing = positionHints.get(childId);
+              positionHints.set(childId, existing === undefined ? hintX : (existing + hintX) / 2);
+              orderHints.set(childId, familyIndex + idx / Math.max(uniqueChildren.length, 1));
+            });
+          }
+
+          xCursor = Math.max(xCursor, center + span / 2) + UNIT_GAP;
+          familyIndex += 1;
+        });
+
+        const singles = idsAtLevel.filter((id) => !placed.has(id));
+        singles.sort((a, b) => {
+          const orderA = orderHints.get(a) ?? Infinity;
+          const orderB = orderHints.get(b) ?? Infinity;
+          if (orderA !== orderB) return orderA - orderB;
+          const labelA = labelById.get(a) || '';
+          const labelB = labelById.get(b) || '';
+          return labelA.localeCompare(labelB);
+        });
+
+        singles.forEach((id, idx) => {
+          let x = positionHints.get(id);
+          if (x === undefined || x < xCursor) x = xCursor;
+          positions.set(id, { x, y });
+          positionHints.set(id, x);
+          orderHints.set(id, (orderHints.get(id) ?? familyIndex) + idx * 0.01);
+          xCursor = x + UNIT_GAP;
+        });
+
+        families
+          .filter((f) => f.spouses.length === 1 && generation.get(f.spouses[0]) === level)
+          .forEach((family) => {
+            const parentId = family.spouses[0];
+            const parentPos = positions.get(parentId);
+            if (!parentPos) return;
+            const uniqueChildren = family.children || [];
+            if (!uniqueChildren.length) return;
+            const base = -((uniqueChildren.length - 1) / 2) * CHILD_GAP;
+            uniqueChildren.forEach((childId, idx) => {
+              const hintX = parentPos.x + base + idx * CHILD_GAP;
+              const existing = positionHints.get(childId);
+              positionHints.set(childId, existing === undefined ? hintX : (existing + hintX) / 2);
+            });
+          });
+      });
+
+      nodes.forEach((n) => {
+        const id = n.data.id;
+        if (!positions.has(id)) {
+          const gen = generation.get(id) || 0;
+          const y = gen * LEVEL_HEIGHT;
+          const x = positionHints.get(id) ?? 0;
+          positions.set(id, { x, y });
+        }
+      });
+
+      return { positions };
+    }
+
+    function buildConnectorElements(families, positions) {
+      const nodes = [];
+      const edges = [];
+
+      families.forEach((family) => {
+        const spousePositions = family.spouses.map((id) => positions.get(id)).filter(Boolean);
+        if (!spousePositions.length) return;
+        const centerX = spousePositions.reduce((sum, pos) => sum + pos.x, 0) / spousePositions.length;
+        const parentY = spousePositions.reduce((sum, pos) => sum + pos.y, 0) / spousePositions.length;
+        const marriageId = `family:${family.id}:marriage`;
+
+        nodes.push({
+          data: { id: marriageId, type: 'connector', role: 'marriage', familyId: family.id },
+          position: { x: centerX, y: parentY },
+          selectable: false,
+          grabbable: false,
+          locked: true,
+          classes: 'connector',
+        });
+
+        family.spouses
+          .filter((id) => positions.has(id))
+          .sort((a, b) => positions.get(a).x - positions.get(b).x)
+          .forEach((spouseId) => {
+            edges.push({
+              data: { id: `family:${family.id}:marriage:${spouseId}`, source: marriageId, target: spouseId, kind: 'marriage' },
+              selectable: false,
+              classes: 'connector-edge',
+            });
+          });
+
+        if (family.status && family.spouses.length >= 2) {
+          const diagAId = `family:${family.id}:divorce-a`;
+          const diagBId = `family:${family.id}:divorce-b`;
+          nodes.push({
+            data: { id: diagAId, type: 'connector', role: 'divorce', familyId: family.id },
+            position: { x: centerX - DIVORCE_OFFSET, y: parentY - DIVORCE_OFFSET },
+            selectable: false,
+            grabbable: false,
+            locked: true,
+            classes: 'connector',
+          });
+          nodes.push({
+            data: { id: diagBId, type: 'connector', role: 'divorce', familyId: family.id },
+            position: { x: centerX + DIVORCE_OFFSET, y: parentY + DIVORCE_OFFSET },
+            selectable: false,
+            grabbable: false,
+            locked: true,
+            classes: 'connector',
+          });
+          edges.push({
+            data: {
+              id: `family:${family.id}:divorce-line`,
+              source: diagAId,
+              target: diagBId,
+              kind: 'divorce',
+              status: family.status,
+            },
+            selectable: false,
+            classes: 'connector-edge',
+          });
+        }
+
+        const childIds = (family.children || []).filter((id) => positions.has(id));
+        if (!childIds.length) return;
+
+        const dropMidId = `family:${family.id}:drop-mid`;
+        const bracketId = `family:${family.id}:sibship`;
+        const dropMidY = parentY + DROP_SEGMENT;
+        const bracketY = parentY + DROP_GAP;
+
+        nodes.push({
+          data: { id: dropMidId, type: 'connector', role: 'drop-mid', familyId: family.id },
+          position: { x: centerX, y: dropMidY },
+          selectable: false,
+          grabbable: false,
+          locked: true,
+          classes: 'connector',
+        });
+
+        nodes.push({
+          data: { id: bracketId, type: 'connector', role: 'sibship', familyId: family.id },
+          position: { x: centerX, y: bracketY },
+          selectable: false,
+          grabbable: false,
+          locked: true,
+          classes: 'connector',
+        });
+
+        edges.push({
+          data: { id: `family:${family.id}:anchor-drop`, source: marriageId, target: dropMidId, kind: 'descent' },
+          selectable: false,
+          classes: 'connector-edge',
+        });
+
+        edges.push({
+          data: { id: `family:${family.id}:drop-sib`, source: dropMidId, target: bracketId, kind: 'descent' },
+          selectable: false,
+          classes: 'connector-edge',
+        });
+
+        const jointEntries = childIds.map((childId) => {
+          const childPos = positions.get(childId);
+          const jointId = `family:${family.id}:child:${childId}:joint`;
+
+          nodes.push({
+            data: { id: jointId, type: 'connector', role: 'child-joint', familyId: family.id, personId: childId },
+            position: { x: childPos.x, y: bracketY },
+            selectable: false,
+            grabbable: false,
+            locked: true,
+            classes: 'connector',
+          });
+
+          edges.push({
+            data: { id: `family:${family.id}:child-${childId}`, source: jointId, target: childId, kind: 'child' },
+            selectable: false,
+            classes: 'connector-edge',
+          });
+
+          return { jointId, childId, x: childPos.x };
+        });
+
+        if (jointEntries.length === 1) {
+          edges.push({
+            data: { id: `family:${family.id}:sibship-0`, source: bracketId, target: jointEntries[0].jointId, kind: 'sibling' },
+            selectable: false,
+            classes: 'connector-edge',
+          });
+        } else if (jointEntries.length > 1) {
+          edges.push({
+            data: { id: `family:${family.id}:sibship-start`, source: bracketId, target: jointEntries[0].jointId, kind: 'sibling' },
+            selectable: false,
+            classes: 'connector-edge',
+          });
+
+          for (let i = 0; i < jointEntries.length - 1; i++) {
+            edges.push({
+              data: {
+                id: `family:${family.id}:sibship-${i}-${i + 1}`,
+                source: jointEntries[i].jointId,
+                target: jointEntries[i + 1].jointId,
+                kind: 'sibling',
+              },
+              selectable: false,
+              classes: 'connector-edge',
+            });
+          }
+        }
+      });
+
+      return { nodes, edges };
+    }
 
     async function load() {
       statusEl.textContent = "Loading…";
@@ -94,15 +522,22 @@
 
         titleEl.textContent = `${data.tree.name} — ${data.tree.code}`;
 
+        const layout = buildPedigreeLayout(data.nodes || [], data.edges || [], data.families || []);
+
         cy.startBatch();
         cy.elements().remove();
-        cy.add(data.nodes);
-        cy.add(data.edges);
+        cy.add(layout.personElements);
+        if (layout.connectorNodes.length) cy.add(layout.connectorNodes);
+        if (layout.connectorEdges.length) cy.add(layout.connectorEdges);
         cy.endBatch();
 
-        cy.layout({ name: 'breadthfirst', directed: true, padding: 20, spacingFactor: 1.2 }).run();
+        const people = cy.collection('node[type = "person"]');
+        emptyEl.style.display = people.length ? 'none' : 'flex';
+        cy.resize();
+        if (people.length) {
+          cy.fit(people, 80);
+        }
 
-        emptyEl.style.display = (data.nodes.length || data.edges.length) ? 'none' : 'flex';
         statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
       } catch (e) {
         console.error(e);
