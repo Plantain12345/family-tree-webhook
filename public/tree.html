@@ -5,33 +5,258 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Family Tree</title>
   <style>
-    :root { --fg:#111; --muted:#666; --line:#eee; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: var(--fg); }
-    header { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
-    h1 { font-size: 16px; margin: 0; }
-    #status { font-size: 12px; color: var(--muted); margin-left: auto; }
-    #cy { width: 100vw; height: calc(100vh - 48px); display: block; }
-    #empty { position: absolute; inset: 48px 0 0 0; display: none; align-items: center; justify-content: center; }
-    #empty .box { text-align: center; color: var(--muted); padding: 24px; }
+    :root {
+      --bg: #ffffff;
+      --surface: #ffffff;
+      --panel: #fbf7f2;
+      --ink: #2f2217;
+      --muted: #6f6255;
+      --border: #e8ded2;
+      --accent: #d87b5d;
+      --status-bg: rgba(216, 123, 93, 0.12);
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .shell {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 28px 36px 20px;
+      background: var(--surface);
+      box-shadow: 0 12px 32px rgba(21, 12, 4, 0.05);
+      z-index: 10;
+    }
+
+    .title-block {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .title-prefix {
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      font-weight: 600;
+    }
+
+    .code-block {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 16px;
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: 0 8px 22px rgba(22, 13, 4, 0.08);
+      border: 1px solid var(--border);
+      min-width: 140px;
+    }
+
+    .code-prefix {
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      color: var(--muted);
+    }
+
+    .code-value {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+    }
+
+    #status {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--accent);
+      background: var(--status-bg);
+      padding: 8px 14px;
+      border-radius: 999px;
+      align-self: flex-start;
+      white-space: nowrap;
+    }
+
+    main {
+      flex: 1;
+      position: relative;
+      padding: 24px 36px 36px;
+      background: linear-gradient(180deg, rgba(248, 242, 236, 0.55) 0%, rgba(255, 255, 255, 0.9) 60%, rgba(255, 255, 255, 1) 100%);
+    }
+
+    .legend {
+      position: absolute;
+      top: 42px;
+      right: 56px;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 10px 28px rgba(19, 11, 4, 0.1);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+      backdrop-filter: blur(6px);
+      z-index: 5;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+      color: var(--ink);
+    }
+
+    .legend-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+    }
+
+    .legend-swatch.male {
+      background: #c8daf9;
+    }
+
+    .legend-swatch.female {
+      background: #f8d5e4;
+    }
+
+    .legend-swatch.neutral {
+      background: #e3dbf7;
+    }
+
+    .legend-swatch.unknown {
+      background: #f4efe7;
+    }
+
+    @media (max-width: 720px) {
+      header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 18px;
+      }
+
+      .code-block {
+        flex-direction: row;
+        align-items: baseline;
+        gap: 12px;
+      }
+
+      .legend {
+        position: static;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+
+      #empty {
+        inset: 24px;
+      }
+    }
+
+    #cy {
+      width: 100%;
+      height: 100%;
+      border-radius: 26px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      box-shadow: 0 28px 60px rgba(27, 17, 8, 0.08);
+    }
+
+    #empty {
+      position: absolute;
+      inset: 24px 36px 36px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    #empty .box {
+      text-align: center;
+      color: var(--muted);
+      padding: 32px 40px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 18px 44px rgba(17, 10, 4, 0.08);
+      border: 1px solid var(--border);
+    }
+
+    #empty .box strong {
+      display: block;
+      font-size: 18px;
+      margin-bottom: 6px;
+      color: var(--ink);
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1 id="title">Family Tree</h1>
-    <div id="status">Loading…</div>
-  </header>
+  <div class="shell">
+    <header>
+      <div class="title-block">
+        <span class="title-prefix">Family Tree:</span>
+        <h1 id="tree-name">Loading…</h1>
+      </div>
+      <div class="code-block">
+        <span class="code-prefix">Code No.</span>
+        <span class="code-value" id="tree-code">———</span>
+      </div>
+      <div id="status">Loading…</div>
+    </header>
 
-  <div id="cy"></div>
-  <div id="empty"><div class="box">
-    <div style="font-size:18px;margin-bottom:8px;">No people yet</div>
-    <div>Use WhatsApp to add: “Add Alice born 1950”, “Link Alice married to Bob”.</div>
-  </div></div>
+    <main>
+      <div class="legend">
+        <span class="legend-item"><span class="legend-swatch male"></span>Male</span>
+        <span class="legend-item"><span class="legend-swatch female"></span>Female</span>
+        <span class="legend-item"><span class="legend-swatch neutral"></span>Non-binary</span>
+        <span class="legend-item"><span class="legend-swatch unknown"></span>Not specified</span>
+      </div>
+      <div id="cy"></div>
+      <div id="empty"><div class="box">
+        <strong>Invite your family</strong>
+        <div>Use WhatsApp to add relatives—try “Add Alice born 1950” or “Link Alice married to Bob”.</div>
+      </div></div>
+    </main>
+  </div>
 
   <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
   <script>
     const qs = new URLSearchParams(location.search);
     const code = (qs.get("code") || "").toUpperCase();
-    const titleEl = document.getElementById("title");
+    const treeNameEl = document.getElementById("tree-name");
+    const treeCodeEl = document.getElementById("tree-code");
     const statusEl = document.getElementById("status");
     const emptyEl = document.getElementById("empty");
 
@@ -40,11 +265,13 @@
       throw new Error("bad code");
     }
 
-    const LEVEL_HEIGHT = 180;
-    const SPOUSE_GAP = 140;
-    const UNIT_GAP = 240;
-    const CHILD_GAP = 130;
-    const DROP_GAP = 80;
+    treeCodeEl.textContent = code;
+
+    const LEVEL_HEIGHT = 200;
+    const SPOUSE_GAP = 220;
+    const UNIT_GAP = 280;
+    const CHILD_GAP = 150;
+    const DROP_GAP = 90;
     const DROP_SEGMENT = DROP_GAP / 2;
     const DIVORCE_OFFSET = 32;
 
@@ -56,27 +283,27 @@
           selector: 'node[type = "person"]',
           style: {
             'shape': 'round-rectangle',
-            'width': 120,
-            'height': 120,
-            'background-color': '#fff',
-            'border-color': '#222',
+            'width': 148,
+            'height': 112,
+            'background-color': 'data(color)',
+            'border-color': '#d8cec2',
             'border-width': 2,
             'label': 'data(label)',
             'text-wrap': 'wrap',
-            'text-max-width': 90,
-            'padding': '12px',
-            'font-size': 12,
+            'text-max-width': 112,
+            'padding': '14px',
+            'font-size': 13,
+            'font-weight': 500,
             'text-valign': 'center',
-            'text-halign': 'center'
+            'text-halign': 'center',
+            'color': '#322417',
+            'line-height': 1.35,
+            'shadow-blur': 18,
+            'shadow-color': 'rgba(31, 20, 12, 0.18)',
+            'shadow-offset-x': 0,
+            'shadow-offset-y': 10,
+            'shadow-opacity': 1
           }
-        },
-        {
-          selector: 'node[type = "person"][gender = "male"]',
-          style: { 'shape': 'square' }
-        },
-        {
-          selector: 'node[type = "person"][gender = "female"]',
-          style: { 'shape': 'ellipse' }
         },
         {
           selector: 'node.connector',
@@ -93,7 +320,7 @@
           selector: 'edge',
           style: {
             'width': 2,
-            'line-color': '#222',
+            'line-color': '#4a3c31',
             'target-arrow-shape': 'none',
             'source-arrow-shape': 'none',
             'curve-style': 'straight',
@@ -103,25 +330,25 @@
         },
         {
           selector: 'edge[kind = "marriage"]',
-          style: { 'width': 3, 'line-color': '#111' }
+          style: { 'width': 3.2, 'line-color': '#2d2117' }
         },
         {
           selector: 'edge[kind = "descent"]',
-          style: { 'line-color': '#111' }
+          style: { 'line-color': '#2d2117' }
         },
         {
           selector: 'edge[kind = "sibling"]',
-          style: { 'line-color': '#111' }
+          style: { 'line-color': '#2d2117' }
         },
         {
           selector: 'edge[kind = "child"]',
-          style: { 'line-color': '#111' }
+          style: { 'line-color': '#2d2117' }
         },
         {
           selector: 'edge[kind = "divorce"]',
           style: {
-            'line-color': '#b00',
-            'width': 2,
+            'line-color': '#c45b4d',
+            'width': 2.2,
             'z-index-compare': 'manual',
             'z-index': 10
           }
@@ -147,7 +374,7 @@
       const connectors = buildConnectorElements(families, positions);
 
       const personElements = apiNodes.map((n) => ({
-        data: { ...n.data, type: 'person' },
+        data: { ...n.data, type: 'person', color: colorForGender(n.data.gender) },
         position: positions.get(n.data.id) || { x: 0, y: 0 },
         locked: true,
         grabbable: false,
@@ -509,6 +736,21 @@
       return { nodes, edges };
     }
 
+    function colorForGender(gender) {
+      switch (gender) {
+        case 'male':
+          return '#c8daf9';
+        case 'female':
+          return '#f8d5e4';
+        case 'nonbinary':
+        case 'non-binary':
+        case 'nb':
+          return '#e3dbf7';
+        default:
+          return '#f4efe7';
+      }
+    }
+
     async function load() {
       statusEl.textContent = "Loading…";
       try {
@@ -520,7 +762,9 @@
           return;
         }
 
-        titleEl.textContent = `${data.tree.name} — ${data.tree.code}`;
+        treeNameEl.textContent = data.tree.name;
+        treeCodeEl.textContent = data.tree.code;
+        document.title = `Family Tree: ${data.tree.name}`;
 
         const layout = buildPedigreeLayout(data.nodes || [], data.edges || [], data.families || []);
 
@@ -535,10 +779,11 @@
         emptyEl.style.display = people.length ? 'none' : 'flex';
         cy.resize();
         if (people.length) {
-          cy.fit(people, 80);
+          cy.fit(people, 140);
         }
 
-        statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        statusEl.textContent = `Synced · ${stamp}`;
       } catch (e) {
         console.error(e);
         statusEl.textContent = "Error loading";
