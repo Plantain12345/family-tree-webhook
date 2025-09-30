@@ -1,17 +1,33 @@
+
+<!doctype html>
 <!doctype html>
 <html>
+<html>
+<head>
 <head>
   <meta charset="utf-8" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Family Tree</title>
+  <title>Family Tree</title>
   <style>
+  <style>
+    :root { --fg:#111; --muted:#666; --line:#eee; }
     :root {
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: var(--fg); }
       --bg: #ffffff;
+    header { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
       --surface: #ffffff;
+    h1 { font-size: 16px; margin: 0; }
       --panel: #fbf7f2;
+    #status { font-size: 12px; color: var(--muted); margin-left: auto; }
       --ink: #2f2217;
+    #cy { width: 100vw; height: calc(100vh - 48px); display: block; }
       --muted: #6f6255;
+    #empty { position: absolute; inset: 48px 0 0 0; display: none; align-items: center; justify-content: center; }
       --border: #e8ded2;
+    #empty .box { text-align: center; color: var(--muted); padding: 24px; }
       --accent: #d87b5d;
       --status-bg: rgba(216, 123, 93, 0.12);
     }
@@ -138,23 +154,27 @@
     }
 
     .legend-swatch {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
+      width: 16px;
+      height: 16px;
       border: 1px solid rgba(0, 0, 0, 0.08);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+      display: inline-block;
+      border-radius: 12px;
     }
 
     .legend-swatch.male {
       background: #c8daf9;
+      border-radius: 3px;
     }
 
     .legend-swatch.female {
       background: #f8d5e4;
+      border-radius: 50%;
     }
 
     .legend-swatch.neutral {
       background: #e3dbf7;
+      border-radius: 18%;
     }
 
     .legend-swatch.unknown {
@@ -209,7 +229,7 @@
       color: var(--muted);
       padding: 32px 40px;
       border-radius: 20px;
-      background: rgba(255, 255, 255, 0.92);
+      background: rgba(255, 255, 255, 0.65);
       box-shadow: 0 18px 44px rgba(17, 10, 4, 0.08);
       border: 1px solid var(--border);
     }
@@ -221,11 +241,18 @@
       color: var(--ink);
     }
   </style>
+  </style>
+</head>
 </head>
 <body>
+<body>
+  <header>
   <div class="shell">
+    <h1 id="title">Family Tree</h1>
     <header>
+    <div id="status">Loading…</div>
       <div class="title-block">
+  </header>
         <span class="title-prefix">Family Tree:</span>
         <h1 id="tree-name">Loading…</h1>
       </div>
@@ -236,10 +263,16 @@
       <div id="status">Loading…</div>
     </header>
 
+
+  <div id="cy"></div>
     <main>
+  <div id="empty"><div class="box">
       <div class="legend">
+    <div style="font-size:18px;margin-bottom:8px;">No people yet</div>
         <span class="legend-item"><span class="legend-swatch male"></span>Male</span>
+    <div>Use WhatsApp to add: “Add Alice born 1950”, “Link Alice married to Bob”.</div>
         <span class="legend-item"><span class="legend-swatch female"></span>Female</span>
+  </div></div>
         <span class="legend-item"><span class="legend-swatch neutral"></span>Non-binary</span>
         <span class="legend-item"><span class="legend-swatch unknown"></span>Not specified</span>
       </div>
@@ -251,19 +284,33 @@
     </main>
   </div>
 
+
+  <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
   <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
   <script>
+  <script>
+    const qs = new URLSearchParams(location.search);
     const qs = new URLSearchParams(location.search);
     const code = (qs.get("code") || "").toUpperCase();
+    const code = (qs.get("code") || "").toUpperCase();
+    const titleEl = document.getElementById("title");
     const treeNameEl = document.getElementById("tree-name");
     const treeCodeEl = document.getElementById("tree-code");
     const statusEl = document.getElementById("status");
+    const statusEl = document.getElementById("status");
+    const emptyEl = document.getElementById("empty");
     const emptyEl = document.getElementById("empty");
 
+
+    if (!/^[A-Z0-9]{6}$/.test(code)) {
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       document.body.innerHTML = "<p style='padding:16px'>Missing or bad code. Use ?code=ABC123</p>";
+      document.body.innerHTML = "<p style='padding:16px'>Missing or bad code. Use ?code=ABC123</p>";
+      throw new Error("bad code");
       throw new Error("bad code");
     }
+    }
+
 
     treeCodeEl.textContent = code;
 
@@ -276,22 +323,37 @@
     const DIVORCE_OFFSET = 32;
 
     const cy = cytoscape({
+    const cy = cytoscape({
+      container: document.getElementById('cy'),
       container: document.getElementById('cy'),
       elements: [],
+      elements: [],
       style: [
+      style: [
+        { selector: 'node',
         {
           selector: 'node[type = "person"]',
           style: {
+          style: {
             'shape': 'round-rectangle',
-            'width': 148,
-            'height': 112,
+            'shape': 'data(shape)',
+            'background-color': '#fff',
+            'width': 'data(width)',
+            'border-color': '#777',
+            'height': 'data(height)',
+            'border-width': 1,
             'background-color': 'data(color)',
             'border-color': '#d8cec2',
             'border-width': 2,
             'label': 'data(label)',
+            'label': 'data(label)',
             'text-wrap': 'wrap',
+            'text-wrap': 'wrap',
+            'text-max-width': 180,
             'text-max-width': 112,
+            'padding': '8px',
             'padding': '14px',
+            'font-size': 12
             'font-size': 13,
             'font-weight': 500,
             'text-valign': 'center',
@@ -315,20 +377,38 @@
             'background-opacity': 0,
             'events': 'no'
           }
+          }
         },
+        },
+        { selector: 'edge',
         {
           selector: 'edge',
           style: {
+          style: {
+            'width': 1,
             'width': 2,
+            'line-color': '#bbb',
             'line-color': '#4a3c31',
+            'target-arrow-color': '#bbb',
             'target-arrow-shape': 'none',
+            'curve-style': 'bezier',
             'source-arrow-shape': 'none',
+            'target-arrow-shape': 'triangle',
             'curve-style': 'straight',
+            'label': 'data(kind)',
             'opacity': 1,
+            'font-size': 9,
             'line-cap': 'round'
+            'text-rotation': 'autorotate',
+            'text-margin-y': -6,
+            'opacity': 0.9
+          }
           }
         },
+        },
+        { selector: 'edge[kind = "spouse_of"], edge[kind = "partner_of"]',
         {
+          style: { 'target-arrow-shape': 'none', 'line-style': 'solid' }
           selector: 'edge[kind = "marriage"]',
           style: { 'width': 3.2, 'line-color': '#2d2117' }
         },
@@ -340,7 +420,10 @@
           selector: 'edge[kind = "sibling"]',
           style: { 'line-color': '#2d2117' }
         },
+        },
+        { selector: 'edge[kind = "parent_of"]',
         {
+          style: { 'target-arrow-shape': 'triangle' }
           selector: 'edge[kind = "child"]',
           style: { 'line-color': '#2d2117' }
         },
@@ -353,10 +436,15 @@
             'z-index': 10
           }
         }
+        }
       ],
+      ],
+      layout: { name: 'breadthfirst', directed: true, padding: 20, spacingFactor: 1.2 }
       layout: { name: 'preset' },
       wheelSensitivity: 0.1
     });
+    });
+
 
     function buildPedigreeLayout(apiNodes, apiEdges, apiFamilies) {
       const nodeMap = new Map(apiNodes.map((n) => [n.data.id, n]));
@@ -373,12 +461,22 @@
       const { positions } = computePositions(apiNodes, families, generation);
       const connectors = buildConnectorElements(families, positions);
 
-      const personElements = apiNodes.map((n) => ({
-        data: { ...n.data, type: 'person', color: colorForGender(n.data.gender) },
-        position: positions.get(n.data.id) || { x: 0, y: 0 },
-        locked: true,
-        grabbable: false,
-      }));
+      const personElements = apiNodes.map((n) => {
+        const glyph = glyphForGender(n.data.gender);
+        return {
+          data: {
+            ...n.data,
+            type: 'person',
+            color: glyph.color,
+            shape: glyph.shape,
+            width: glyph.width,
+            height: glyph.height,
+          },
+          position: positions.get(n.data.id) || { x: 0, y: 0 },
+          locked: true,
+          grabbable: false,
+        };
+      });
 
       return {
         personElements,
@@ -736,63 +834,99 @@
       return { nodes, edges };
     }
 
-    function colorForGender(gender) {
+    function glyphForGender(gender) {
       switch (gender) {
         case 'male':
-          return '#c8daf9';
+          return { color: '#c8daf9', shape: 'square', width: 120, height: 120 };
         case 'female':
-          return '#f8d5e4';
+          return { color: '#f8d5e4', shape: 'ellipse', width: 120, height: 120 };
         case 'nonbinary':
         case 'non-binary':
         case 'nb':
-          return '#e3dbf7';
+          return { color: '#e3dbf7', shape: 'round-diamond', width: 130, height: 130 };
         default:
-          return '#f4efe7';
+          return { color: '#f4efe7', shape: 'round-rectangle', width: 148, height: 112 };
       }
     }
 
     async function load() {
+    async function load() {
+      statusEl.textContent = "Loading…";
       statusEl.textContent = "Loading…";
       try {
+      try {
+        const r = await fetch(`/api/tree?code=${code}`, { cache: 'no-store' });
         const r = await fetch(`/api/tree?code=${code}`, { cache: 'no-store' });
         const data = await r.json();
+        const data = await r.json();
+        if (!r.ok) {
         if (!r.ok) {
           statusEl.textContent = `Error: ${data.error || r.status}`;
+          statusEl.textContent = `Error: ${data.error || r.status}`;
+          emptyEl.style.display = 'flex';
           emptyEl.style.display = 'flex';
           return;
+          return;
+        }
         }
 
+
+        titleEl.textContent = `${data.tree.name} — ${data.tree.code}`;
         treeNameEl.textContent = data.tree.name;
         treeCodeEl.textContent = data.tree.code;
         document.title = `Family Tree: ${data.tree.name}`;
 
         const layout = buildPedigreeLayout(data.nodes || [], data.edges || [], data.families || []);
 
+
+        cy.startBatch();
         cy.startBatch();
         cy.elements().remove();
+        cy.elements().remove();
+        cy.add(data.nodes);
         cy.add(layout.personElements);
+        cy.add(data.edges);
         if (layout.connectorNodes.length) cy.add(layout.connectorNodes);
         if (layout.connectorEdges.length) cy.add(layout.connectorEdges);
         cy.endBatch();
+        cy.endBatch();
 
-        const people = cy.collection('node[type = "person"]');
-        emptyEl.style.display = people.length ? 'none' : 'flex';
+
+        cy.layout({ name: 'breadthfirst', directed: true, padding: 20, spacingFactor: 1.2 }).run();
+        const personCount = layout.personElements.length;
+        emptyEl.style.display = personCount ? 'none' : 'flex';
         cy.resize();
-        if (people.length) {
+        if (personCount) {
+          const people = cy.collection('node[type = "person"]');
           cy.fit(people, 140);
         }
 
+
+        emptyEl.style.display = (data.nodes.length || data.edges.length) ? 'none' : 'flex';
         const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
         statusEl.textContent = `Synced · ${stamp}`;
       } catch (e) {
+      } catch (e) {
+        console.error(e);
         console.error(e);
         statusEl.textContent = "Error loading";
+        statusEl.textContent = "Error loading";
+        emptyEl.style.display = 'flex';
         emptyEl.style.display = 'flex';
       }
+      }
+    }
     }
 
+
+    load();
     load();
     setInterval(load, 8000);
+    setInterval(load, 8000);
+  </script>
   </script>
 </body>
+</body>
+</html>
 </html>
