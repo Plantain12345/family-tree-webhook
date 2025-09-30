@@ -19,23 +19,131 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Tree not found" });
     }
 
-    const [{ data: people, error: pErr }, { data: rels, error: rErr }] = await Promise.all([
-      db.from("persons").select("id, primary_name, dob_dmy").eq("tree_id", tree.id),
+    const [peopleResult, relsResult] = await Promise.all([
+      db
+        .from("persons")
+        .select("id, primary_name, dob_dmy, gender")
+        .eq("tree_id", tree.id),
       db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
     ]);
 
-    if (pErr || rErr) {
-      console.log("API /tree persons/relationships error", pErr, rErr);
+    let peopleError = peopleResult.error;
+    let peopleList = peopleResult.data || [];
+
+    if (peopleError && /column .*gender/i.test(peopleError.message || "")) {
+      const fallback = await db
+        .from("persons")
+        .select("id, primary_name, dob_dmy")
+        .eq("tree_id", tree.id);
+      if (!fallback.error) {
+        peopleList = fallback.data || [];
+        peopleError = null;
+      }
+    }
+
+    if (peopleError || relsResult.error) {
+      console.log("API /tree persons/relationships error", peopleError, relsResult.error);
       return res.status(500).json({ error: "Query error" });
     }
 
-    const nodes = (people || []).map((p) => ({
-      data: { id: p.id, label: p.primary_name + (p.dob_dmy ? `\n(b. ${p.dob_dmy})` : "") },
-    }));
+    const rels = relsResult.data || [];
+
+    const nodes = peopleList.map((p) => {
+      const lines = [p.primary_name || ""];
+      if (p.dob_dmy) lines.push(`b. ${p.dob_dmy}`);
+      const normalizedGender = normalizeGender(p.gender);
+      return {
+        data: {
+          id: p.id,
+          label: lines.join("\n"),
+          gender: normalizedGender,
+          dob: p.dob_dmy || null,
+        },
+      };
+    });
 
     const edges = (rels || []).map((r) => ({
       data: { id: `${r.a}_${r.kind}_${r.b}`, source: r.a, target: r.b, kind: r.kind },
     }));
+
+    const spouseKinds = new Set(["spouse_of", "partner_of"]);
+    const divorceKinds = new Set(["divorced_from", "separated_from"]);
+    const familiesMap = new Map();
+    const parentsByChild = new Map();
+
+    for (const rel of rels) {
+      if (spouseKinds.has(rel.kind) || divorceKinds.has(rel.kind)) {
+        const pair = [rel.a, rel.b].sort();
+        const key = pair.join("_");
+        if (!familiesMap.has(key)) {
+          familiesMap.set(key, {
+            id: `fam_${key}`,
+            spouses: pair,
+            children: [],
+            status: null,
+          });
+        }
+        if (divorceKinds.has(rel.kind)) {
+          const family = familiesMap.get(key);
+          family.status = rel.kind;
+        }
+      }
+
+      if (rel.kind === "parent_of" || rel.kind === "child_of") {
+        const parent = rel.kind === "parent_of" ? rel.a : rel.b;
+        const child = rel.kind === "parent_of" ? rel.b : rel.a;
+        if (!parentsByChild.has(child)) parentsByChild.set(child, new Set());
+        parentsByChild.get(child).add(parent);
+      }
+    }
+
+    for (const [child, parentSet] of parentsByChild.entries()) {
+      const parents = Array.from(parentSet).sort();
+      if (parents.length === 0) continue;
+      const key = parents.join("_");
+      if (!familiesMap.has(key)) {
+        familiesMap.set(key, {
+          id: `fam_${key}`,
+          spouses: parents,
+          children: [],
+          status: null,
+        });
+      }
+      const family = familiesMap.get(key);
+      if (!family.children.includes(child)) family.children.push(child);
+    }
+
+    const labelByPerson = new Map(peopleList.map((p) => [p.id, p.primary_name || ""]));
+
+    const birthOrder = new Map(
+      peopleList.map((p) => {
+        const dobValue = normalizeDob(p.dob_dmy);
+        return [p.id, dobValue];
+      })
+    );
+
+    const families = Array.from(familiesMap.values())
+      .map((family) => {
+        const seen = new Set();
+        const orderedChildren = [];
+        for (const childId of family.children) {
+          if (!seen.has(childId)) {
+            seen.add(childId);
+            orderedChildren.push(childId);
+          }
+        }
+        orderedChildren.sort((a, b) => {
+          const aVal = birthOrder.get(a) ?? Number.POSITIVE_INFINITY;
+          const bVal = birthOrder.get(b) ?? Number.POSITIVE_INFINITY;
+          if (aVal !== bVal) return aVal - bVal;
+          const aLabel = labelByPerson.get(a) || "";
+          const bLabel = labelByPerson.get(b) || "";
+          return aLabel.localeCompare(bLabel);
+        });
+        family.children = orderedChildren;
+        return family;
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
 
     const hasData = nodes.length > 0 || edges.length > 0;
 
@@ -43,10 +151,50 @@ export default async function handler(req, res) {
       tree: { id: tree.id, name: tree.name, code: tree.join_code },
       nodes,
       edges,
+      families,
       hasData,
     });
   } catch (e) {
     console.error("API /tree fatal error:", e);
     return res.status(500).json({ error: "Server error" });
   }
+}
+
+function normalizeGender(raw) {
+  if (raw === null || raw === undefined) return null;
+  const value = String(raw).trim().toLowerCase();
+  if (!value) return null;
+  if (["m", "male", "man", "boy"].includes(value)) return "male";
+  if (["f", "female", "woman", "girl"].includes(value)) return "female";
+  if (["nb", "nonbinary", "non-binary", "non binary"].includes(value)) return "nonbinary";
+  return value;
+}
+
+function normalizeDob(dob) {
+  if (!dob) return Number.POSITIVE_INFINITY;
+  const trimmed = dob.trim();
+  if (!trimmed) return Number.POSITIVE_INFINITY;
+
+  const parsed = Date.parse(trimmed);
+  if (!Number.isNaN(parsed)) return parsed;
+
+  const ymdMatch = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (ymdMatch) {
+    const [_, y, m, d] = ymdMatch;
+    return Date.parse(`${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`);
+  }
+
+  const dmyMatch = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+  if (dmyMatch) {
+    const [_, d, m, yRaw] = dmyMatch;
+    const year = yRaw.length === 2 ? `19${yRaw}` : yRaw.padStart(4, "0");
+    return Date.parse(`${year}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`);
+  }
+
+  const yearMatch = trimmed.match(/(\d{4})/);
+  if (yearMatch) {
+    return Date.parse(`${yearMatch[1]}-01-01`);
+  }
+
+  return Number.POSITIVE_INFINITY;
 }
