@@ -29,6 +29,7 @@ const tools = [
                   type: "string",
                   enum: [
                     "help",
+                    "menu",
                     "new_tree",
                     "join_tree",
                     "add_person",
@@ -54,95 +55,7 @@ const tools = [
                 },
                 child: { type: "string" },
                 parentA: { type: "string" },
-                parentB: { type: "string", nullable: true },
-                dob: { type: "string", nullable: true },
-                from: { type: "string" },
-                to: { type: "string" },
-                gender: { type: "string" },
-              },
-              required: ["op"],
-              additionalProperties: false,
-            },
-          },
-        },
-        required: ["ops"],
-        additionalProperties: false,
-      },
-    },
-  },
-];
-
-const SYSTEM = `
-You are a controller that turns family-related natural language into a short list of primitive operations.
-
-PRIMITIVE EDGES ONLY:
-- spouse_of (undirected, normalized a<b)
-- parent_of (directed A -> B)
-
-All other kinship (grandparent, sibling, cousin, etc.) is *derived* later. Do not emit new edge kinds.
-
-You receive CONTEXT with:
-- active_tree_name (string|null)
-- last_person_name (string|null)
-- people[] (known names in the active tree)
-- relationships[] (possibly partial list of {a,b,kind})
-
-RULES
-- Output exactly one tool call (set_ops) with fully resolved names (no pronouns like his/her/their/my/our/I).
-- If a pronoun is used and the subject is not otherwise explicit, default to last_person_name.
-- Prefer capitalization from people[] when resolving existing names (case-insensitive match).
-- Never invent dates. If a dob is missing, omit it.
-- For gender, use the normalized values male, female, nonbinary, or unknown unless the user specifies another explicit term.
-
-MAPPING EXAMPLES (non-exhaustive)
-- "Create a family tree called Kintu" -> [{op:"new_tree", name:"Kintu"}]
-- "Join code ABC123" -> [{op:"join_tree", code:"ABC123"}]
-- "Show the tree" -> [{op:"view_tree"}]
-- "Show Alice" -> [{op:"view_person", name:"Alice"}]
-- "Leave tree" -> [{op:"leave"}]
-
-Marriage/Partnership:
-- "X is married to Y", "Link X and Y", "Make X Y's husband/wife", "X is Y's spouse"
-  -> [{op:"link", a:"X", kind:"spouse_of", b:"Y"}]
-- "X is Y's partner"
-  -> [{op:"link", a:"X", kind:"partner_of", b:"Y"}]
-
-Parent/Child:
-- "X is Y's father/mother/parent"
-  -> [{op:"link", a:"X", kind:"parent_of", b:"Y"}]
-- "Add Y, child of X and Z" / "X and Z's daughter/son is Y"
-  -> [{op:"add_child", child:"Y", parentA:"X", parentB:"Z"}]
-- "Add his/her/their son Y (born 1983)" defaults parentA to last_person_name.
-
-Rename & DOB:
-- "Rename A to B" / "Change A to B" -> [{op:"rename", from:"A", to:"B"}]
-- "Set A's birth year to 1950" -> [{op:"set_dob", name:"A", dob:"1950"}]
-- "Add Alice born 1950" -> [{op:"add_person", name:"Alice", dob:"1950"}]
-
-Gender:
-- "A is female" -> [{op:"set_gender", name:"A", gender:"female"}]
-- "Make A male" -> [{op:"set_gender", name:"A", gender:"male"}]
-
-If pronouns are used and last_person_name is null and subject is unclear, return [{op:"help"}].
-`;
-
-/* ------------------------------- helpers ------------------------------- */
-
-function titleCaseFromKnown(name, people) {
-  if (!name) return name;
-  const n = name.trim().toLowerCase();
-  const hit = (people || []).find((p) => p.trim().toLowerCase() === n);
-  return hit || name.trim();
-}
-
-const FALLBACK_GENDER_MAP = new Map([
-  ["m", "male"],
-  ["male", "male"],
-  ["man", "male"],
-  ["boy", "male"],
-  ["f", "female"],
-  ["female", "female"],
-  ["woman", "female"],
+@@ -146,91 +147,107 @@ const FALLBACK_GENDER_MAP = new Map([
   ["girl", "female"],
   ["nonbinary", "nonbinary"],
   ["non-binary", "nonbinary"],
@@ -168,6 +81,7 @@ function fallback(text, ctx) {
 
   // basics
   if (/^help$/i.test(t)) ops.push({ op: "help" });
+  if (/^menu$/i.test(t)) ops.push({ op: "menu" });
   const mNew = t.match(
     /^(?:new|create)(?:\s+(?:a\s+)?(?:family\s+)?tree)?\s+(?:called\s+)?(.+)$/i
   );
@@ -207,6 +121,21 @@ function fallback(text, ctx) {
       dob: dob || null,
       parentA: ctx.last_person_name,
     });
+  }
+
+  const mPronParent = t.match(
+    /^add\s+(?:his|her|their)\s+(?:mother|father|mom|mum|dad|parent)\s*,?\s*(.+)$/i
+  );
+  if (mPronParent && ctx?.last_person_name) {
+    const parent = mPronParent[1].trim();
+    if (parent) {
+      ops.push({
+        op: "link",
+        a: parent,
+        kind: "parent_of",
+        b: ctx.last_person_name,
+      });
+    }
   }
 
   // set dob
