@@ -100,7 +100,6 @@ function fallback(text, ctx) {
   );
   if (mAddBorn)
     ops.push({
-@@ -196,51 +229,109 @@ function fallback(text, ctx) {
       op: "add_child",
       child,
       parentA: mChildOfTwo[1].trim(),
@@ -225,7 +224,6 @@ export async function parseOps(input, ctx = {}) {
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: SYSTEM },
-@@ -271,32 +362,40 @@ export async function parseOps(input, ctx = {}) {
           } else {
             // Safe default for ambiguous "link A and B"
             k = "spouse_of";
