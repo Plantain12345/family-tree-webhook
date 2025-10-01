@@ -153,9 +153,15 @@ export async function upsertPersonByName(treeId, name, dob = null) {
   const { data: all } = await db.from("persons").select("*").eq("tree_id", treeId);
   let person = all?.find((p) => normalizeName(p.primary_name) === norm);
   if (person) {
-    if (dob && !person.dob_dmy) {
-      await db.from("persons").update({ dob_dmy: dob }).eq("id", person.id);
-      person.dob_dmy = dob;
+    if (dob !== undefined) {
+      const nextDob = dob || null;
+      if (nextDob !== person.dob_dmy) {
+        await db
+          .from("persons")
+          .update({ dob_dmy: nextDob })
+          .eq("id", person.id);
+        person.dob_dmy = nextDob;
+      }
     }
     return person;
   }
@@ -177,7 +183,7 @@ function minmax(a, b) {
 /**
  * spouse_of / partner_of are stored as a single, undirected edge (normalized a<b)
  * parent_of is directed (a -> b).
- * divorced_from deletes the spouse_of edge between the pair.
+ * divorced_from / separated_from remove any active spouse_of edge and store a status marker.
  * The DB has partial unique indexes:
  *  - spouse_of: unique(tree_id,a,b,kind) where kind='spouse_of'
  *  - parent_of: unique(tree_id,a,b,kind) where kind='parent_of'
@@ -193,6 +199,14 @@ export async function addRelationship(treeId, aId, kind, bId) {
         { onConflict: "tree_id,a,b,kind" }
       );
     if (error && error.code !== "23505") throw error; // ignore dup
+    await db
+      .from("relationships")
+      .delete()
+      .match({ tree_id: treeId, a: x, b: y, kind: "divorced_from" });
+    await db
+      .from("relationships")
+      .delete()
+      .match({ tree_id: treeId, a: x, b: y, kind: "separated_from" });
     return;
   }
 
@@ -207,12 +221,19 @@ export async function addRelationship(treeId, aId, kind, bId) {
     return;
   }
 
-  if (kind === "divorced_from") {
+  if (kind === "divorced_from" || kind === "separated_from") {
     const [x, y] = minmax(aId, bId);
     await db
       .from("relationships")
       .delete()
       .match({ tree_id: treeId, a: x, b: y, kind: "spouse_of" });
+    const { error } = await db
+      .from("relationships")
+      .upsert(
+        { tree_id: treeId, a: x, b: y, kind },
+        { onConflict: "tree_id,a,b,kind" }
+      );
+    if (error && error.code !== "23505") throw error;
     return;
   }
 }
@@ -228,10 +249,14 @@ export async function addChildWithParents(treeId, childName, dob, parentAName, p
   return child;
 }
 
-export async function editPerson(treeId, personId, { newName, dob_dmy }) {
+export async function editPerson(treeId, personId, { newName, dob_dmy, gender }) {
   const patch = {};
-  if (newName) patch.primary_name = newName.trim();
-  if (dob_dmy) patch.dob_dmy = dob_dmy;
+  if (newName !== undefined && newName !== null) {
+    const trimmed = newName.trim();
+    if (trimmed) patch.primary_name = trimmed;
+  }
+  if (dob_dmy !== undefined) patch.dob_dmy = dob_dmy || null;
+  if (gender !== undefined) patch.gender = gender;
   if (Object.keys(patch).length) {
     const r = await db.from("persons").update(patch).eq("id", personId);
     if (r.error) throw r.error;
