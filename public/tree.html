@@ -167,6 +167,44 @@
       background: #f4efe7;
     }
 
+    .alerts {
+      display: none;
+      position: relative;
+      margin-top: 96px;
+      margin-bottom: 18px;
+      align-self: flex-start;
+      max-width: 420px;
+      padding: 18px 22px;
+      border-radius: 18px;
+      background: rgba(248, 229, 213, 0.92);
+      border: 1px solid rgba(210, 177, 150, 0.65);
+      box-shadow: 0 18px 44px rgba(22, 13, 4, 0.08);
+      color: var(--ink);
+      line-height: 1.45;
+      backdrop-filter: blur(4px);
+      z-index: 4;
+    }
+
+    .alerts.visible {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .alerts strong {
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .alerts ul {
+      margin: 0;
+      padding-left: 18px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
     @media (max-width: 720px) {
       header {
         flex-direction: column;
@@ -185,6 +223,11 @@
         margin-bottom: 16px;
         flex-wrap: wrap;
         justify-content: center;
+      }
+
+      .alerts {
+        margin-top: 12px;
+        align-self: stretch;
       }
 
       #empty {
@@ -250,6 +293,7 @@
         <span class="legend-item"><span class="legend-swatch neutral"></span>Non-binary</span>
         <span class="legend-item"><span class="legend-swatch unknown"></span>Not specified</span>
       </div>
+      <div id="alerts" class="alerts" hidden></div>
       <div id="cy"></div>
       <div id="empty"><div class="box">
         <strong>Invite your family</strong>
@@ -266,6 +310,7 @@
     const treeCodeEl = document.getElementById("tree-code");
     const statusEl = document.getElementById("status");
     const emptyEl = document.getElementById("empty");
+    const alertsEl = document.getElementById("alerts");
 
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       document.body.innerHTML = "<p style='padding:16px'>Missing or bad code. Use ?code=ABC123</p>";
@@ -338,6 +383,21 @@
         {
           selector: 'edge[kind = "marriage"]',
           style: { 'width': 3.2, 'line-color': '#2d2117' }
+        },
+        {
+          selector: 'edge[kind = "marriage"][status]',
+          style: {
+            'line-style': 'dashed',
+            'line-dash-pattern': [14, 10],
+            'line-color': '#c45b4d'
+          }
+        },
+        {
+          selector: 'edge[kind = "marriage"][status = "separated_from"]',
+          style: {
+            'line-dash-pattern': [8, 8],
+            'line-color': '#d48d5d'
+          }
         },
         {
           selector: 'edge[kind = "descent"]',
@@ -623,8 +683,15 @@
           .filter((id) => positions.has(id))
           .sort((a, b) => positions.get(a).x - positions.get(b).x)
           .forEach((spouseId) => {
+            const edgeData = {
+              id: `family:${family.id}:marriage:${spouseId}`,
+              source: marriageId,
+              target: spouseId,
+              kind: 'marriage',
+            };
+            if (family.status) edgeData.status = family.status;
             edges.push({
-              data: { id: `family:${family.id}:marriage:${spouseId}`, source: marriageId, target: spouseId, kind: 'marriage' },
+              data: edgeData,
               selectable: false,
               classes: 'connector-edge',
             });
@@ -785,6 +852,9 @@
 
         const layout = buildPedigreeLayout(data.nodes || [], data.edges || [], data.families || []);
 
+        const issueMessages = (data.issues || []).map(renderIssueMessage).filter(Boolean);
+        updateIssuesPanel(issueMessages);
+
         cy.startBatch();
         cy.elements().remove();
         cy.add(layout.personElements);
@@ -801,16 +871,80 @@
         }
 
         const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        statusEl.textContent = `Synced · ${stamp}`;
+        if (issueMessages.length) {
+          statusEl.textContent = `Warnings · ${issueMessages.length} issue${issueMessages.length === 1 ? '' : 's'}`;
+        } else {
+          statusEl.textContent = `Synced · ${stamp}`;
+        }
       } catch (e) {
         console.error(e);
         statusEl.textContent = "Error loading";
         emptyEl.style.display = 'flex';
+        updateIssuesPanel([]);
       }
     }
 
     load();
     setInterval(load, 8000);
+
+    function describePerson(person) {
+      if (!person) return 'Unknown person';
+      const parts = [];
+      if (person.name) parts.push(person.name);
+      if (person.dob) parts.push(`b. ${person.dob}`);
+      return parts.join(' ');
+    }
+
+    function renderIssueMessage(issue) {
+      if (!issue || typeof issue !== 'object') return null;
+      if (issue.type === 'parent_age_anomaly') {
+        const parent = describePerson(issue.parent);
+        const child = describePerson(issue.child);
+        return `${parent} is recorded as a parent of ${child}, but the parent is younger than the child.`;
+      }
+      if (issue.type === 'duplicate_person') {
+        const people = Array.isArray(issue.people) ? issue.people.map(describePerson).join(', ') : '';
+        if (!people) return 'Duplicate person records detected.';
+        return `Duplicate person records detected for ${people}. The assistant may be adding a new entry instead of updating.`;
+      }
+      return null;
+    }
+
+    function updateIssuesPanel(messages) {
+      if (!alertsEl) return;
+      alertsEl.innerHTML = '';
+      if (!messages || !messages.length) {
+        alertsEl.classList.remove('visible');
+        alertsEl.style.display = 'none';
+        alertsEl.setAttribute('hidden', '');
+        return;
+      }
+
+      alertsEl.removeAttribute('hidden');
+      alertsEl.classList.add('visible');
+      alertsEl.style.display = 'flex';
+
+      const heading = document.createElement('strong');
+      heading.textContent = 'Data needs attention';
+      alertsEl.appendChild(heading);
+
+      const list = document.createElement('ul');
+      messages.forEach((message) => {
+        if (!message) return;
+        const item = document.createElement('li');
+        item.textContent = message;
+        list.appendChild(item);
+      });
+
+      if (!list.children.length) {
+        alertsEl.classList.remove('visible');
+        alertsEl.style.display = 'none';
+        alertsEl.setAttribute('hidden', '');
+        return;
+      }
+
+      alertsEl.appendChild(list);
+    }
   </script>
 </body>
 </html>
