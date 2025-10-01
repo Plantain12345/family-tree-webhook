@@ -43,7 +43,7 @@
       justify-content: space-between;
       gap: 24px;
       padding: 28px 36px 20px;
-         background: var(--surface);
+      background: var(--surface);
       box-shadow: 0 12px 32px rgba(21, 12, 4, 0.05);
       z-index: 10;
     }
@@ -86,6 +86,7 @@
       background: linear-gradient(180deg, rgba(248, 242, 236, 0.55) 0%, rgba(255, 255, 255, 0.9) 60%, rgba(255, 255, 255, 1) 100%);
       display: flex;
       flex-direction: column;
+      gap: 20px;
     }
 
     .legend {
@@ -93,9 +94,54 @@
       top: 42px;
       right: 56px;
       display: flex;
-@@ -190,56 +165,50 @@
       flex-direction: column;
       gap: 10px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .legend-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+    }
+
+    .legend-swatch.male {
+      background: #c8daf9;
+    }
+
+    .legend-swatch.female {
+      background: #f8d5e4;
+    }
+
+    .legend-swatch.neutral {
+      background: #e3dbf7;
+    }
+
+    .legend-swatch.unknown {
+      background: #f4efe7;
+    }
+
+    .alerts {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-self: flex-start;
+      background: rgba(255, 255, 255, 0.75);
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      padding: 16px 20px;
+      box-shadow: 0 24px 46px rgba(27, 17, 8, 0.08);
     }
 
     .alerts strong {
@@ -112,6 +158,81 @@
       color: var(--muted);
     }
 
+    #cy {
+      width: 100%;
+      flex: 1;
+      min-height: 480px;
+      border-radius: 26px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      box-shadow: 0 28px 60px rgba(27, 17, 8, 0.08);
+    }
+
+    #empty {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    #empty .box {
+      text-align: center;
+      color: var(--muted);
+      padding: 32px 40px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.8);
+      box-shadow: 0 18px 44px rgba(17, 10, 4, 0.08);
+      border: 1px solid var(--border);
+      pointer-events: auto;
+    }
+
+    #empty .box strong {
+      display: block;
+      font-size: 18px;
+      margin-bottom: 6px;
+      color: var(--ink);
+    }
+
+    #empty .share-actions {
+      margin-top: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      align-items: center;
+    }
+
+    #empty .share-note {
+      font-size: 14px;
+      color: var(--muted);
+      max-width: 320px;
+      line-height: 1.5;
+    }
+
+    #share-tree-button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 12px 24px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+    }
+
+    #share-tree-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+      box-shadow: none;
+    }
+
+    #share-tree-button:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 12px 28px rgba(216, 123, 93, 0.35);
+    }
+
     @media (max-width: 720px) {
       header {
         flex-direction: column;
@@ -122,7 +243,9 @@
       .legend {
         position: static;
         margin-bottom: 16px;
+        flex-direction: row;
         flex-wrap: wrap;
+        gap: 14px;
         justify-content: center;
       }
 
@@ -134,32 +257,6 @@
       #empty {
         inset: 24px;
       }
-    }
-
-    #cy {
-      width: 100%;
-      flex: 1;
-      min-height: 480px;
-      border-radius: 26px;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      box-shadow: 0 28px 60px rgba(27, 17, 8, 0.08);
-@@ -257,89 +226,83 @@
-    #empty .box {
-      text-align: center;
-      color: var(--muted);
-      padding: 32px 40px;
-      border-radius: 20px;
-      background: rgba(255, 255, 255, 0.65);
-      box-shadow: 0 18px 44px rgba(17, 10, 4, 0.08);
-      border: 1px solid var(--border);
-    }
-
-    #empty .box strong {
-      display: block;
-      font-size: 18px;
-      margin-bottom: 6px;
-      color: var(--ink);
     }
   </style>
 </head>
@@ -184,7 +281,10 @@
       <div id="cy"></div>
       <div id="empty"><div class="box">
         <strong>Invite your family</strong>
-        <div>Use WhatsApp to add relatives—try “Add Alice born 1950” or “Link Alice married to Bob”.</div>
+        <div class="share-actions">
+          <button id="share-tree-button" type="button" disabled>Share This Tree.</button>
+          <span class="share-note">You can collaborate with others to grow this tree.</span>
+        </div>
       </div></div>
     </main>
   </div>
@@ -197,85 +297,337 @@
     const statusEl = document.getElementById("status");
     const emptyEl = document.getElementById("empty");
     const alertsEl = document.getElementById("alerts");
+    const shareButton = document.getElementById("share-tree-button");
+    const REFRESH_INTERVAL_MS = 60000;
+
+    let shareMessage = null;
 
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       document.body.innerHTML = "<p style='padding:16px'>Missing or bad code. Use ?code=ABC123</p>";
       throw new Error("bad code");
     }
 
-
-    const LEVEL_HEIGHT = 200;
-    const SPOUSE_GAP = 220;
-    const UNIT_GAP = 280;
-    const CHILD_GAP = 150;
-    const DROP_GAP = 90;
-    const DROP_SEGMENT = DROP_GAP / 2;
-    const DIVORCE_OFFSET = 32;
+    if (shareButton) {
+      shareButton.addEventListener("click", () => {
+        if (!shareMessage) return;
+        const encoded = encodeURIComponent(shareMessage);
+        const targetUrl = `https://wa.me/?text=${encoded}`;
+        const popup = window.open(targetUrl, "_blank", "noopener,noreferrer");
+        if (popup) popup.opener = null;
+      });
+    }
 
     const cy = cytoscape({
-      container: document.getElementById('cy'),
+      container: document.getElementById("cy"),
       elements: [],
       style: [
         {
-          selector: 'node[type = "person"]',
+          selector: "node",
           style: {
-            'shape': 'data(shape)',
-            'width': 'data(width)',
-            'height': 'data(height)',
-            'background-color': 'data(color)',
-            'border-color': '#d8cec2',
-            'border-width': 2,
-            'label': 'data(label)',
-            'text-wrap': 'wrap',
-            'text-max-width': 112,
-@@ -825,51 +788,50 @@
-        case 'male':
-          return { color: '#c8daf9', shape: 'square', width: 120, height: 120 };
-        case 'female':
-          return { color: '#f8d5e4', shape: 'ellipse', width: 120, height: 120 };
-        case 'nonbinary':
-        case 'non-binary':
-        case 'nb':
-          return { color: '#e3dbf7', shape: 'round-diamond', width: 130, height: 130 };
+            "background-color": "#f4efe7",
+            "border-color": "#d8cec2",
+            "border-width": 2,
+            shape: "round-rectangle",
+            width: 180,
+            height: 90,
+            padding: "12px",
+            label: "data(label)",
+            "text-wrap": "wrap",
+            "text-max-width": 140,
+            "font-size": 14,
+            "text-valign": "center",
+            "text-halign": "center",
+            color: "#2f2217",
+            "font-weight": 500,
+            "overlay-opacity": 0
+          }
+        },
+        {
+          selector: "node.gender-male",
+          style: {
+            shape: "rectangle",
+            "background-color": "#c8daf9"
+          }
+        },
+        {
+          selector: "node.gender-female",
+          style: {
+            shape: "ellipse",
+            "background-color": "#f8d5e4"
+          }
+        },
+        {
+          selector: "node.gender-nonbinary",
+          style: {
+            shape: "round-diamond",
+            "background-color": "#e3dbf7"
+          }
+        },
+        {
+          selector: "edge",
+          style: {
+            "curve-style": "bezier",
+            width: 2,
+            "line-color": "#d1c5b8",
+            "target-arrow-color": "#d1c5b8",
+            "target-arrow-shape": "none",
+            opacity: 0.9
+          }
+        },
+        {
+          selector: "edge.kind-parent",
+          style: {
+            "target-arrow-shape": "triangle",
+            "arrow-scale": 0.8
+          }
+        },
+        {
+          selector: "edge.kind-spouse",
+          style: {
+            "target-arrow-shape": "none",
+            "curve-style": "unbundled-bezier",
+            "control-point-distance": 30
+          }
+        },
+        {
+          selector: "edge.kind-separated",
+          style: {
+            "line-style": "dashed"
+          }
+        }
+      ],
+      layout: { name: "grid" },
+      wheelSensitivity: 0.2
+    });
+
+    window.addEventListener("resize", () => {
+      cy.resize();
+    });
+
+    function normalizeGender(value) {
+      if (value === null || value === undefined) return "unknown";
+      const lower = String(value).trim().toLowerCase();
+      if (!lower) return "unknown";
+      if (["m", "male", "man", "boy"].includes(lower)) return "male";
+      if (["f", "female", "woman", "girl"].includes(lower)) return "female";
+      if (["nb", "nonbinary", "non-binary", "non binary"].includes(lower)) return "nonbinary";
+      return lower;
+    }
+
+    function buildElements(nodeList = [], edgeList = [], families = []) {
+      const elements = [];
+      const seenEdges = new Set();
+
+      for (const node of nodeList) {
+        if (!node?.data?.id) continue;
+        const gender = normalizeGender(node.data.gender);
+        const classes = ["person", `gender-${gender || "unknown"}`].join(" ");
+        elements.push({
+          data: { ...node.data },
+          classes
+        });
+      }
+
+      function pushEdge(id, source, target, kind, classes) {
+        if (!source || !target) return;
+        const edgeId = id || `${source}_${kind}_${target}`;
+        if (seenEdges.has(edgeId)) return;
+        seenEdges.add(edgeId);
+        elements.push({
+          data: { id: edgeId, source, target, kind },
+          classes: classes.join(" ").trim()
+        });
+      }
+
+      for (const edge of edgeList || []) {
+        if (!edge?.data) continue;
+        const { id, source, target, kind } = edge.data;
+        if (!kind) continue;
+        if (kind === "child_of") {
+          pushEdge(id, target, source, "parent_of", ["kind-parent"]);
+        } else if (kind === "parent_of") {
+          pushEdge(id, source, target, "parent_of", ["kind-parent"]);
+        } else if (["spouse_of", "partner_of"].includes(kind)) {
+          const [a, b] = [source, target].sort();
+          pushEdge(`${a}_spouse_${b}`, a, b, "spouse_of", ["kind-spouse"]);
+        } else if (["divorced_from", "separated_from"].includes(kind)) {
+          const [a, b] = [source, target].sort();
+          pushEdge(`${a}_${kind}_${b}`, a, b, kind, ["kind-separated"]);
+        } else {
+          pushEdge(id, source, target, kind, ["kind-generic"]);
+        }
+      }
+
+      for (const family of families || []) {
+        const spouses = Array.isArray(family?.spouses) ? family.spouses : [];
+        if (spouses.length >= 2) {
+          for (let i = 0; i < spouses.length; i++) {
+            for (let j = i + 1; j < spouses.length; j++) {
+              const [a, b] = [spouses[i], spouses[j]].sort();
+              pushEdge(`${a}_spouse_${b}`, a, b, "spouse_of", ["kind-spouse"]);
+            }
+          }
+        }
+
+        const parents = spouses.length ? spouses : Array.isArray(family?.parents) ? family.parents : [];
+        const children = Array.isArray(family?.children) ? family.children : [];
+        for (const parent of parents) {
+          for (const child of children) {
+            pushEdge(`${parent}_parent_${child}`, parent, child, "parent_of", ["kind-parent"]);
+          }
+        }
+      }
+
+      return elements;
+    }
+
+    function describePerson(person) {
+      if (!person) return null;
+      if (person.dob) return `${person.name} (b. ${person.dob})`;
+      return person.name || null;
+    }
+
+    function formatIssue(issue) {
+      if (!issue || typeof issue !== "object") return null;
+      if (issue.message) return issue.message;
+      switch (issue.type) {
+        case "duplicate_person": {
+          const names = (issue.people || []).map(describePerson).filter(Boolean);
+          if (!names.length) return null;
+          return `Possible duplicate records: ${names.join(", ")}`;
+        }
+        case "parent_age_anomaly": {
+          const parent = describePerson(issue.parent);
+          const child = describePerson(issue.child);
+          if (!parent || !child) return null;
+          return `Check ages: ${parent} appears younger than ${child}.`;
+        }
         default:
-          return { color: '#f4efe7', shape: 'round-rectangle', width: 148, height: 112 };
+          return null;
       }
     }
 
-    async function load() {
+    function updateIssuesPanel(messages) {
+      const filtered = messages.filter(Boolean);
+      if (!filtered.length) {
+        alertsEl.hidden = true;
+        alertsEl.innerHTML = "";
+        return;
+      }
+
+      const list = document.createElement("ul");
+      for (const message of filtered) {
+        const li = document.createElement("li");
+        li.textContent = message;
+        list.appendChild(li);
+      }
+
+      alertsEl.innerHTML = "";
+      const heading = document.createElement("strong");
+      heading.textContent = "Data checks";
+      alertsEl.appendChild(heading);
+      alertsEl.appendChild(list);
+      alertsEl.hidden = false;
+    }
+
+    function enableSharing(treeName) {
+      if (!shareButton) return;
+      const shareUrl = new URL(location.pathname, location.origin);
+      shareUrl.search = "";
+      shareUrl.searchParams.set("code", code);
+      shareMessage = `Join our family tree “${treeName}”: ${shareUrl.toString()}`;
+      shareButton.disabled = false;
+      shareButton.setAttribute("aria-label", `Share ${treeName} via WhatsApp`);
+    }
+
+    function disableSharing() {
+      if (!shareButton) return;
+      shareMessage = null;
+      shareButton.disabled = true;
+      shareButton.removeAttribute("aria-label");
+    }
+
+    async function loadTree() {
       statusEl.textContent = "Loading…";
+
       try {
-        const r = await fetch(`/api/tree?code=${code}`, { cache: 'no-store' });
-        const data = await r.json();
-        if (!r.ok) {
-          statusEl.textContent = `Error: ${data.error || r.status}`;
-          emptyEl.style.display = 'flex';
+        const response = await fetch(`/api/tree?code=${code}`, { cache: "no-store" });
+        let payload = null;
+        try {
+          payload = await response.json();
+        } catch (parseError) {
+          console.error("Failed to parse tree response", parseError);
+        }
+
+        if (!response.ok || !payload) {
+          const message = payload?.error || response.statusText || "Unknown error";
+          statusEl.textContent = `Error: ${message}`;
+          emptyEl.style.display = "flex";
+          updateIssuesPanel([]);
+          disableSharing();
           return;
         }
 
-        treeNameEl.textContent = data.tree.name;
-        document.title = `Family Tree: ${data.tree.name}`;
+        treeNameEl.textContent = payload.tree?.name || "Family Tree";
+        document.title = payload.tree?.name ? `Family Tree: ${payload.tree.name}` : "Family Tree";
 
-        const layout = buildPedigreeLayout(data.nodes || [], data.edges || [], data.families || []);
+        const elements = buildElements(payload.nodes || [], payload.edges || [], payload.families || []);
+        cy.batch(() => {
+          cy.elements().remove();
+          cy.add(elements);
+        });
 
-        const issueMessages = (data.issues || []).map(renderIssueMessage).filter(Boolean);
-        updateIssuesPanel(issueMessages);
-
-        cy.startBatch();
-        cy.elements().remove();
-        cy.add(layout.personElements);
-        if (layout.connectorNodes.length) cy.add(layout.connectorNodes);
-        if (layout.connectorEdges.length) cy.add(layout.connectorEdges);
-        cy.endBatch();
-
-        const personCount = layout.personElements.length;
-        emptyEl.style.display = personCount ? 'none' : 'flex';
-        cy.resize();
-        if (personCount) {
-          const people = cy.collection('node[type = "person"]');
-          cy.fit(people, 140);
+        let layoutRoots;
+        const parentEdges = cy.edges(".kind-parent");
+        if (parentEdges.length) {
+          const childIds = new Set(parentEdges.map((edge) => edge.target().id()));
+          const roots = cy.nodes().filter((node) => !childIds.has(node.id()));
+          if (roots.length) layoutRoots = roots;
         }
 
-        const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const layout = cy.layout({
+          name: "breadthfirst",
+          fit: false,
+          padding: 60,
+          spacingFactor: 1.1,
+          directed: true,
+          avoidOverlap: true,
+          roots: layoutRoots
+        });
+        layout.run();
+        const personCount = cy.nodes().length;
+        if (personCount) {
+          cy.fit(cy.nodes(), 80);
+        } else {
+          cy.reset();
+        }
+        cy.resize();
+        emptyEl.style.display = personCount ? "none" : "flex";
+
+        const issueMessages = (payload.issues || []).map(formatIssue).filter(Boolean);
+        updateIssuesPanel(issueMessages);
+
+        const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         if (issueMessages.length) {
-          statusEl.textContent = `Warnings · ${issueMessages.length} issue${issueMessages.length === 1 ? '' : 's'}`;
+          statusEl.textContent = `Warnings · ${issueMessages.length} issue${issueMessages.length === 1 ? "" : "s"}`;
+        } else if (personCount) {
+          statusEl.textContent = `Updated ${stamp}`;
+        } else {
+          statusEl.textContent = `Tree is empty · Updated ${stamp}`;
+        }
+
+        enableSharing(payload.tree?.name || "this tree");
+      } catch (error) {
+        console.error("Failed to load tree", error);
+        statusEl.textContent = "Error loading tree";
+        emptyEl.style.display = "flex";
+        updateIssuesPanel([]);
+        disableSharing();
+      }
+    }
+
+    loadTree();
+    setInterval(loadTree, REFRESH_INTERVAL_MS);
+  </script>
+</body>
+</html>
