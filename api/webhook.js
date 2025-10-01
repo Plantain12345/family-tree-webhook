@@ -27,6 +27,12 @@ function treeUrl(code) {
   return `${BASE_URL}/tree.html?code=${encodeURIComponent(code)}`;
 }
 
+function shareLinkText(tree) {
+  if (!tree?.join_code) return null;
+  const liveUrl = treeUrl(tree.join_code);
+  return `Forward this link to your family so they can join:\n${liveUrl}`;
+}
+
 const PRONOUNS = new Set([
   "his",
   "her",
@@ -52,114 +58,7 @@ const GENDER_SYNONYMS = new Map([
   ["nonbinary", "nonbinary"],
   ["non-binary", "nonbinary"],
   ["non binary", "nonbinary"],
-  ["nb", "nonbinary"],
-  ["enby", "nonbinary"],
-]);
-
-const FOLLOW_UP_PROMPT =
-  "What else would you like to do to your family tree? I understand plain english. Or type 'menu' to view your options.";
-
-const MENU_ALIASES = {
-  NEW: "MENU_START_TREE",
-  JOIN: "MENU_JOIN_TREE",
-  HELP: "MENU_HELP",
-};
-
-function escapeRegExp(value) {
-  const str = String(value);
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function guessParentDirection(message, nameA, nameB) {
-  const lower = (message || "").toLowerCase();
-  const a = (nameA || "").trim().toLowerCase();
-  const b = (nameB || "").trim().toLowerCase();
-  if (!a || !b || !lower) return null;
-
-  const possA = new RegExp(`${escapeRegExp(a)}\s*['’]s\s+${PARENT_KEYWORD_PATTERN}`);
-  const possB = new RegExp(`${escapeRegExp(b)}\s*['’]s\s+${PARENT_KEYWORD_PATTERN}`);
-
-  const aIsChild = possA.test(lower);
-  const bIsChild = possB.test(lower);
-  if (aIsChild && !bIsChild) return { parent: "b", reason: "possessive" };
-  if (bIsChild && !aIsChild) return { parent: "a", reason: "possessive" };
-
-  const parentAfterA = new RegExp(`${PARENT_KEYWORD_PATTERN}[^a-z0-9]+${escapeRegExp(a)}\\b`);
-  const parentAfterB = new RegExp(`${PARENT_KEYWORD_PATTERN}[^a-z0-9]+${escapeRegExp(b)}\\b`);
-  const parentBeforeA = new RegExp(`${escapeRegExp(a)}\\b[^a-z0-9]+${PARENT_KEYWORD_PATTERN}`);
-  const parentBeforeB = new RegExp(`${escapeRegExp(b)}\\b[^a-z0-9]+${PARENT_KEYWORD_PATTERN}`);
-
-  const aLooksParent = parentAfterA.test(lower) || parentBeforeA.test(lower);
-  const bLooksParent = parentAfterB.test(lower) || parentBeforeB.test(lower);
-
-  if (aLooksParent && !bLooksParent) return { parent: "a", reason: "keyword" };
-  if (bLooksParent && !aLooksParent) return { parent: "b", reason: "keyword" };
-
-  const pronounParentRe = new RegExp(`(their|his|her)\s+${PARENT_KEYWORD_PATTERN}`);
-  if (pronounParentRe.test(lower)) {
-    if (parentAfterA.test(lower)) return { parent: "a", reason: "pronoun" };
-    if (parentAfterB.test(lower)) return { parent: "b", reason: "pronoun" };
-  }
-
-  return null;
-}
-
-function normalizeGenderValue(value) {
-  if (value === null || value === undefined) return null;
-  const key = String(value).trim().toLowerCase();
-  if (!key) return null;
-  return GENDER_SYNONYMS.get(key) || key;
-}
-
-function appendFollowUp(message) {
-  const trimmed = (message || "").trim();
-  if (!trimmed) return FOLLOW_UP_PROMPT;
-  return `${trimmed}\n\n${FOLLOW_UP_PROMPT}`;
-}
-
-function buildRelationshipContext(people = [], rels = []) {
-  if (!people.length || !rels.length) return [];
-  const nameById = new Map(people.map((p) => [p.id, p.primary_name]));
-  return rels
-    .map((rel) => {
-      const aName = nameById.get(rel.a);
-      const bName = nameById.get(rel.b);
-      if (!aName || !bName) return null;
-      return { a: aName, b: bName, kind: rel.kind };
-    })
-    .filter(Boolean);
-}
-
-async function describeAmbiguity(treeId, name) {
-  if (!treeId || !name) return null;
-  const matches = await listPersonsByExactName(treeId, name);
-  if (matches.length <= 1) return null;
-
-  const bullets = [];
-  for (const match of matches) {
-    let summary;
-    try {
-      summary = await personSummary(treeId, match.id);
-    } catch (error) {
-      console.error("personSummary error while disambiguating:", error);
-      summary = null;
-    }
-
-    const details = [];
-    if (match.dob_dmy) details.push(`born ${match.dob_dmy}`);
-    if (summary?.parents?.length)
-      details.push(`parent(s): ${summary.parents.join(", ")}`);
-    if (summary?.children?.length)
-      details.push(`child(ren): ${summary.children.join(", ")}`);
-    if (summary?.spouses?.length)
-      details.push(`spouse(s): ${summary.spouses.join(", ")}`);
-
-    const descriptor = details.length
-      ? `${match.primary_name} (${details.join("; ")})`
-      : `${match.primary_name} (no extra details yet)`;
-    bullets.push(`• ${descriptor}`);
-  }
-
+@@ -163,53 +169,57 @@ async function describeAmbiguity(treeId, name) {
   return (
     `I know more than one person named ${name}. Please tell me which one you mean by adding a detail such as their birth year or a close relative.` +
     (bullets.length ? `\n${bullets.join("\n")}` : "")
@@ -185,9 +84,13 @@ function menuGuidanceText(id, tree) {
       return "To start a new family tree, tell me its name. For example, say \"Create a family tree called The Kintu Family\".";
     case "MENU_JOIN_TREE":
       return "To join an existing tree, send the six-letter join code. Try something like \"Join ABC123\".";
-    case "MENU_SHOW_CODE":
+    case "MENU_SHARE_TREE":
       if (tree) {
-        return `Your current tree is “${tree.name}”. Share the join code ${tree.join_code} so others can join.`;
+        const shareMessage = shareLinkText(tree);
+        if (shareMessage) {
+          return `${shareMessage}\nYou can open it yourself or forward it to relatives.`;
+        }
+        return "I couldn't find a shareable link just now. Please try again in a moment.";
       }
       return "You're not in a tree yet. You can start one or join with a code that someone shares with you.";
     case "MENU_ADD_PERSON":
@@ -213,120 +116,7 @@ export default async function handler(req, res) {
     const {
       "hub.mode": mode,
       "hub.verify_token": token,
-      "hub.challenge": challenge,
-    } = req.query;
-    if (mode === "subscribe" && token === VERIFY_TOKEN)
-      return res.status(200).send(challenge);
-    return res.status(403).send("Forbidden");
-  }
-
-  if (req.method !== "POST")
-    return res.status(405).send("Method Not Allowed");
-
-  try {
-    const change = req.body?.entry?.[0]?.changes?.[0]?.value;
-    const msg = change?.messages?.[0];
-    if (!msg?.from) return res.status(200).send("no-op");
-
-    const from = msg.from;
-    const interactiveIdRaw =
-      msg.interactive?.list_reply?.id ||
-      msg.interactive?.button_reply?.id ||
-      null;
-    const textBody = msg.text?.body || "";
-    const text = (textBody || interactiveIdRaw || "").trim();
-    const lower = text.toLowerCase();
-
-    const userState = await getUserState(from);
-    const treeContext = await listPersonsForTree(from);
-    const tree = treeContext?.tree || null;
-    const people = treeContext?.people || [];
-    const rels = treeContext?.rels || [];
-    const relationships = buildRelationshipContext(people, rels);
-
-    const ctx = {
-      active_tree_name: tree?.name || null,
-      last_person_name: userState?.last_person_name || null,
-      people: people.map((p) => p.primary_name),
-      relationships,
-    };
-
-    if (!text) {
-      await sendText(
-        from,
-        appendFollowUp(
-          "I didn't catch that. Please try again or type 'menu' to see your options."
-        )
-      );
-      return res.status(200).send("ok");
-    }
-
-    const normalizedInteractiveId =
-      interactiveIdRaw && (MENU_ALIASES[interactiveIdRaw] || interactiveIdRaw);
-
-    if (
-      normalizedInteractiveId &&
-      normalizedInteractiveId.startsWith("MENU_")
-    ) {
-      const guidance = menuGuidanceText(normalizedInteractiveId, tree);
-      await sendText(from, appendFollowUp(guidance));
-      return res.status(200).send("ok");
-    }
-
-    if (lower === "menu") {
-      await sendMenu(from);
-      await sendText(
-        from,
-        appendFollowUp("I've sent you the menu of quick options.")
-      );
-      return res.status(200).send("ok");
-    }
-
-    if (/^(yes|y)$/i.test(lower)) {
-      const pending = await popPending(from);
-      if (!pending) {
-        await sendText(
-          from,
-          appendFollowUp("There isn't anything waiting for confirmation right now.")
-        );
-      } else {
-        await runConfirmed(pending, from);
-      }
-      return res.status(200).send("ok");
-    }
-
-    if (/^(no|n|cancel)$/i.test(lower)) {
-      const pending = await popPending(from);
-      if (pending) {
-        await sendText(
-          from,
-          appendFollowUp("Okay, I cancelled that request.")
-        );
-      } else {
-        await sendText(
-          from,
-          appendFollowUp("There's nothing waiting for confirmation right now.")
-        );
-      }
-      return res.status(200).send("ok");
-    }
-
-    let ops = await parseOps(text, ctx);
-    if (!ops || !ops.length) {
-      await sendText(
-        from,
-        appendFollowUp(
-          'I am not sure how to help with that. Try saying "help" or "menu".'
-        )
-      );
-      return res.status(200).send("ok");
-    }
-
-    let activeTree = tree;
-    const replies = [];
-
-    for (const op of ops) {
-      if (op.op === "help") {
+@@ -330,120 +340,119 @@ export default async function handler(req, res) {
         replies.push(appendFollowUp(helpText()));
         continue;
       }
@@ -352,9 +142,10 @@ export default async function handler(req, res) {
         await setActiveTreeState(from, createdTree.id);
         await setLastPerson(from, createdTree.id, null, null);
         activeTree = createdTree;
-        const liveUrl = treeUrl(createdTree.join_code);
-        const message =
-          `I created a new family tree called “${createdTree.name}” and made it your active tree. Share the join code ${createdTree.join_code} or visit ${liveUrl} to view it.`;
+        const shareMessage = shareLinkText(createdTree);
+        const message = shareMessage
+          ? `I created a new family tree called “${createdTree.name}” and made it your active tree.\n${shareMessage}`
+          : `I created a new family tree called “${createdTree.name}” and made it your active tree.`;
         replies.push(appendFollowUp(message));
         continue;
       }
@@ -382,9 +173,8 @@ export default async function handler(req, res) {
         activeTree = joinResult.tree;
         await setActiveTreeState(from, activeTree.id);
         await setLastPerson(from, activeTree.id, null, null);
-        const liveUrl = treeUrl(activeTree.join_code);
         const message =
-          `I added you to “${activeTree.name}” and made it your active tree. Share the join code ${activeTree.join_code} or visit ${liveUrl} to see it.`;
+          `You're now part of “${activeTree.name}”, and it's set as your active tree. Choose "Share my tree" from the menu when you'd like to send the link to someone.`;
         replies.push(appendFollowUp(message));
         continue;
       }
@@ -419,9 +209,8 @@ export default async function handler(req, res) {
           );
           continue;
         }
-        const liveUrl = treeUrl(activeTree.join_code);
         const message =
-          `I didn't change anything; here's the information you asked for. “${activeTree.name}” uses join code ${activeTree.join_code} and you can view it at ${liveUrl}.`;
+          `I didn't change anything; “${activeTree.name}” is still your active tree. Use the "Share my tree" option in the menu whenever you want the link again.`;
         replies.push(appendFollowUp(message));
         continue;
       }
@@ -447,27 +236,7 @@ export default async function handler(req, res) {
             )
           );
           continue;
-        }
-
-        const summary = await personSummary(activeTree.id, target.id);
-        const bits = [`Here's what I know about ${summary?.me || target.primary_name}.`];
-        if (summary?.parents?.length)
-          bits.push(`Parents: ${summary.parents.join(", ")}`);
-        if (summary?.spouses?.length)
-          bits.push(`Spouses: ${summary.spouses.join(", ")}`);
-        if (summary?.children?.length)
-          bits.push(`Children: ${summary.children.join(", ")}`);
-        if (bits.length === 1)
-          bits.push("No relatives are linked yet.");
-        replies.push(appendFollowUp(`${bits.join("\n")}`));
-        await setLastPerson(from, activeTree.id, target.id, target.primary_name);
-        continue;
-      }
-
-      if (!activeTree) {
-        replies.push(
-          appendFollowUp(
-            "You're not in a family tree yet. Start one or join with a code before making changes."
+@@ -471,196 +480,196 @@ export default async function handler(req, res) {
           )
         );
         continue;
@@ -493,13 +262,12 @@ export default async function handler(req, res) {
 
         let message;
         if (!existing) {
-          message = `I added ${person.primary_name}${
-            op.dob ? `, born ${op.dob}` : ""
-          } to your tree.`;
+          const birthDetail = op.dob ? ` (b. ${op.dob})` : "";
+          message = `You've added ${person.primary_name}${birthDetail}.`;
         } else if (op.dob && op.dob !== (existing.dob_dmy || "")) {
-          message = `I updated ${person.primary_name}'s birth information to ${op.dob}.`;
+          message = `${person.primary_name}'s birth information is now ${op.dob}.`;
         } else {
-          message = `I found ${person.primary_name} already in your tree, so nothing needed to change.`;
+          message = `${person.primary_name} was already in the tree, so nothing changed.`;
         }
 
         replies.push(appendFollowUp(message));
@@ -548,7 +316,7 @@ export default async function handler(req, res) {
           );
           replies.push(
             appendFollowUp(
-              `I linked ${parentPerson.primary_name} as ${childPerson.primary_name}'s parent.`
+              `${parentPerson.primary_name} is now listed as ${childPerson.primary_name}'s parent.`
             )
           );
           await setLastPerson(
@@ -564,7 +332,7 @@ export default async function handler(req, res) {
         const pretty = kind === "partner_of" ? "partners" : "spouses";
         replies.push(
           appendFollowUp(
-            `I linked ${A.primary_name} and ${B.primary_name} as ${pretty}.`
+            `${A.primary_name} and ${B.primary_name} have been linked as ${pretty}.`
           )
         );
         await setLastPerson(from, activeTree.id, B.id, B.primary_name);
@@ -588,8 +356,9 @@ export default async function handler(req, res) {
         );
 
         const parents = [op.parentA, op.parentB].filter(Boolean).join(" and ");
-        const message = `I added ${child.primary_name}${
-          op.dob ? `, born ${op.dob}` : ""
+        const childBirthDetail = op.dob ? ` (b. ${op.dob})` : "";
+        const message = `You've added ${child.primary_name}${
+          childBirthDetail
         } as the child of ${parents}.`;
         replies.push(appendFollowUp(message));
         await setLastPerson(
@@ -611,8 +380,8 @@ export default async function handler(req, res) {
           op.dob || null
         );
         const message = op.dob
-          ? `I updated ${person.primary_name}'s birth information to ${op.dob}.`
-          : `I cleared ${person.primary_name}'s birth information.`;
+          ? `${person.primary_name}'s birth information is now ${op.dob}.`
+          : `Birth information for ${person.primary_name} has been cleared.`;
         replies.push(appendFollowUp(message));
         await setLastPerson(from, activeTree.id, person.id, person.primary_name);
         continue;
@@ -638,7 +407,7 @@ export default async function handler(req, res) {
           normalized.charAt(0).toUpperCase() + normalized.slice(1);
         replies.push(
           appendFollowUp(
-            `I recorded ${person.primary_name}'s gender as ${prettyGender}.`
+            `${person.primary_name}'s gender is now ${prettyGender}.`
           )
         );
         await setLastPerson(from, activeTree.id, person.id, person.primary_name);
@@ -664,161 +433,7 @@ export default async function handler(req, res) {
         );
         continue;
       }
-
-      if (op.op === "divorce") {
-        const ok = await ensureNamesAreDistinct(
-          activeTree,
-          [op.a, op.b],
-          replies
-        );
-        if (!ok) continue;
-
-        const A = await upsertPersonByName(activeTree.id, op.a);
-        const B = await upsertPersonByName(activeTree.id, op.b);
-        await savePending(from, activeTree.id, {
-          type: "divorce",
-          aId: A.id,
-          bId: B.id,
-        });
-        replies.push(
-          appendFollowUp(
-            `You asked me to mark “${A.primary_name}” and “${B.primary_name}” as divorced. Reply YES to confirm or NO to cancel. I haven't changed anything yet.`
-          )
-        );
-        continue;
-      }
-    }
-
-    if (!replies.length) {
-      replies.push(
-        appendFollowUp(
-          "I'm ready for your next instruction whenever you are."
-        )
-      );
-    }
-
-    const out = replies.join("\n\n");
-    const finalMessage = out.length > 3900 ? out.slice(0, 3900) : out;
-
-    console.log(
-      `[${new Date().toISOString()}] Sending reply to ${from}: ${finalMessage.substring(
-        0,
-        120
-      )}...`
-    );
-
-    await sendText(from, finalMessage);
-    return res.status(200).send("ok");
-  } catch (error) {
-    console.error(
-      `[${new Date().toISOString()}] Fatal error in webhook:`,
-      error
-    );
-
-    try {
-      const from = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
-      if (from) {
-        await sendText(
-          from,
-          appendFollowUp(
-            "Something went wrong on my side, so I didn't make any changes. Please try again in a moment."
-          )
-        );
-      }
-    } catch (notifyError) {
-      console.error("Failed to notify user of error:", notifyError);
-    }
-
-    return res.status(500).json({ error: "Internal server error" });
-  }
-}
-
-/* ---------- run confirmed actions ---------- */
-async function runConfirmed(pending, phone) {
-  const action = pending.action || {};
-  const treeId = pending.tree_id;
-  if (!action.type || !treeId) {
-    await sendText(phone, appendFollowUp("That action can't be completed."));
-    return;
-  }
-
-  if (action.type === "rename") {
-    await editPerson(treeId, action.personId, { newName: action.to });
-    await sendText(
-      phone,
-      appendFollowUp(`I renamed that person to “${action.to}”.`)
-    );
-    return;
-  }
-  if (action.type === "divorce") {
-    await addRelationship(treeId, action.aId, "divorced_from", action.bId);
-    let pairText = "those relatives";
-    try {
-      const [aSummary, bSummary] = await Promise.all([
-        personSummary(treeId, action.aId),
-        personSummary(treeId, action.bId),
-      ]);
-      if (aSummary?.me && bSummary?.me)
-        pairText = `${aSummary.me} and ${bSummary.me}`;
-    } catch (error) {
-      console.error("divorce confirmation summary error:", error);
-    }
-    await sendText(
-      phone,
-      appendFollowUp(`I marked ${pairText} as divorced.`)
-    );
-    return;
-  }
-  await sendText(phone, appendFollowUp("That action can't be completed."));
-}
-
-/* ---------- WhatsApp helpers ---------- */
-async function sendText(to, body) {
-  try {
-    const resp = await fetch(
-      `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.WABA_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to,
-          type: "text",
-          text: { body },
-        }),
-      }
-    );
-
-
-    if (!resp.ok) {
-      const errorText = await resp.text();
-@@ -339,68 +809,116 @@ async function sendText(to, body) {
-      );
-    }
-  } catch (error) {
-    console.error(
-      `[${new Date().toISOString()}] Failed to send message:`,
-      error
-    );
-  }
-}
-
-async function sendMenu(to) {
-  try {
-    const resp = await fetch(
-      `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.WABA_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to,
+@@ -822,53 +831,53 @@ async function sendMenu(to) {
           type: "interactive",
           interactive: {
             type: "list",
@@ -844,9 +459,9 @@ async function sendMenu(to) {
                       description: "Enter a six-letter join code",
                     },
                     {
-                      id: "MENU_SHOW_CODE",
-                      title: "Show my tree code",
-                      description: "Share the code for your current tree",
+                      id: "MENU_SHARE_TREE",
+                      title: "Share my tree",
+                      description: "Get a link you can forward to family",
                     },
                     {
                       id: "MENU_ADD_PERSON",
