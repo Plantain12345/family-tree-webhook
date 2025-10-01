@@ -68,7 +68,7 @@
       font-weight: 600;
     }
 
-    #status {
+       #status {
       font-size: 12px;
       font-weight: 500;
       color: var(--accent);
@@ -93,7 +93,6 @@
       top: 42px;
       right: 56px;
       display: flex;
-@@ -190,56 +165,50 @@
       flex-direction: column;
       gap: 10px;
     }
@@ -144,7 +143,6 @@
       background: var(--panel);
       border: 1px solid var(--border);
       box-shadow: 0 28px 60px rgba(27, 17, 8, 0.08);
-@@ -257,89 +226,83 @@
     #empty .box {
       text-align: center;
       color: var(--muted);
@@ -170,39 +168,7 @@
         <span class="title-prefix">Family Tree:</span>
         <h1 id="tree-name">Loading…</h1>
       </div>
-      <div id="status">Loading…</div>
-    </header>
-
-    <main>
-      <div class="legend">
-        <span class="legend-item"><span class="legend-swatch male"></span>Male</span>
-        <span class="legend-item"><span class="legend-swatch female"></span>Female</span>
-        <span class="legend-item"><span class="legend-swatch neutral"></span>Non-binary</span>
-        <span class="legend-item"><span class="legend-swatch unknown"></span>Not specified</span>
-      </div>
-      <div id="alerts" class="alerts" hidden></div>
-      <div id="cy"></div>
-      <div id="empty"><div class="box">
-        <strong>Invite your family</strong>
-        <div>Use WhatsApp to add relatives—try “Add Alice born 1950” or “Link Alice married to Bob”.</div>
-      </div></div>
-    </main>
-  </div>
-
-  <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
-  <script>
-    const qs = new URLSearchParams(location.search);
-    const code = (qs.get("code") || "").toUpperCase();
-    const treeNameEl = document.getElementById("tree-name");
-    const statusEl = document.getElementById("status");
-    const emptyEl = document.getElementById("empty");
-    const alertsEl = document.getElementById("alerts");
-
-    if (!/^[A-Z0-9]{6}$/.test(code)) {
-      document.body.innerHTML = "<p style='padding:16px'>Missing or bad code. Use ?code=ABC123</p>";
-      throw new Error("bad code");
-    }
-
+@@ -206,51 +204,50 @@
 
     const LEVEL_HEIGHT = 200;
     const SPOUSE_GAP = 220;
@@ -228,7 +194,6 @@
             'label': 'data(label)',
             'text-wrap': 'wrap',
             'text-max-width': 112,
-@@ -825,51 +788,50 @@
         case 'male':
           return { color: '#c8daf9', shape: 'square', width: 120, height: 120 };
         case 'female':
