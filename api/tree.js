@@ -109,6 +109,7 @@ export default async function handler(req, res) {
           familiesMap.set(key, {
             id: `fam_${key}`,
             spouses: pair,
+            parents: pair.slice(),
             children: [],
             status: null,
           });
@@ -136,6 +137,7 @@ export default async function handler(req, res) {
         familiesMap.set(key, {
           id: `fam_${key}`,
           spouses: parents,
+          parents: parents.slice(),
           children: [],
           status: null,
         });
@@ -176,6 +178,11 @@ export default async function handler(req, res) {
 
     const families = Array.from(familiesMap.values())
       .map((family) => {
+        if (!Array.isArray(family.parents)) {
+          family.parents = Array.isArray(family.spouses)
+            ? family.spouses.slice()
+            : [];
+        }
         const seen = new Set();
         const orderedChildren = [];
         for (const childId of family.children) {
