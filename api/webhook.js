@@ -396,7 +396,7 @@ export default async function handler(req, res) {
         const summary = await personSummary(activeTree.id, target.id);
         const parts = [`I didn't change anything; here's what I know about ${summary.me || target.primary_name}.`];
         if (summary.parents?.length) parts.push(`Parents: ${summary.parents.join(", ")}.`);
-        if (summary.spouses?.length) parts.push(`Partners: ${summary.spouses.join(", ")}.`);
+             if (summary.spouses?.length) parts.push(`Partners: ${summary.spouses.join(", ")}.`);
         if (summary.children?.length) parts.push(`Children: ${summary.children.join(", ")}.`);
         replies.push(parts.join(" "));
         await setLastPerson(from, activeTree.id, target.id, target.primary_name);
@@ -421,9 +421,9 @@ export default async function handler(req, res) {
         let message;
         if (!existing) {
           const birthDetail = op.dob ? `, born ${op.dob}` : "";
-          message = `I added ${person.primary_name}${birthDetail} to your tree.`;
+          message = `I've added ${person.primary_name}${birthDetail} to your family tree.`;
         } else if (op.dob && op.dob !== (existing.dob_dmy || "")) {
-          message = `I updated ${person.primary_name}'s birth information to ${op.dob}.`;
+          message = `I've updated ${person.primary_name}'s birth information to ${op.dob} in the tree.`;
         } else {
           message = `${person.primary_name} was already in the tree, so nothing changed.`;
         }
@@ -473,7 +473,7 @@ export default async function handler(req, res) {
             childPerson.id
           );
           replies.push(
-            `${parentPerson.primary_name} is now listed as ${childPerson.primary_name}'s parent.`
+            `I've linked ${parentPerson.primary_name} as ${childPerson.primary_name}'s parent and connected them on the tree.`
           );
           await setLastPerson(
             from,
@@ -488,7 +488,7 @@ export default async function handler(req, res) {
         await addRelationship(activeTree.id, A.id, kind, B.id);
         const pretty = kind === "partner_of" ? "partners" : "spouses";
         replies.push(
-          `${A.primary_name} and ${B.primary_name} have been linked as ${pretty}.`
+          `I've linked ${A.primary_name} and ${B.primary_name} as ${pretty} on the family tree.`
         );
         await setLastPerson(from, activeTree.id, B.id, B.primary_name);
         lastPersonName = B.primary_name;
@@ -514,7 +514,7 @@ export default async function handler(req, res) {
         const parents = [op.parentA, op.parentB].filter(Boolean).join(" and ");
         const childBirthDetail = op.dob ? `, born ${op.dob}` : "";
         replies.push(
-          `I added ${child.primary_name}${childBirthDetail} as the child of ${parents}.`
+          `I've added ${child.primary_name}${childBirthDetail} as the child of ${parents} and connected them to the family.`
         );
         await setLastPerson(
           from,
@@ -537,8 +537,8 @@ export default async function handler(req, res) {
           op.dob || null
         );
         const message = op.dob
-          ? `I updated ${person.primary_name}'s birth information to ${op.dob}.`
-          : `I cleared ${person.primary_name}'s birth information.`;
+          ? `I've updated ${person.primary_name}'s birth information to ${op.dob} on the tree.`
+          : `I've cleared ${person.primary_name}'s birth information in the tree.`;
         replies.push(message);
         await setLastPerson(from, activeTree.id, person.id, person.primary_name);
         lastPersonName = person.primary_name;
@@ -563,7 +563,7 @@ export default async function handler(req, res) {
         const prettyGender =
           normalized.charAt(0).toUpperCase() + normalized.slice(1);
         replies.push(
-          `I recorded ${person.primary_name}'s gender as ${prettyGender}.`
+          `I've recorded ${person.primary_name}'s gender as ${prettyGender} in the family tree.`
         );
         await setLastPerson(from, activeTree.id, person.id, person.primary_name);
         lastPersonName = person.primary_name;
@@ -601,6 +601,8 @@ export default async function handler(req, res) {
           type: "divorce",
           aId: A.id,
           bId: B.id,
+          aName: A.primary_name,
+          bName: B.primary_name,
         });
         replies.push(
           `You asked me to mark “${A.primary_name}” and “${B.primary_name}” as divorced. Reply YES to confirm or NO to cancel. I haven't changed anything yet.`
@@ -648,14 +650,18 @@ async function runConfirmed(pending, phone) {
     await editPerson(treeId, action.personId, { newName: action.to });
     await sendText(
       phone,
-      withFollowUp(`I renamed that person to “${action.to}”.`)
+      withFollowUp(`I've renamed that person to “${action.to}” in the family tree.`)
     );
     return;
   }
 
   if (action.type === "divorce") {
     await addRelationship(treeId, action.aId, "divorced_from", action.bId);
-    await sendText(phone, withFollowUp("I marked them as divorced."));
+    const divorceMessage =
+      action.aName && action.bName
+        ? `I've marked ${action.aName} and ${action.bName} as divorced on the family tree.`
+        : "I've marked them as divorced on the family tree.";
+    await sendText(phone, withFollowUp(divorceMessage));
     return;
   }
 
