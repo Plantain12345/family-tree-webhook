@@ -123,7 +123,7 @@ export async function latestTreeFor(phone) {
 
   if (t.error) {
     console.error("latestTreeFor trees error:", t.error);
-    return null;
+     return null;
   }
   return t.data || null;
 }
@@ -146,6 +146,21 @@ export async function findInTreeByName(treeId, q) {
   const norm = normalizeName(q);
   const { data: ppl } = await db.from("persons").select("*").eq("tree_id", treeId);
   return ppl?.find((p) => normalizeName(p.primary_name) === norm) || null;
+}
+
+export async function listPersonsByExactName(treeId, q) {
+  const norm = normalizeName(q);
+  const { data, error } = await db
+    .from("persons")
+    .select("id, primary_name, dob_dmy")
+    .eq("tree_id", treeId);
+
+  if (error) {
+    console.error("listPersonsByExactName error:", error);
+    return [];
+  }
+
+  return (data || []).filter((p) => normalizeName(p.primary_name) === norm);
 }
 
 export async function upsertPersonByName(treeId, name, dob = null) {
