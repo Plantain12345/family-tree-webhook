@@ -48,6 +48,35 @@ export default async function handler(req, res) {
 
     const rels = relsResult.data || [];
 
+    const personById = new Map(peopleList.map((p) => [p.id, p]));
+    const issues = [];
+
+    const duplicateBuckets = new Map();
+    for (const person of peopleList) {
+      const key = `${normalizeNameKey(person.primary_name)}|${normalizeDobKey(person.dob_dmy)}`;
+      if (!duplicateBuckets.has(key)) duplicateBuckets.set(key, []);
+      duplicateBuckets.get(key).push(person);
+    }
+
+    duplicateBuckets.forEach((bucket) => {
+      if (bucket.length <= 1) return;
+      const sorted = bucket
+        .slice()
+        .sort((a, b) => {
+          const nameA = (a.primary_name || "").toLowerCase();
+          const nameB = (b.primary_name || "").toLowerCase();
+          if (nameA !== nameB) return nameA.localeCompare(nameB);
+          const dobA = normalizeDob(a.dob_dmy);
+          const dobB = normalizeDob(b.dob_dmy);
+          if (dobA === dobB) return 0;
+          return dobA - dobB;
+        });
+      issues.push({
+        type: "duplicate_person",
+        people: sorted.map(formatPersonRef),
+      });
+    });
+
     const nodes = peopleList.map((p) => {
       const lines = [p.primary_name || ""];
       if (p.dob_dmy) lines.push(`b. ${p.dob_dmy}`);
@@ -70,6 +99,7 @@ export default async function handler(req, res) {
     const divorceKinds = new Set(["divorced_from", "separated_from"]);
     const familiesMap = new Map();
     const parentsByChild = new Map();
+    const parentChildPairs = [];
 
     for (const rel of rels) {
       if (spouseKinds.has(rel.kind) || divorceKinds.has(rel.kind)) {
@@ -92,6 +122,7 @@ export default async function handler(req, res) {
       if (rel.kind === "parent_of" || rel.kind === "child_of") {
         const parent = rel.kind === "parent_of" ? rel.a : rel.b;
         const child = rel.kind === "parent_of" ? rel.b : rel.a;
+        parentChildPairs.push({ parent, child });
         if (!parentsByChild.has(child)) parentsByChild.set(child, new Set());
         parentsByChild.get(child).add(parent);
       }
@@ -121,6 +152,27 @@ export default async function handler(req, res) {
         return [p.id, dobValue];
       })
     );
+
+    const flaggedParentAge = new Set();
+
+    parentChildPairs.forEach(({ parent, child }) => {
+      const parentDob = birthOrder.get(parent);
+      const childDob = birthOrder.get(child);
+      if (parentDob === undefined || childDob === undefined) return;
+      if (!Number.isFinite(parentDob) || !Number.isFinite(childDob)) return;
+      if (parentDob > childDob) {
+        const key = `${parent}->${child}`;
+        if (flaggedParentAge.has(key)) return;
+        const parentPerson = personById.get(parent);
+        const childPerson = personById.get(child);
+        issues.push({
+          type: "parent_age_anomaly",
+          parent: formatPersonRef(parentPerson),
+          child: formatPersonRef(childPerson),
+        });
+        flaggedParentAge.add(key);
+      }
+    });
 
     const families = Array.from(familiesMap.values())
       .map((family) => {
@@ -152,12 +204,22 @@ export default async function handler(req, res) {
       nodes,
       edges,
       families,
+      issues,
       hasData,
     });
   } catch (e) {
     console.error("API /tree fatal error:", e);
     return res.status(500).json({ error: "Server error" });
   }
+}
+
+function formatPersonRef(person) {
+  if (!person) return null;
+  return {
+    id: person.id,
+    name: person.primary_name || "Unnamed",
+    dob: person.dob_dmy || null,
+  };
 }
 
 function normalizeGender(raw) {
@@ -197,4 +259,19 @@ function normalizeDob(dob) {
   }
 
   return Number.POSITIVE_INFINITY;
+}
+
+function normalizeNameKey(name) {
+  if (!name) return "";
+  return name
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function normalizeDobKey(dob) {
+  const value = normalizeDob(dob);
+  if (!Number.isFinite(value)) return "unknown";
+  return String(value);
 }
