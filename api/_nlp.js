@@ -36,6 +36,7 @@ const tools = [
                     "add_child",
                     "rename",
                     "set_dob",
+                    "set_gender",
                     "divorce",
                     "view_tree",
                     "view_person",
@@ -57,6 +58,7 @@ const tools = [
                 dob: { type: "string", nullable: true },
                 from: { type: "string" },
                 to: { type: "string" },
+                gender: { type: "string" },
               },
               required: ["op"],
               additionalProperties: false,
@@ -90,6 +92,7 @@ RULES
 - If a pronoun is used and the subject is not otherwise explicit, default to last_person_name.
 - Prefer capitalization from people[] when resolving existing names (case-insensitive match).
 - Never invent dates. If a dob is missing, omit it.
+- For gender, use the normalized values male, female, nonbinary, or unknown unless the user specifies another explicit term.
 
 MAPPING EXAMPLES (non-exhaustive)
 - "Create a family tree called Kintu" -> [{op:"new_tree", name:"Kintu"}]
@@ -116,6 +119,10 @@ Rename & DOB:
 - "Set A's birth year to 1950" -> [{op:"set_dob", name:"A", dob:"1950"}]
 - "Add Alice born 1950" -> [{op:"add_person", name:"Alice", dob:"1950"}]
 
+Gender:
+- "A is female" -> [{op:"set_gender", name:"A", gender:"female"}]
+- "Make A male" -> [{op:"set_gender", name:"A", gender:"male"}]
+
 If pronouns are used and last_person_name is null and subject is unclear, return [{op:"help"}].
 `;
 
@@ -126,6 +133,32 @@ function titleCaseFromKnown(name, people) {
   const n = name.trim().toLowerCase();
   const hit = (people || []).find((p) => p.trim().toLowerCase() === n);
   return hit || name.trim();
+}
+
+const FALLBACK_GENDER_MAP = new Map([
+  ["m", "male"],
+  ["male", "male"],
+  ["man", "male"],
+  ["boy", "male"],
+  ["f", "female"],
+  ["female", "female"],
+  ["woman", "female"],
+  ["girl", "female"],
+  ["nonbinary", "nonbinary"],
+  ["non-binary", "nonbinary"],
+  ["non binary", "nonbinary"],
+  ["nb", "nonbinary"],
+  ["enby", "nonbinary"],
+  ["unknown", "unknown"],
+  ["unspecified", "unknown"],
+  ["other", "other"],
+]);
+
+function canonicalGender(raw) {
+  if (!raw) return null;
+  const norm = raw.trim().toLowerCase();
+  if (!norm) return null;
+  return FALLBACK_GENDER_MAP.get(norm) || null;
 }
 
 // Regex fallback for when OPENAI_API_KEY is missing or API errors out
@@ -153,46 +186,7 @@ function fallback(text, ctx) {
   );
   if (mAddBorn)
     ops.push({
-      op: "add_person",
-      name: mAddBorn[1].trim(),
-      dob: mAddBorn[2].trim(),
-    });
-
-  // married / spouse / link A and B
-  const mMarried = t.match(/^(.+?)\s+is\s+married\s+to\s+(.+)$/i);
-  if (mMarried)
-    ops.push({
-      op: "link",
-      a: mMarried[1].trim(),
-      kind: "spouse_of",
-      b: mMarried[2].trim(),
-    });
-  const mLinkAnd = t.match(/^link\s+(.+?)\s+and\s+(.+)$/i);
-  if (mLinkAnd)
-    ops.push({
-      op: "link",
-      a: mLinkAnd[1].trim(),
-      kind: "spouse_of",
-      b: mLinkAnd[2].trim(),
-    });
-
-  // parent_of: "X is Y's father/mother/parent"
-  const mParent = t.match(/^(.+?)\s+is\s+(.+?)['’]s\s+(father|mother|parent)$/i);
-  if (mParent)
-    ops.push({
-      op: "link",
-      a: mParent[1].trim(),
-      kind: "parent_of",
-      b: mParent[2].trim(),
-    });
-
-  // add_child: "X and Y's daughter/son is Z"
-  const mChildOfTwo = t.match(
-    /^(.+?)\s+and\s+(.+?)['’]s\s+(daughter|son|child)\s+(?:is\s+)?(.+)$/i
-  );
-  if (mChildOfTwo) {
-    const child = mChildOfTwo[4].trim();
-    ops.push({
+@@ -196,51 +229,109 @@ function fallback(text, ctx) {
       op: "add_child",
       child,
       parentA: mChildOfTwo[1].trim(),
@@ -218,7 +212,65 @@ function fallback(text, ctx) {
   // set dob
   const mDob = t.match(/^set\s+(.+?)['’]s\s+(?:birth(?:\s+year)?)\s+to\s+(.+)$/i);
   if (mDob)
-    ops.push({ op: "set_dob", name: mDob[1].trim(), dob: mDob[2].trim() });
+    ops.push({
+      op: "set_dob",
+      name: titleCaseFromKnown(mDob[1].trim(), ctx?.people),
+      dob: mDob[2].trim(),
+    });
+
+  const genderLexeme =
+    "male|female|man|woman|boy|girl|non[-\\s]?binary|nb|enby|m|f|unknown|unspecified|other";
+
+  const mGenderSet = t.match(
+    new RegExp(
+      `^set\\s+(.+?)['’]s\\s+gender\\s+to\\s+(${genderLexeme})$`,
+      "i"
+    )
+  );
+  if (mGenderSet) {
+    const gender = canonicalGender(mGenderSet[2]);
+    if (gender) {
+      ops.push({
+        op: "set_gender",
+        name: titleCaseFromKnown(mGenderSet[1].trim(), ctx?.people),
+        gender,
+      });
+    }
+  }
+
+  const mGenderIs = t.match(
+    new RegExp(
+      `^(.+?)\\s+(?:is|was)\\s+(?:a\\s+)?(${genderLexeme})$`,
+      "i"
+    )
+  );
+  if (mGenderIs) {
+    const gender = canonicalGender(mGenderIs[2]);
+    if (gender) {
+      ops.push({
+        op: "set_gender",
+        name: titleCaseFromKnown(mGenderIs[1].trim(), ctx?.people),
+        gender,
+      });
+    }
+  }
+
+  const mGenderMake = t.match(
+    new RegExp(
+      `^make\\s+(.+?)\\s+(?:a\\s+)?(${genderLexeme})$`,
+      "i"
+    )
+  );
+  if (mGenderMake) {
+    const gender = canonicalGender(mGenderMake[2]);
+    if (gender) {
+      ops.push({
+        op: "set_gender",
+        name: titleCaseFromKnown(mGenderMake[1].trim(), ctx?.people),
+        gender,
+      });
+    }
+  }
 
   // rename
   const mRename = t.match(/^(?:rename|change)\s+(.+?)\s+to\s+(.+)$/i);
@@ -244,30 +296,7 @@ export async function parseOps(input, ctx = {}) {
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: SYSTEM },
-        { role: "user", content: JSON.stringify({ message: text, context: ctx }) },
-      ],
-      tools,
-      tool_choice: { type: "function", function: { name: "set_ops" } },
-    });
-
-    const call = resp.choices?.[0]?.message?.tool_calls?.[0];
-    if (!call) return null;
-
-    const args = JSON.parse(call.function.arguments || "{}");
-    let ops = Array.isArray(args.ops) ? args.ops : [];
-
-    // --- Normalize link.kind defensively (handles "married" etc. from the model) ---
-    ops = ops.map((op) => {
-      if (op?.op === "link") {
-        let k = (op.kind || "").toLowerCase();
-        if (!["spouse_of", "partner_of", "parent_of"].includes(k)) {
-          const m = text.toLowerCase();
-          if (/(married|wife|husband|spouse|wed|weds)/.test(m)) {
-            k = "spouse_of";
-          } else if (/partner/.test(m)) {
-            k = "partner_of";
-          } else if (/(father|mother|parent|son|daughter|child)/.test(m)) {
-            k = "parent_of";
+@@ -271,32 +362,40 @@ export async function parseOps(input, ctx = {}) {
           } else {
             // Safe default for ambiguous "link A and B"
             k = "spouse_of";
@@ -292,6 +321,14 @@ export async function parseOps(input, ctx = {}) {
         return op;
       });
     }
+
+    ops = ops.map((op) => {
+      if (op?.op === "set_gender" && op.gender) {
+        const canon = canonicalGender(op.gender) || op.gender.trim().toLowerCase();
+        if (canon) op.gender = canon;
+      }
+      return op;
+    });
 
     return ops;
   } catch (e) {
