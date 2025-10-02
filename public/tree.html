@@ -465,26 +465,227 @@
       return "unknown";
     }
 
-    function parseDobValue(dob) {
-      if (!dob) return Number.POSITIVE_INFINITY;
-      const trimmed = String(dob).trim();
-      if (!trimmed) return Number.POSITIVE_INFINITY;
-      const parsed = Date.parse(trimmed);
-      if (!Number.isNaN(parsed)) return parsed;
-      const ymd = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-      if (ymd) {
-        const [, y, m, d] = ymd;
-        return Date.parse(`${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`);
+    const DOB_MONTH_MAP = {
+      jan: 1,
+      january: 1,
+      feb: 2,
+      february: 2,
+      mar: 3,
+      march: 3,
+      apr: 4,
+      april: 4,
+      may: 5,
+      jun: 6,
+      june: 6,
+      jul: 7,
+      july: 7,
+      aug: 8,
+      august: 8,
+      sep: 9,
+      sept: 9,
+      september: 9,
+      oct: 10,
+      october: 10,
+      nov: 11,
+      november: 11,
+      dec: 12,
+      december: 12
+    };
+
+    const DOB_SEASONS = {
+      spring: { month: 3, span: 3 },
+      summer: { month: 6, span: 3 },
+      autumn: { month: 9, span: 3 },
+      fall: { month: 9, span: 3 },
+      winter: { month: 12, span: 3 }
+    };
+
+    function dobClampYear(year) {
+      if (!year || Number.isNaN(year)) return null;
+      if (year < 1200 || year > 2100) return null;
+      return year;
+    }
+
+    function dobExpandTwoDigitYear(value) {
+      if (!value || value.length !== 2) return null;
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isNaN(parsed)) return null;
+      const currentYear = new Date().getFullYear() % 100;
+      const century = parsed <= currentYear + 5 ? 2000 : 1900;
+      return dobClampYear(century + parsed);
+    }
+
+    function dobExtractTokens(raw) {
+      const trimmed = raw.trim();
+      if (!trimmed) return [];
+      const tokens = trimmed.split(/\s+/);
+      const out = [];
+      let seenNumeric = false;
+      for (const token of tokens) {
+        const lower = token.toLowerCase();
+        if (
+          /\d/.test(lower) ||
+          lower.startsWith("c.") ||
+          lower.startsWith("ca.") ||
+          lower === "circa" ||
+          lower === "c" ||
+          Object.prototype.hasOwnProperty.call(DOB_SEASONS, lower) ||
+          Object.prototype.hasOwnProperty.call(DOB_MONTH_MAP, lower)
+        ) {
+          out.push(token);
+          if (/\d/.test(lower)) seenNumeric = true;
+          continue;
+        }
+        if (seenNumeric) break;
       }
-      const dmy = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+      return out;
+    }
+
+    function dobRangeForYear(year) {
+      if (!year) return null;
+      const start = Date.UTC(year, 0, 1);
+      const end = Date.UTC(year, 11, 31, 23, 59, 59, 999);
+      return { start, end };
+    }
+
+    function dobRangeForMonth(year, month) {
+      if (!year || !month) return null;
+      const start = Date.UTC(year, month - 1, 1);
+      const end = Date.UTC(year, month, 0, 23, 59, 59, 999);
+      return { start, end };
+    }
+
+    function dobRangeForDecade(year) {
+      if (!year) return null;
+      const decadeStart = year - (year % 10);
+      const start = Date.UTC(decadeStart, 0, 1);
+      const end = Date.UTC(decadeStart + 9, 11, 31, 23, 59, 59, 999);
+      return { start, end };
+    }
+
+    function dobNormalizeSeason(year, key) {
+      const info = DOB_SEASONS[key];
+      if (!info || !year) return null;
+      const start = Date.UTC(year, info.month - 1, 1);
+      const end = Date.UTC(year, info.month - 1 + (info.span - 1), 0, 23, 59, 59, 999);
+      return { start, end };
+    }
+
+    function parseFlexibleDob(raw) {
+      if (raw === null || raw === undefined) return null;
+      const trimmed = String(raw).trim();
+      if (!trimmed) return null;
+      const tokens = dobExtractTokens(trimmed);
+      const candidate = tokens.length ? tokens.join(" ") : trimmed;
+      const normalized = candidate.replace(/[,\.]/g, " ").replace(/\s+/g, " ").trim();
+
+      const parsed = Date.parse(normalized);
+      if (!Number.isNaN(parsed)) {
+        const d = new Date(parsed);
+        const year = dobClampYear(d.getUTCFullYear());
+        if (year) {
+          const month = d.getUTCMonth() + 1;
+          const day = d.getUTCDate();
+          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
+        }
+      }
+
+      const dmy = normalized.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
       if (dmy) {
-        const [, d, m, yRaw] = dmy;
-        const year = yRaw.length === 2 ? `19${yRaw}` : yRaw.padStart(4, "0");
-        return Date.parse(`${year}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`);
+        const [, dStr, mStr, yStr] = dmy;
+        const day = Number.parseInt(dStr, 10);
+        const month = Number.parseInt(mStr, 10);
+        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
+        if (year && !Number.isNaN(day) && !Number.isNaN(month)) {
+          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
+        }
       }
-      const year = trimmed.match(/(\d{4})/);
-      if (year) return Date.parse(`${year[1]}-01-01`);
-      return Number.POSITIVE_INFINITY;
+
+      const ymd = normalized.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/);
+      if (ymd) {
+        const [, yStr, mStr, dStr] = ymd;
+        const year = dobClampYear(Number.parseInt(yStr, 10));
+        const month = Number.parseInt(mStr, 10);
+        const day = Number.parseInt(dStr, 10);
+        if (year && !Number.isNaN(month) && !Number.isNaN(day)) {
+          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
+        }
+      }
+
+      const monthDayYear = normalized.match(/^([a-zA-Z]+)[\s/-]+(\d{1,2})(?:st|nd|rd|th)?[\s/-]+(\d{2,4})$/);
+      if (monthDayYear) {
+        const [, monthRaw, dStr, yStr] = monthDayYear;
+        const month = DOB_MONTH_MAP[monthRaw.toLowerCase()];
+        const day = Number.parseInt(dStr, 10);
+        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
+        if (year && month && !Number.isNaN(day)) {
+          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
+        }
+      }
+
+      const dayMonthYear = normalized.match(/^(\d{1,2})(?:st|nd|rd|th)?[\s/-]+([a-zA-Z]+)[\s/-]+(\d{2,4})$/);
+      if (dayMonthYear) {
+        const [, dStr, monthRaw, yStr] = dayMonthYear;
+        const month = DOB_MONTH_MAP[monthRaw.toLowerCase()];
+        const day = Number.parseInt(dStr, 10);
+        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
+        if (year && month && !Number.isNaN(day)) {
+          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
+        }
+      }
+
+      const monthYear = normalized.match(/^([a-zA-Z]+)[\s-]+(\d{2,4})$/);
+      if (monthYear) {
+        const [, monthRaw, yStr] = monthYear;
+        const month = DOB_MONTH_MAP[monthRaw.toLowerCase()];
+        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
+        if (year && month) {
+          return { range: dobRangeForMonth(year, month) };
+        }
+      }
+
+      const circa = normalized.match(/^(?:c\.?|ca\.?|circa)\s*(\d{2,4})(?:s)?$/i);
+      if (circa) {
+        const [, yStr] = circa;
+        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
+        if (year) return { range: dobRangeForYear(year) };
+      }
+
+      const decade = normalized.match(/^(\d{3})(\d)s$/);
+      if (decade) {
+        const [, prefix, digit] = decade;
+        const year = dobClampYear(Number.parseInt(`${prefix}${digit}`, 10));
+        if (year) return { range: dobRangeForDecade(year) };
+      }
+
+      const apostropheDecade = normalized.match(/^'?([0-9]{2})s$/);
+      if (apostropheDecade) {
+        const [, two] = apostropheDecade;
+        const expanded = dobExpandTwoDigitYear(two);
+        if (expanded) return { range: dobRangeForDecade(expanded) };
+      }
+
+      const seasonYear = normalized.match(/^(spring|summer|autumn|fall|winter)[\s-]+(\d{2,4})$/i);
+      if (seasonYear) {
+        const [, seasonRaw, yStr] = seasonYear;
+        const key = seasonRaw.toLowerCase();
+        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
+        if (year) return { range: dobNormalizeSeason(year, key) };
+      }
+
+      const yearOnly = normalized.match(/^(\d{4})$/);
+      if (yearOnly) {
+        const year = dobClampYear(Number.parseInt(yearOnly[1], 10));
+        if (year) return { range: dobRangeForYear(year) };
+      }
+
+      return null;
+    }
+
+    function parseDobValue(dob) {
+      const info = parseFlexibleDob(dob);
+      if (!info?.range || !Number.isFinite(info.range.start)) return Number.POSITIVE_INFINITY;
+      return info.range.start;
     }
 
     function compareByBirthThenName(a, b, birthValues, labelMap) {
@@ -510,336 +711,7 @@
         const classes = ["person", `gender-${gender || "unknown"}`].join(" ");
         const dobValue = parseDobValue(node.data.dob || null);
         birthValues.set(node.data.id, dobValue);
-        labelByPerson.set(node.data.id, node.data.label || "");
-        personMap.set(node.data.id, {
-          id: node.data.id,
-          data: { ...node.data },
-          classes,
-          gender
-        });
-      }
-
-      const parentsByChild = new Map();
-      const familiesNormalised = (families || []).map((family) => {
-        const parents = Array.from(
-          new Set(
-            (Array.isArray(family?.spouses)
-              ? family.spouses
-              : Array.isArray(family?.parents)
-              ? family.parents
-              : []
-            ).filter((id) => personMap.has(id))
-          )
-        );
-        const children = Array.from(
-          new Set(
-            (Array.isArray(family?.children) ? family.children : []).filter((id) =>
-              personMap.has(id)
-            )
-          )
-        );
-        for (const child of children) {
-          if (!parentsByChild.has(child)) parentsByChild.set(child, new Set());
-          for (const parent of parents) parentsByChild.get(child).add(parent);
-        }
-        return {
-          id: family.id || `family_${parents.join("_") || "solo"}`,
-          parents,
-          children,
-          status: family.status || null
-        };
-      });
-
-      for (const edge of edgeList || []) {
-        const kind = edge?.data?.kind;
-        if (!kind) continue;
-        if (kind === "parent_of") {
-          const parent = edge.data.source;
-          const child = edge.data.target;
-          if (!personMap.has(parent) || !personMap.has(child)) continue;
-          if (!parentsByChild.has(child)) parentsByChild.set(child, new Set());
-          parentsByChild.get(child).add(parent);
-        }
-        if (kind === "child_of") {
-          const parent = edge.data.target;
-          const child = edge.data.source;
-          if (!personMap.has(parent) || !personMap.has(child)) continue;
-          if (!parentsByChild.has(child)) parentsByChild.set(child, new Set());
-          parentsByChild.get(child).add(parent);
-        }
-      }
-
-      const generationMap = new Map();
-      const visiting = new Set();
-
-      function computeGeneration(personId) {
-        if (generationMap.has(personId)) return generationMap.get(personId);
-        if (visiting.has(personId)) return 0;
-        visiting.add(personId);
-        const parents = parentsByChild.get(personId);
-        let generation = 0;
-        if (parents && parents.size) {
-          let maxParentGen = 0;
-          for (const parentId of parents) {
-            maxParentGen = Math.max(maxParentGen, computeGeneration(parentId));
-          }
-          generation = maxParentGen + 1;
-        }
-        visiting.delete(personId);
-        generationMap.set(personId, generation);
-        return generation;
-      }
-
-      for (const personId of personMap.keys()) {
-        computeGeneration(personId);
-      }
-
-      const positions = new Map();
-      const generationCursor = new Map();
-
-      function placeGroup(generation, ids, sort = false) {
-        if (!ids || !ids.length) return;
-        const filtered = ids.filter((id) => personMap.has(id));
-        if (!filtered.length) return;
-        const unique = [];
-        const seen = new Set();
-        for (const id of filtered) {
-          if (seen.has(id)) continue;
-          seen.add(id);
-          unique.push(id);
-        }
-        if (!unique.length) return;
-        const order = sort
-          ? unique.slice().sort((a, b) =>
-              compareByBirthThenName(a, b, birthValues, labelByPerson)
-            )
-          : unique;
-        const cursorStart = generationCursor.get(generation) || 0;
-        let placedCount = 0;
-        for (const id of order) {
-          if (positions.has(id)) continue;
-          const slot = cursorStart + placedCount;
-          positions.set(id, {
-            x: slot * HORIZONTAL_SPACING,
-            y: generation * VERTICAL_SPACING
-          });
-          placedCount += 1;
-        }
-        if (placedCount > 0) {
-          generationCursor.set(generation, cursorStart + placedCount + 1);
-        }
-      }
-
-      const rootCandidates = [];
-      for (const personId of personMap.keys()) {
-        const parents = parentsByChild.get(personId);
-        if (!parents || !parents.size) rootCandidates.push(personId);
-      }
-      placeGroup(0, rootCandidates, true);
-
-      const familiesSorted = familiesNormalised
-        .slice()
-        .sort((a, b) => {
-          const aGen = Math.min(
-            ...a.parents.map((id) => generationMap.get(id) ?? 0),
-            generationMap.get(a.children[0] || "") ?? 0
-          );
-          const bGen = Math.min(
-            ...b.parents.map((id) => generationMap.get(id) ?? 0),
-            generationMap.get(b.children[0] || "") ?? 0
-          );
-          if (aGen !== bGen) return aGen - bGen;
-          return (a.id || "").localeCompare(b.id || "");
-        });
-
-      for (const family of familiesSorted) {
-        const parentGenerations = family.parents.map((id) => generationMap.get(id) ?? 0);
-        const parentGeneration = parentGenerations.length
-          ? Math.min(...parentGenerations)
-          : 0;
-        placeGroup(parentGeneration, family.parents, true);
-
-        const childrenByGeneration = new Map();
-        for (const childId of family.children) {
-          const gen = generationMap.get(childId) ?? parentGeneration + 1;
-          if (!childrenByGeneration.has(gen)) childrenByGeneration.set(gen, []);
-          childrenByGeneration.get(gen).push(childId);
-        }
-        for (const [gen, childIds] of childrenByGeneration.entries()) {
-          const ordered = family.children.filter((id) => childIds.includes(id));
-          placeGroup(gen, ordered, false);
-        }
-      }
-
-      for (const [personId] of personMap) {
-        if (positions.has(personId)) continue;
-        const gen = generationMap.get(personId) ?? 0;
-        placeGroup(gen, [personId], true);
-      }
-
-      const elements = [];
-      for (const person of personMap.values()) {
-        const position = positions.get(person.id) || { x: 0, y: 0 };
-        elements.push({
-          data: { ...person.data },
-          classes: person.classes,
-          position
-        });
-      }
-
-      const addedMarriages = new Set();
-      for (const family of familiesNormalised) {
-        if (family.parents.length >= 2) {
-          const sortedParents = family.parents
-            .slice()
-            .sort((a, b) =>
-              compareByBirthThenName(a, b, birthValues, labelByPerson)
-            );
-          for (let i = 0; i < sortedParents.length; i++) {
-            for (let j = i + 1; j < sortedParents.length; j++) {
-              const a = sortedParents[i];
-              const b = sortedParents[j];
-              const key = `${a}_${b}`;
-              if (addedMarriages.has(key)) continue;
-              addedMarriages.add(key);
-              elements.push({
-                data: {
-                  id: `${family.id}_marriage_${a}_${b}`,
-                  source: a,
-                  target: b,
-                  kind: "marriage",
-                  familyId: family.id
-                },
-                classes: `marriage${family.status ? " divorced" : ""}`.trim()
-              });
-            }
-          }
-        }
-      }
-
-      for (const family of familiesNormalised) {
-        if (!family.parents.length && !family.children.length) continue;
-        const parentPositions = family.parents
-          .map((id) => positions.get(id))
-          .filter(Boolean);
-        const childPositions = family.children
-          .map((id) => positions.get(id))
-          .filter(Boolean);
-
-        if (!parentPositions.length && !childPositions.length) continue;
-
-        const centerX =
-          parentPositions.length
-            ? parentPositions.reduce((sum, pos) => sum + pos.x, 0) /
-              parentPositions.length
-            : childPositions.length
-            ? childPositions.reduce((sum, pos) => sum + pos.x, 0) /
-              childPositions.length
-            : 0;
-        const parentY =
-          parentPositions.length
-            ? parentPositions.reduce((sum, pos) => sum + pos.y, 0) /
-              parentPositions.length
-            : childPositions.length
-            ? Math.min(...childPositions.map((pos) => pos.y)) - VERTICAL_SPACING * 0.6
-            : 0;
-        const childY =
-          childPositions.length
-            ? childPositions.reduce((sum, pos) => sum + pos.y, 0) /
-              childPositions.length
-            : parentY + VERTICAL_SPACING;
-
-        const connectorY = parentY + Math.max(30, Math.min((childY - parentY) * 0.4, 100));
-        const connectorId = `${family.id}_connector`;
-
-        elements.push({
-          data: { id: connectorId, familyId: family.id },
-          classes: "family-connector",
-          position: { x: centerX, y: connectorY }
-        });
-
-        for (const parentId of family.parents) {
-          elements.push({
-            data: {
-              id: `${family.id}_connector_${parentId}`,
-              source: parentId,
-              target: connectorId,
-              kind: "parent_connector",
-              familyId: family.id
-            },
-            classes: "parent-connector"
-          });
-        }
-
-        if (!family.children.length) continue;
-
-        const rawDrop = childY - DROP_VERTICAL_OFFSET;
-        const dropY = Math.max(
-          connectorY + 12,
-          Math.min(rawDrop, childY - 30)
-        );
-        const dropNodes = [];
-        for (const childId of family.children) {
-          const childPosition = positions.get(childId);
-          if (!childPosition) continue;
-          const dropId = `${family.id}_drop_${childId}`;
-          dropNodes.push({ id: dropId, childId, x: childPosition.x });
-          elements.push({
-            data: { id: dropId, familyId: family.id, childId },
-            classes: "sibling-drop",
-            position: { x: childPosition.x, y: dropY }
-          });
-          elements.push({
-            data: {
-              id: `${dropId}_child`,
-              source: dropId,
-              target: childId,
-              familyId: family.id,
-              kind: "child_link"
-            },
-            classes: "child-link"
-          });
-        }
-
-        dropNodes.sort((a, b) => a.x - b.x);
-        for (let i = 0; i < dropNodes.length - 1; i++) {
-          const left = dropNodes[i];
-          const right = dropNodes[i + 1];
-          elements.push({
-            data: {
-              id: `${left.id}_sib_${right.id}`,
-              source: left.id,
-              target: right.id,
-              familyId: family.id,
-              kind: "sibship"
-            },
-            classes: "sibship-link"
-          });
-        }
-
-        const anchor = dropNodes[Math.floor(dropNodes.length / 2)];
-        if (anchor) {
-          elements.push({
-            data: {
-              id: `${connectorId}_anchor_${anchor.id}`,
-              source: connectorId,
-              target: anchor.id,
-              familyId: family.id,
-              kind: "sibship_anchor"
-            },
-            classes: "sibship-link"
-          });
-        }
-      }
-
-      const handledKinds = new Set(["parent_of", "child_of", "spouse_of", "partner_of", "divorced_from", "separated_from"]);
-      for (const edge of edgeList || []) {
-        if (!edge?.data?.source || !edge?.data?.target) continue;
-        if (!edge.data.kind || handledKinds.has(edge.data.kind)) continue;
-        if (!personMap.has(edge.data.source) || !personMap.has(edge.data.target)) continue;
-        elements.push({
-          data: { ...edge.data },
-          classes: "generic"
+@@ -843,51 +1044,51 @@
         });
       }
 
@@ -865,7 +737,7 @@
           const parent = describePerson(issue.parent);
           const child = describePerson(issue.child);
           if (!parent || !child) return null;
-          return `Check ages: ${parent} appears younger than ${child}.`;
+          return `Error: ${parent} appears younger than ${child}. Please review their birth dates.`;
         }
         default:
 @@ -549,77 +914,64 @@
@@ -890,7 +762,6 @@
           disableSharing();
           return;
         }
-
         treeNameEl.textContent = payload.tree?.name || "Family Tree";
         document.title = payload.tree?.name ? `Family Tree: ${payload.tree.name}` : "Family Tree";
 
