@@ -1,5 +1,6 @@
 // api/_db.js
 import { createClient } from "@supabase/supabase-js";
+import { normalizeDobInput } from "./date-utils.js";
 
 export const db = createClient(
   process.env.SUPABASE_URL,
@@ -25,125 +26,7 @@ const BASE_URL = "https://family-tree-webhook.vercel.app";
  * Mark a tree as *active* by upserting (tree_id,phone) and bumping joined_at.
  * Assumes members.joined_at defaults to now(); we force a newer timestamp to
  * make this membership the latest row chosen by latestTreeFor().
- */
-export async function activateTree(phone, treeId) {
-  const nowIso = new Date().toISOString();
-  const up = await db
-    .from("members")
-    .upsert(
-      { tree_id: treeId, phone, joined_at: nowIso },
-      { onConflict: "tree_id,phone" }
-    )
-    .select()
-  ;
-  if (up.error) {
-    console.error("activateTree upsert error:", up.error);
-    throw up.error;
-  }
-}
-
-/**
- * Create a tree, make creator active, return a helpful tip.
- * @returns {Promise<{tree: any, tip: string}>}
- */
-export async function createTree(name, ownerPhone) {
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const code = makeJoinCode();
-    const ins = await db
-      .from("trees")
-      .insert({ name, join_code: code })
-      .select()
-      .maybeSingle();
-
-    if (!ins.error && ins.data) {
-      const tree = ins.data;
-      await activateTree(ownerPhone, tree.id);
-      const tip =
-        `You’re now active in “${tree.name}”. ` +
-        `Try: Add Alice born 1950\n` +
-        `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-      return { tree, tip };
-    }
-
-    if (ins.error?.code !== "23505") {
-      console.error("createTree insert error:", ins.error);
-      throw ins.error;
-    }
-    // otherwise a rare join_code collision: try again
-  }
-  throw new Error("join_code generation collided repeatedly");
-}
-
-/**
- * Join by code, make that tree active, return a helpful tip.
- * @returns {Promise<{tree: any|null, tip?: string}>}
- */
-export async function joinTreeByCode(code, phone) {
-  const t = await db.from("trees").select("*").eq("join_code", code).maybeSingle();
-  if (t.error) {
-    console.error("joinTreeByCode lookup error:", t.error);
-    return { tree: null };
-  }
-  const tree = t.data;
-  if (!tree) return { tree: null };
-
-  await activateTree(phone, tree.id);
-
-  const tip =
-    `You’re now active in “${tree.name}”. ` +
-    `Try: Add Alice born 1950\n` +
-    `Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-  return { tree, tip };
-}
-
-/**
- * Return the *currently active* (most recent) tree for a phone.
- * We sort by members.joined_at DESC (your schema has joined_at).
- */
-export async function latestTreeFor(phone) {
-  const m = await db
-    .from("members")
-    .select("tree_id, joined_at")
-    .eq("phone", phone)
-    .order("joined_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (m.error) {
-    console.error("latestTreeFor members error:", m.error);
-    return null;
-  }
-  if (!m.data) return null;
-
-  const t = await db
-    .from("trees")
-    .select("id, name, join_code")
-    .eq("id", m.data.tree_id)
-    .maybeSingle();
-
-  if (t.error) {
-    console.error("latestTreeFor trees error:", t.error);
-     return null;
-  }
-  return t.data || null;
-}
-
-/* ------------------------------ listings --------------------------- */
-
-export async function listPersonsForTree(phone) {
-  const tree = await latestTreeFor(phone);
-  if (!tree) return null;
-  const [{ data: people }, { data: rels }] = await Promise.all([
-    db.from("persons").select("id, primary_name, dob_dmy").eq("tree_id", tree.id),
-    db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
-  ]);
-  return { tree, people: people || [], rels: rels || [] };
-}
-
-/* ------------------------------ persons ---------------------------- */
-
-export async function findInTreeByName(treeId, q) {
-  const norm = normalizeName(q);
+@@ -147,64 +148,70 @@ export async function findInTreeByName(treeId, q) {
   const { data: ppl } = await db.from("persons").select("*").eq("tree_id", treeId);
   return ppl?.find((p) => normalizeName(p.primary_name) === norm) || null;
 }
@@ -169,7 +52,7 @@ export async function upsertPersonByName(treeId, name, dob = null) {
   let person = all?.find((p) => normalizeName(p.primary_name) === norm);
   if (person) {
     if (dob !== undefined) {
-      const nextDob = dob || null;
+      const nextDob = normalizeDobInput(dob);
       if (nextDob !== person.dob_dmy) {
         await db
           .from("persons")
@@ -180,9 +63,15 @@ export async function upsertPersonByName(treeId, name, dob = null) {
     }
     return person;
   }
+  const payload = {
+    tree_id: treeId,
+    primary_name: name.trim(),
+  };
+  const normalizedDob = normalizeDobInput(dob);
+  if (normalizedDob) payload.dob_dmy = normalizedDob;
   const { data: created, error } = await db
     .from("persons")
-    .insert({ tree_id: treeId, primary_name: name.trim(), dob_dmy: dob })
+    .insert(payload)
     .select()
     .single();
   if (error) throw error;
@@ -208,43 +97,7 @@ export async function addRelationship(treeId, aId, kind, bId) {
     // Normalize undirected edge so it matches the DB unique index
     const [x, y] = minmax(aId, bId);
     const { error } = await db
-      .from("relationships")
-      .upsert(
-        { tree_id: treeId, a: x, b: y, kind: "spouse_of" }, // store partner_of as spouse_of
-        { onConflict: "tree_id,a,b,kind" }
-      );
-    if (error && error.code !== "23505") throw error; // ignore dup
-    await db
-      .from("relationships")
-      .delete()
-      .match({ tree_id: treeId, a: x, b: y, kind: "divorced_from" });
-    await db
-      .from("relationships")
-      .delete()
-      .match({ tree_id: treeId, a: x, b: y, kind: "separated_from" });
-    return;
-  }
-
-  if (kind === "parent_of") {
-    const { error } = await db
-      .from("relationships")
-      .upsert(
-        { tree_id: treeId, a: aId, b: bId, kind: "parent_of" },
-        { onConflict: "tree_id,a,b,kind" }
-      );
-    if (error && error.code !== "23505") throw error; // ignore dup
-    return;
-  }
-
-  if (kind === "divorced_from" || kind === "separated_from") {
-    const [x, y] = minmax(aId, bId);
-    await db
-      .from("relationships")
-      .delete()
-      .match({ tree_id: treeId, a: x, b: y, kind: "spouse_of" });
-    const { error } = await db
-      .from("relationships")
-      .upsert(
+@@ -248,51 +255,54 @@ export async function addRelationship(treeId, aId, kind, bId) {
         { tree_id: treeId, a: x, b: y, kind },
         { onConflict: "tree_id,a,b,kind" }
       );
@@ -270,7 +123,10 @@ export async function editPerson(treeId, personId, { newName, dob_dmy, gender })
     const trimmed = newName.trim();
     if (trimmed) patch.primary_name = trimmed;
   }
-  if (dob_dmy !== undefined) patch.dob_dmy = dob_dmy || null;
+  if (dob_dmy !== undefined) {
+    const normalized = normalizeDobInput(dob_dmy);
+    patch.dob_dmy = normalized || null;
+  }
   if (gender !== undefined) patch.gender = gender;
   if (Object.keys(patch).length) {
     const r = await db.from("persons").update(patch).eq("id", personId);
