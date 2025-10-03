@@ -26,7 +26,18 @@ export default async function handler(req, res) {
         .select("id, primary_name, dob_dmy, gender")
         .eq("tree_id", tree.id),
       db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
-@@ -218,67 +219,44 @@ export default async function handler(req, res) {
+    ]);
+
+    const people = peopleResult?.map((p) => ({
+      ...p,
+      normalized_name: normalizeNameKey(p.primary_name),
+      normalized_dob: normalizeDob(p.dob_dmy),
+    })) || [];
+
+    const rels = relsResult || [];
+
+    return res.status(200).json({ tree, people, rels });
+  } catch (e) {
     console.error("API /tree fatal error:", e);
     return res.status(500).json({ error: "Server error" });
   }
