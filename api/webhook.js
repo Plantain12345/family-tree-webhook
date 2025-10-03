@@ -107,7 +107,38 @@ function guessParentDirection(message, nameA, nameB) {
   const parentBeforeB = new RegExp(`${escapeRegExp(b)}\\b[^a-z0-9]+${PARENT_KEYWORD_PATTERN}`);
 
   const aLooksParent = parentAfterA.test(lower) || parentBeforeA.test(lower);
-@@ -136,50 +149,235 @@ async function describeAmbiguity(treeId, name) {
+  const bLooksParent = parentAfterB.test(lower) || parentBeforeB.test(lower);
+
+  if (aLooksParent && !bLooksParent) return { parent: "a", reason: "context" };
+  if (bLooksParent && !aLooksParent) return { parent: "b", reason: "context" };
+  return null;
+}
+
+async function describeAmbiguity(treeId, name) {
+  if (!treeId || !name) return null;
+  const matches = await listPersonsByExactName(treeId, name);
+  if (!matches || matches.length <= 1) return null;
+
+  const bullets = [];
+  for (const person of matches) {
+    const details = [];
+    const dob = formatDobForSpeech(person.dob_dmy);
+    if (dob) details.push(`born ${dob}`);
+    try {
+      const summary = await personSummary(treeId, person.id);
+      if (summary.parents?.length)
+        details.push(`child of ${summary.parents.join(" and ")}`);
+      if (summary.spouses?.length)
+        details.push(`partner of ${summary.spouses.join(", ")}`);
+      if (summary.children?.length)
+        details.push(`parent of ${summary.children.join(", ")}`);
+    } catch (error) {
+      console.error("describeAmbiguity summary error:", error);
+    }
+    const suffix = details.length ? ` (${details.join("; ")})` : "";
+    bullets.push(`• ${person.primary_name}${suffix}`);
+  }
+
   return (
     `I know more than one person named ${name}. Please tell me which one you mean by adding a detail such as their birth year or a close relative.` +
     (bullets.length ? `\n${bullets.join("\n")}` : "")
@@ -156,11 +187,11 @@ function levenshteinDistance(a, b) {
   if (m === 0) return n;
   if (n === 0) return m;
   const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
+  for (let i = 0; i <= m; i += 1) dp[i][0] = i;
+  for (let j = 0; j <= n; j += 1) dp[0][j] = j;
+  for (let i = 1; i <= m; i += 1) {
     const si = s.charAt(i - 1);
-    for (let j = 1; j <= n; j++) {
+    for (let j = 1; j <= n; j += 1) {
       const tj = t.charAt(j - 1);
       const cost = si === tj ? 0 : 1;
       dp[i][j] = Math.min(
@@ -221,7 +252,7 @@ function nameSimilarity(aProfile, bProfile) {
   const used = new Set();
   let matches = 0;
   for (const token of aProfile.tokens) {
-    for (let i = 0; i < bProfile.tokens.length; i++) {
+    for (let i = 0; i < bProfile.tokens.length; i += 1) {
       if (used.has(i)) continue;
       if (tokenMatches(token, bProfile.tokens[i])) {
         used.add(i);
@@ -318,6 +349,19 @@ function findDuplicateCandidates(records, name, dob) {
   return results.slice(0, 5);
 }
 
+function normalizeGenderValue(value) {
+  if (!value) return null;
+  const norm = value.trim().toLowerCase();
+  if (!norm) return null;
+  return GENDER_SYNONYMS.get(norm) || null;
+}
+
+function withFollowUp(message) {
+  const base = message || "";
+  if (!FOLLOW_UP_PROMPT) return base;
+  return `${base}\n\n${FOLLOW_UP_PROMPT}`.trim();
+}
+
 function menuGuidanceText(id, tree) {
   switch (id) {
     case "MENU_START_TREE":
@@ -343,7 +387,76 @@ function menuGuidanceText(id, tree) {
       }
       return "I didn't change anything because you're not currently part of a family tree.";
     case "MENU_HELP":
-@@ -240,50 +438,53 @@ export default async function handler(req, res) {
+      return helpText();
+    default:
+      return null;
+  }
+}
+
+export default async function handler(req, res) {
+  if (req.method === "GET") {
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
+    if (mode === "subscribe" && token === VERIFY_TOKEN) {
+      return res.status(200).send(challenge || "");
+    }
+    return res.status(403).send("Forbidden");
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
+
+  try {
+    const entry = req.body?.entry?.[0];
+    const change = entry?.changes?.[0];
+    const value = change?.value;
+
+    if (value?.statuses?.length) {
+      return res.status(200).send("ok");
+    }
+
+    const message = value?.messages?.[0];
+    if (!message) {
+      return res.status(200).send("ok");
+    }
+
+    const from = message.from;
+    if (!from) return res.status(200).send("ok");
+
+    let text = "";
+    let menuSelectionId = null;
+
+    if (message.type === "text") {
+      text = message.text?.body || "";
+    } else if (message.type === "interactive") {
+      const interactive = message.interactive || {};
+      if (interactive.list_reply) {
+        menuSelectionId = interactive.list_reply.id;
+        text =
+          interactive.list_reply.title ||
+          interactive.list_reply.description ||
+          interactive.list_reply.id ||
+          "";
+      } else if (interactive.button_reply) {
+        text = interactive.button_reply.title || interactive.button_reply.id || "";
+      }
+    } else if (message.type === "button") {
+      text = message.button?.text || message.button?.payload || "";
+    }
+
+    text = (text || "").trim();
+    const lower = text.toLowerCase();
+
+    if (lower === "menu") {
+      await sendMenu(from);
+      await sendText(from, withFollowUp("I've sent a menu with shortcuts you can tap."));
+      return res.status(200).send("ok");
+    }
+
+    if (["yes", "y"].includes(lower)) {
+      const pending = await popPending(from);
       if (pending) {
         await runConfirmed(pending, from);
         return res.status(200).send("ok");
@@ -368,10 +481,21 @@ function menuGuidanceText(id, tree) {
 
     let activeTree = tree || null;
     let lastPersonName = userState?.last_person_name || null;
-    const knownNames = people.map((p) => p.primary_name);
-    const personRecords = Array.isArray(people)
+
+    let knownNames = Array.isArray(people)
+      ? people.map((p) => p.primary_name)
+      : [];
+    let personRecords = Array.isArray(people)
       ? people.map((p) => ({ id: p.id, primary_name: p.primary_name, dob_dmy: p.dob_dmy || null }))
       : [];
+
+    if (menuSelectionId) {
+      const guidance = menuGuidanceText(menuSelectionId, activeTree);
+      if (guidance) {
+        await sendText(from, withFollowUp(guidance));
+      }
+      return res.status(200).send("ok");
+    }
 
     const ctx = {
       active_tree_name: activeTree?.name || null,
@@ -397,7 +521,88 @@ function menuGuidanceText(id, tree) {
       if (op.op === "help") {
         replies.push(helpText());
         continue;
-@@ -390,70 +591,91 @@ export default async function handler(req, res) {
+      }
+
+      if (op.op === "menu") {
+        await sendMenu(from);
+        replies.push("I've sent a menu with shortcuts you can tap.");
+        continue;
+      }
+
+      if (op.op === "new_tree") {
+        const name = (op.name || "").trim();
+        if (!name) {
+          replies.push("Tell me the name you'd like for the new family tree.");
+          continue;
+        }
+        const treeRecord = await createTree(from, name);
+        activeTree = treeRecord;
+        knownNames = [];
+        personRecords = [];
+        await setActiveTreeState(from, treeRecord.id);
+        await setLastPerson(from, treeRecord.id, null, null);
+        const share = shareLinkText(treeRecord);
+        const messageLines = [
+          `I've started a family tree called “${treeRecord.name || name}”. Its join code is ${treeRecord.join_code}.`,
+        ];
+        if (share) messageLines.push(share);
+        replies.push(messageLines.join("\n"));
+        continue;
+      }
+
+      if (op.op === "join_tree") {
+        const code = (op.code || "").trim().toUpperCase();
+        const result = await joinTreeByCode(from, code);
+        if (!result.joined) {
+          if (result.reason === "not_found") {
+            replies.push("I couldn't find a tree with that code. Double-check the letters and try again.");
+          } else if (result.reason === "invalid_code") {
+            replies.push("That doesn't look like a valid join code. It should be six letters or numbers.");
+          } else {
+            replies.push("Something went wrong while joining that tree. Please try again in a moment.");
+          }
+          continue;
+        }
+
+        await setActiveTreeState(from, result.tree.id);
+        const refreshed = await listPersonsForTree(from);
+        activeTree = refreshed.tree;
+        knownNames = (refreshed.people || []).map((p) => p.primary_name);
+        personRecords = (refreshed.people || []).map((p) => ({
+          id: p.id,
+          primary_name: p.primary_name,
+          dob_dmy: p.dob_dmy || null,
+        }));
+        await setLastPerson(from, activeTree.id, null, null);
+        const share = shareLinkText(activeTree);
+        const lines = [
+          `You're now part of “${activeTree.name}”. The join code is ${activeTree.join_code}.`,
+        ];
+        if (share) lines.push(share);
+        replies.push(lines.join("\n"));
+        continue;
+      }
+
+      if (!activeTree) {
+        replies.push(
+          "You're not currently part of a family tree. Start a new one or join with a code before making other changes."
+        );
+        break;
+      }
+
+      if (op.op === "view_tree") {
+        const lines = [
+          `You're viewing “${activeTree.name}”. The join code is ${activeTree.join_code}.`,
+        ];
+        const share = shareLinkText(activeTree);
+        if (share) lines.push(share);
+        replies.push(lines.join("\n"));
+        continue;
+      }
+
+      if (op.op === "view_person") {
+        const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
+        if (!ok) continue;
 
         const target = await findInTreeByName(activeTree.id, op.name);
         if (!target) {
@@ -407,7 +612,7 @@ function menuGuidanceText(id, tree) {
         const summary = await personSummary(activeTree.id, target.id);
         const parts = [`I didn't change anything; here's what I know about ${summary.me || target.primary_name}.`];
         if (summary.parents?.length) parts.push(`Parents: ${summary.parents.join(", ")}.`);
-             if (summary.spouses?.length) parts.push(`Partners: ${summary.spouses.join(", ")}.`);
+        if (summary.spouses?.length) parts.push(`Partners: ${summary.spouses.join(", ")}.`);
         if (summary.children?.length) parts.push(`Children: ${summary.children.join(", ")}.`);
         replies.push(parts.join(" "));
         await setLastPerson(from, activeTree.id, target.id, target.primary_name);
@@ -476,9 +681,9 @@ function menuGuidanceText(id, tree) {
         ensureKnownName(knownNames, A.primary_name);
         ensureKnownName(knownNames, B.primary_name);
 
-        const msgLower = text.toLowerCase();
         let kind = (op.kind || "").toLowerCase();
         if (!["spouse_of", "partner_of", "parent_of"].includes(kind)) {
+          const msgLower = text.toLowerCase();
           if (/(married|wife|husband|spouse|wed|weds)/.test(msgLower)) {
             kind = "spouse_of";
           } else if (/partner/.test(msgLower)) {
@@ -489,11 +694,21 @@ function menuGuidanceText(id, tree) {
             kind = "spouse_of";
           }
         }
-@@ -481,90 +703,113 @@ export default async function handler(req, res) {
-            childPerson.id,
-            childPerson.primary_name
+
+        if (kind === "parent_of") {
+          let parent = A;
+          let child = B;
+          const guess = guessParentDirection(text, A.primary_name, B.primary_name);
+          if (guess?.parent === "b") {
+            parent = B;
+            child = A;
+          }
+          await addRelationship(activeTree.id, parent.id, "parent_of", child.id);
+          replies.push(
+            `I've linked ${parent.primary_name} as the parent of ${child.primary_name} on the family tree.`
           );
-          lastPersonName = childPerson.primary_name;
+          await setLastPerson(from, activeTree.id, child.id, child.primary_name);
+          lastPersonName = child.primary_name;
           continue;
         }
 
@@ -559,6 +774,36 @@ function menuGuidanceText(id, tree) {
         continue;
       }
 
+      if (op.op === "rename") {
+        const ok = await ensureNamesAreDistinct(activeTree, [op.from], replies);
+        if (!ok) continue;
+        const candidates = await listPersonsByExactName(activeTree.id, op.from);
+        if (!candidates?.length) {
+          replies.push(`I couldn't find anyone named ${op.from} in this tree.`);
+          continue;
+        }
+        if (candidates.length > 1) {
+          const note = await describeAmbiguity(activeTree.id, op.from);
+          if (note) {
+            replies.push(`${note}\nI haven't made any changes yet.`);
+            continue;
+          }
+        }
+        const person = candidates[0];
+        const newName = (op.to || "").trim();
+        if (!newName) {
+          replies.push("Tell me the new name you'd like to use.");
+          continue;
+        }
+        await editPerson(activeTree.id, person.id, { newName });
+        replies.push(`I've renamed ${person.primary_name} to "${newName}" in the family tree.`);
+        await setLastPerson(from, activeTree.id, person.id, newName);
+        lastPersonName = newName;
+        ensureKnownName(knownNames, newName);
+        upsertLocalPerson(personRecords, { ...person, primary_name: newName });
+        continue;
+      }
+
       if (op.op === "set_dob") {
         const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
         if (!ok) continue;
@@ -595,16 +840,55 @@ function menuGuidanceText(id, tree) {
 
         const person = await upsertPersonByName(activeTree.id, op.name);
         await editPerson(activeTree.id, person.id, { gender: normalized });
-        const prettyGender =
-          normalized.charAt(0).toUpperCase() + normalized.slice(1);
+        const prettyGender = normalized.charAt(0).toUpperCase() + normalized.slice(1);
         replies.push(
           `I've recorded ${person.primary_name}'s gender as ${prettyGender} in the family tree.`
         );
         await setLastPerson(from, activeTree.id, person.id, person.primary_name);
         lastPersonName = person.primary_name;
         ensureKnownName(knownNames, person.primary_name);
-@@ -624,50 +869,91 @@ export default async function handler(req, res) {
+        continue;
+      }
 
+      if (op.op === "divorce") {
+        const ok = await ensureNamesAreDistinct(activeTree, [op.a, op.b], replies);
+        if (!ok) continue;
+        const A = await upsertPersonByName(activeTree.id, op.a);
+        const B = await upsertPersonByName(activeTree.id, op.b);
+        await addRelationship(activeTree.id, A.id, "divorced_from", B.id);
+        replies.push(
+          `I've marked ${A.primary_name} and ${B.primary_name} as divorced on the family tree.`
+        );
+        await setLastPerson(from, activeTree.id, B.id, B.primary_name);
+        lastPersonName = B.primary_name;
+        continue;
+      }
+
+      if (op.op === "leave") {
+        const result = await leaveCurrentTree(from);
+        if (result.left) {
+          const treeName = result.tree?.name || "the tree";
+          replies.push(`You're no longer a member of “${treeName}”.`);
+          activeTree = null;
+          knownNames = [];
+          personRecords = [];
+          await setLastPerson(from, null, null, null);
+        } else {
+          replies.push("You're not currently part of a family tree, so nothing changed.");
+        }
+        continue;
+      }
+
+      replies.push("I didn't change anything because I didn't recognise that instruction.");
+    }
+
+    if (replies.length) {
+      await sendText(from, withFollowUp(replies.join("\n\n")));
+    }
+
+    return res.status(200).send("ok");
+  } catch (error) {
+    console.error("Webhook handler error:", error);
     try {
       await sendText(
         req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from,
@@ -615,7 +899,6 @@ function menuGuidanceText(id, tree) {
     } catch (notifyError) {
       console.error("Failed to notify user of error:", notifyError);
     }
-
     return res.status(500).json({ error: "Internal server error" });
   }
 }
@@ -671,15 +954,23 @@ async function runConfirmed(pending, phone) {
   }
 
   if (action.type === "rename") {
+    if (!action.personId || !action.to) {
+      await sendText(phone, withFollowUp("I couldn't rename that person because some details were missing."));
+      return;
+    }
     await editPerson(treeId, action.personId, { newName: action.to });
     await sendText(
       phone,
-      withFollowUp(`I've renamed that person to “${action.to}” in the family tree.`)
+      withFollowUp(`I've renamed that person to "${action.to}" in the family tree.`)
     );
     return;
   }
 
   if (action.type === "divorce") {
+    if (!action.aId || !action.bId) {
+      await sendText(phone, withFollowUp("I couldn't mark them as divorced because some details were missing."));
+      return;
+    }
     await addRelationship(treeId, action.aId, "divorced_from", action.bId);
     const divorceMessage =
       action.aName && action.bName
