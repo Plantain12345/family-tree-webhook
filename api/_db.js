@@ -18,15 +18,12 @@ export function normalizeName(s) {
   return (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-// Used in tips we send back to WhatsApp users
 const BASE_URL = "https://family-tree-webhook.vercel.app";
 
 /* --------------------------- activation flow ------------------------ */
-/**
- * Mark a tree as *active* by upserting (tree_id,phone) and bumping joined_at.
- * Assumes members.joined_at defaults to now(); we force a newer timestamp to
- * make this membership the latest row chosen by latestTreeFor().
-@@ -147,64 +148,70 @@ export async function findInTreeByName(treeId, q) {
+
+export async function findInTreeByName(treeId, q) {
+  const norm = normalizeName(q);
   const { data: ppl } = await db.from("persons").select("*").eq("tree_id", treeId);
   return ppl?.find((p) => normalizeName(p.primary_name) === norm) || null;
 }
@@ -54,10 +51,7 @@ export async function upsertPersonByName(treeId, name, dob = null) {
     if (dob !== undefined) {
       const nextDob = normalizeDobInput(dob);
       if (nextDob !== person.dob_dmy) {
-        await db
-          .from("persons")
-          .update({ dob_dmy: nextDob })
-          .eq("id", person.id);
+        await db.from("persons").update({ dob_dmy: nextDob }).eq("id", person.id);
         person.dob_dmy = nextDob;
       }
     }
@@ -84,28 +78,28 @@ function minmax(a, b) {
   return a < b ? [a, b] : [b, a];
 }
 
-/**
- * spouse_of / partner_of are stored as a single, undirected edge (normalized a<b)
- * parent_of is directed (a -> b).
- * divorced_from / separated_from remove any active spouse_of edge and store a status marker.
- * The DB has partial unique indexes:
- *  - spouse_of: unique(tree_id,a,b,kind) where kind='spouse_of'
- *  - parent_of: unique(tree_id,a,b,kind) where kind='parent_of'
- */
 export async function addRelationship(treeId, aId, kind, bId) {
   if (kind === "spouse_of" || kind === "partner_of") {
-    // Normalize undirected edge so it matches the DB unique index
     const [x, y] = minmax(aId, bId);
     const { error } = await db
-@@ -248,51 +255,54 @@ export async function addRelationship(treeId, aId, kind, bId) {
+      .from("relationships")
+      .upsert(
         { tree_id: treeId, a: x, b: y, kind },
         { onConflict: "tree_id,a,b,kind" }
       );
     if (error && error.code !== "23505") throw error;
     return;
   }
+  if (kind === "parent_of") {
+    const { error } = await db
+      .from("relationships")
+      .upsert(
+        { tree_id: treeId, a: aId, b: bId, kind },
+        { onConflict: "tree_id,a,b,kind" }
+      );
+    if (error && error.code !== "23505") throw error;
+  }
 }
-
 
 export async function addChildWithParents(treeId, childName, dob, parentAName, parentBName) {
   const child = await upsertPersonByName(treeId, childName, dob || null);
@@ -194,9 +188,6 @@ export async function popPending(phone) {
 
 /* --------------------------- user state management ------------------ */
 
-/**
- * Get user state (last person mentioned, etc.)
- */
 export async function getUserState(phone) {
   const { data, error } = await db
     .from("user_states")
@@ -211,9 +202,6 @@ export async function getUserState(phone) {
   return data;
 }
 
-/**
- * Set the last person the user mentioned
- */
 export async function setLastPerson(phone, treeId, personId, personName) {
   const { error } = await db
     .from("user_states")
@@ -233,9 +221,6 @@ export async function setLastPerson(phone, treeId, personId, personName) {
   }
 }
 
-/**
- * Set active tree state
- */
 export async function setActiveTreeState(phone, treeId) {
   const { error } = await db
     .from("user_states")
