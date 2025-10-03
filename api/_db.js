@@ -18,7 +18,153 @@ export function normalizeName(s) {
   return (s || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-const BASE_URL = "https://family-tree-webhook.vercel.app";
+async function joinCodeExists(code) {
+  const { data, error } = await db
+    .from("trees")
+    .select("id")
+    .eq("join_code", code)
+    .maybeSingle();
+  if (error) {
+    console.error("joinCodeExists error:", error);
+    return false;
+  }
+  return Boolean(data);
+}
+
+async function generateJoinCode() {
+  for (let i = 0; i < 10; i += 1) {
+    const code = makeJoinCode();
+    if (!(await joinCodeExists(code))) return code;
+  }
+  throw new Error("Failed to generate unique join code");
+}
+
+export async function createTree(phone, name) {
+  if (!phone) throw new Error("Phone number is required to create a tree");
+  const joinCode = await generateJoinCode();
+  const payload = { join_code: joinCode };
+  const trimmed = (name || "").trim();
+  if (trimmed) payload.name = trimmed;
+
+  const { data: tree, error } = await db
+    .from("trees")
+    .insert(payload)
+    .select()
+    .single();
+  if (error) throw error;
+
+  const { error: memberError } = await db
+    .from("members")
+    .upsert(
+      {
+        tree_id: tree.id,
+        phone,
+        joined_at: new Date().toISOString(),
+      },
+      { onConflict: "tree_id,phone" }
+    );
+
+  if (memberError) throw memberError;
+
+  return tree;
+}
+
+export async function joinTreeByCode(phone, rawCode) {
+  if (!phone) throw new Error("Phone number is required to join a tree");
+  const code = (rawCode || "").toString().trim().toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(code)) {
+    return { joined: false, reason: "invalid_code", tree: null };
+  }
+
+  const { data: tree, error } = await db
+    .from("trees")
+    .select("*")
+    .eq("join_code", code)
+    .maybeSingle();
+
+  if (error) {
+    console.error("joinTreeByCode error:", error);
+    return { joined: false, reason: "error", tree: null };
+  }
+
+  if (!tree) {
+    return { joined: false, reason: "not_found", tree: null };
+  }
+
+  const { error: memberError } = await db
+    .from("members")
+    .upsert(
+      {
+        tree_id: tree.id,
+        phone,
+        joined_at: new Date().toISOString(),
+      },
+      { onConflict: "tree_id,phone" }
+    );
+
+  if (memberError) throw memberError;
+
+  return { joined: true, reason: null, tree };
+}
+
+export async function latestTreeFor(phone) {
+  if (!phone) return null;
+  const { data: membership, error } = await db
+    .from("members")
+    .select("tree_id")
+    .eq("phone", phone)
+    .order("joined_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("latestTreeFor error:", error);
+    return null;
+  }
+
+  const treeId = membership?.tree_id;
+  if (!treeId) return null;
+
+  const { data: tree, error: treeErr } = await db
+    .from("trees")
+    .select("*")
+    .eq("id", treeId)
+    .maybeSingle();
+
+  if (treeErr) {
+    console.error("latestTreeFor tree fetch error:", treeErr);
+    return null;
+  }
+
+  return tree || null;
+}
+
+export async function listPersonsForTree(phone) {
+  const tree = await latestTreeFor(phone);
+  if (!tree) return { tree: null, people: [], rels: [] };
+
+  const [{ data: people, error: peopleError }, { data: rels, error: relsError }] =
+    await Promise.all([
+      db
+        .from("persons")
+        .select("id, primary_name, dob_dmy, gender")
+        .eq("tree_id", tree.id)
+        .order("primary_name", { ascending: true }),
+      db
+        .from("relationships")
+        .select("a, b, kind")
+        .eq("tree_id", tree.id),
+    ]);
+
+  if (peopleError) console.error("listPersonsForTree people error:", peopleError);
+  if (relsError) console.error("listPersonsForTree rels error:", relsError);
+
+  return {
+    tree,
+    people: people || [],
+    rels: rels || [],
+  };
+}
 
 /* --------------------------- activation flow ------------------------ */
 
@@ -79,7 +225,7 @@ function minmax(a, b) {
 }
 
 export async function addRelationship(treeId, aId, kind, bId) {
-  if (kind === "spouse_of" || kind === "partner_of") {
+  if (["spouse_of", "partner_of", "divorced_from"].includes(kind)) {
     const [x, y] = minmax(aId, bId);
     const { error } = await db
       .from("relationships")
