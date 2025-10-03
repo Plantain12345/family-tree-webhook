@@ -46,7 +46,6 @@ const PRONOUNS = new Set([
   "theirs",
   "my",
   "our",
-@@ -48,50 +50,61 @@ const PRONOUNS = new Set([
   "i",
 ]);
 const looksLikePronoun = (s) => PRONOUNS.has((s || "").trim().toLowerCase());
