@@ -16,8 +16,7 @@
       --status-bg: rgba(216, 123, 93, 0.12);
     }
 
-    html,
-    body {
+    html, body {
       margin: 0;
       min-height: 100%;
       font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -25,238 +24,87 @@
       background: var(--bg);
     }
 
-    body {
-      display: flex;
-      flex-direction: column;
-    }
+    body { display: flex; flex-direction: column; }
 
-    .shell {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      min-height: 100vh;
-    }
+    .shell { flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
 
     header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 24px;
-      padding: 28px 36px 20px;
-      background: var(--surface);
-      box-shadow: 0 12px 32px rgba(21, 12, 4, 0.05);
-      z-index: 10;
+      display: flex; align-items: center; justify-content: space-between; gap: 24px;
+      padding: 28px 36px 20px; background: var(--surface);
+      box-shadow: 0 12px 32px rgba(21, 12, 4, 0.05); z-index: 10;
     }
 
-    .title-block {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
+    .title-block { display: flex; flex-direction: column; gap: 6px; }
 
-    .title-prefix {
-      text-transform: uppercase;
-      letter-spacing: 0.18em;
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--muted);
-    }
+    .title-prefix { text-transform: uppercase; letter-spacing: 0.18em; font-size: 11px; font-weight: 600; color: var(--muted); }
 
-    h1 {
-      margin: 0;
-      font-size: 26px;
-      font-weight: 600;
-    }
+    h1 { margin: 0; font-size: 26px; font-weight: 600; }
 
     #status {
-      font-size: 12px;
-      font-weight: 500;
-      color: var(--accent);
-      background: var(--status-bg);
-      padding: 8px 14px;
-      border-radius: 999px;
-      align-self: flex-start;
-      white-space: nowrap;
+      font-size: 12px; font-weight: 500; color: var(--accent); background: var(--status-bg);
+      padding: 8px 14px; border-radius: 999px; align-self: flex-start; white-space: nowrap;
     }
 
     main {
-      flex: 1;
-      position: relative;
-      padding: 24px 36px 36px;
+      flex: 1; position: relative; padding: 24px 36px 36px;
       background: linear-gradient(180deg, rgba(248, 242, 236, 0.55) 0%, rgba(255, 255, 255, 0.9) 60%, rgba(255, 255, 255, 1) 100%);
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
+      display: flex; flex-direction: column; gap: 20px;
     }
 
     .legend {
-      position: absolute;
-      top: 42px;
-      right: 56px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+      position: absolute; top: 42px; right: 56px; display: flex; flex-direction: column; gap: 10px;
     }
 
-    .legend-item {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13px;
-      color: var(--muted);
-    }
+    .legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 
-    .legend-swatch {
-      width: 14px;
-      height: 14px;
-      border-radius: 999px;
-      display: inline-block;
-      border: 1px solid rgba(0, 0, 0, 0.05);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.8);
-    }
+    .legend-swatch { width: 14px; height: 14px; border-radius: 999px; display: inline-block; border: 1px solid rgba(0,0,0,0.05); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.8); }
 
-    .legend-swatch.male {
-      background: #c8daf9;
-    }
-
-    .legend-swatch.female {
-      background: #f8d5e4;
-    }
-
-    .legend-swatch.neutral {
-      background: #e3dbf7;
-    }
-
-    .legend-swatch.unknown {
-      background: #f4efe7;
-    }
+    .legend-swatch.male { background: #c8daf9; }
+    .legend-swatch.female { background: #f8d5e4; }
+    .legend-swatch.neutral { background: #e3dbf7; }
+    .legend-swatch.unknown { background: #f4efe7; }
 
     .alerts {
-      position: relative;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      align-self: flex-start;
-      background: rgba(255, 255, 255, 0.75);
-      border-radius: 16px;
-      border: 1px solid var(--border);
-      padding: 16px 20px;
-      box-shadow: 0 24px 46px rgba(27, 17, 8, 0.08);
+      position: relative; display: flex; flex-direction: column; gap: 10px; align-self: flex-start;
+      background: rgba(255, 255, 255, 0.75); border-radius: 16px; border: 1px solid var(--border);
+      padding: 16px 20px; box-shadow: 0 24px 46px rgba(27, 17, 8, 0.08);
     }
-
-    .alerts strong {
-      font-size: 13px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--accent);
-    }
-
-    .alerts ul {
-      margin: 0;
-      padding-left: 18px;
-      font-size: 13px;
-      color: var(--muted);
-    }
+    .alerts strong { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+    .alerts ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
 
     #cy {
-      width: 100%;
-      flex: 1;
-      min-height: 480px;
-      border-radius: 26px;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      box-shadow: 0 28px 60px rgba(27, 17, 8, 0.08);
+      width: 100%; flex: 1; min-height: 480px; border-radius: 26px; background: var(--panel);
+      border: 1px solid var(--border); box-shadow: 0 28px 60px rgba(27, 17, 8, 0.08);
     }
 
     #empty {
-      position: absolute;
-      inset: 0;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      pointer-events: none;
+      position: absolute; inset: 0; display: none; align-items: center; justify-content: center; pointer-events: none;
     }
 
     #empty .box {
-      text-align: center;
-      color: var(--muted);
-      padding: 32px 40px;
-      border-radius: 20px;
-      background: rgba(255, 255, 255, 0.8);
-      box-shadow: 0 18px 44px rgba(17, 10, 4, 0.08);
-      border: 1px solid var(--border);
-      pointer-events: auto;
+      text-align: center; color: var(--muted); padding: 32px 40px; border-radius: 20px; background: rgba(255,255,255,0.8);
+      box-shadow: 0 18px 44px rgba(17, 10, 4, 0.08); border: 1px solid var(--border); pointer-events: auto;
     }
 
-    #empty .box strong {
-      display: block;
-      font-size: 18px;
-      margin-bottom: 6px;
-      color: var(--ink);
-    }
+    #empty .box strong { display: block; font-size: 18px; margin-bottom: 6px; color: var(--ink); }
 
-    #empty .share-actions {
-      margin-top: 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      align-items: center;
-    }
+    #empty .share-actions { margin-top: 18px; display: flex; flex-direction: column; gap: 12px; align-items: center; }
 
-    #empty .share-note {
-      font-size: 14px;
-      color: var(--muted);
-      max-width: 320px;
-      line-height: 1.5;
-    }
+    #empty .share-note { font-size: 14px; color: var(--muted); max-width: 320px; line-height: 1.5; }
 
     #share-tree-button {
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      border-radius: 999px;
-      padding: 12px 24px;
-      font-size: 15px;
-      font-weight: 600;
-      cursor: pointer;
+      background: var(--accent); color: #fff; border: none; border-radius: 999px; padding: 12px 24px;
+      font-size: 15px; font-weight: 600; cursor: pointer;
       transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
     }
-
-    #share-tree-button:disabled {
-      cursor: not-allowed;
-      opacity: 0.6;
-      box-shadow: none;
-    }
-
-    #share-tree-button:not(:disabled):hover {
-      transform: translateY(-1px);
-      box-shadow: 0 12px 28px rgba(216, 123, 93, 0.35);
-    }
+    #share-tree-button:disabled { cursor: not-allowed; opacity: 0.6; box-shadow: none; }
+    #share-tree-button:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(216,123,93,0.35); }
 
     @media (max-width: 720px) {
-      header {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 18px;
-      }
-
-      .legend {
-        position: static;
-        margin-bottom: 16px;
-        flex-direction: row;
-        flex-wrap: wrap;
-        gap: 14px;
-        justify-content: center;
-      }
-
-      .alerts {
-        margin-top: 12px;
-        align-self: stretch;
-      }
-
-      #empty {
-        inset: 24px;
-      }
+      header { flex-direction: column; align-items: flex-start; gap: 18px; }
+      .legend { position: static; margin-bottom: 16px; flex-direction: row; flex-wrap: wrap; gap: 14px; justify-content: center; }
+      .alerts { margin-top: 12px; align-self: stretch; }
+      #empty { inset: 24px; }
     }
   </style>
 </head>
@@ -279,18 +127,21 @@
       </div>
       <div id="alerts" class="alerts" hidden></div>
       <div id="cy"></div>
-      <div id="empty"><div class="box">
-        <strong>Invite your family</strong>
-        <div class="share-actions">
-          <button id="share-tree-button" type="button" disabled>Share This Tree.</button>
-          <span class="share-note">You can collaborate with others to grow this tree.</span>
+      <div id="empty">
+        <div class="box">
+          <strong>Invite your family</strong>
+          <div class="share-actions">
+            <button id="share-tree-button" type="button" disabled>Share This Tree.</button>
+            <span class="share-note">You can collaborate with others to grow this tree.</span>
+          </div>
         </div>
-      </div></div>
+      </div>
     </main>
   </div>
 
   <script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
   <script>
+    // --- query params & DOM refs ---
     const qs = new URLSearchParams(location.search);
     const code = (qs.get("code") || "").toUpperCase();
     const treeNameEl = document.getElementById("tree-name");
@@ -317,6 +168,7 @@
       });
     }
 
+    // --- Cytoscape init ---
     const cy = cytoscape({
       container: document.getElementById("cy"),
       elements: [],
@@ -342,409 +194,130 @@
             "overlay-opacity": 0
           }
         },
-        {
-          selector: "node.gender-male",
-          style: {
-            shape: "square",
-            "background-color": "#7ea5f8",
-            "border-color": "#4c6dc3"
-          }
-        },
-        {
-          selector: "node.gender-female",
-          style: {
-            shape: "ellipse",
-            "background-color": "#f8b3cf",
-            "border-color": "#d47ca1"
-          }
-        },
-        {
-          selector: "node.gender-nonbinary",
-          style: {
-            shape: "diamond",
-            "background-color": "#d9c4f7",
-            "border-color": "#a88ed7"
-          }
-        },
-        {
-          selector: "node.gender-unknown",
-          style: {
-            shape: "round-rectangle",
-            "background-color": "#ece2d6",
-            "border-color": "#cbb49d"
-          }
-        },
-        {
-          selector: "node.family-connector",
-          style: {
-            width: 2,
-            height: 2,
-            shape: "rectangle",
-            opacity: 0
-          }
-        },
-        {
-          selector: "node.sibling-drop",
-          style: {
-            width: 2,
-            height: 2,
-            shape: "rectangle",
-            opacity: 0
-          }
-        },
-        {
-          selector: "edge",
-          style: {
-            "curve-style": "straight",
-            width: 2,
-            "line-color": "#3d3126",
-            "target-arrow-shape": "none",
-            "source-arrow-shape": "none",
-            opacity: 1
-          }
-        },
-        {
-          selector: "edge.marriage",
-          style: {
-            width: 3
-          }
-        },
-        {
-          selector: "edge.marriage.divorced",
-          style: {
-            "line-style": "dashed"
-          }
-        },
-        {
-          selector: "edge.parent-connector",
-          style: {
-            width: 2
-          }
-        },
-        {
-          selector: "edge.sibship-link",
-          style: {
-            width: 2
-          }
-        },
-        {
-          selector: "edge.child-link",
-          style: {
-            width: 2
-          }
-        },
-        {
-          selector: "edge.generic",
-          style: {
-            "line-style": "dotted",
-            "line-color": "#9f8c7a"
-          }
-        }
+        { selector: "node.gender-male",    style: { shape: "square",          "background-color": "#7ea5f8", "border-color": "#4c6dc3" } },
+        { selector: "node.gender-female",  style: { shape: "ellipse",         "background-color": "#f8b3cf", "border-color": "#d47ca1" } },
+        { selector: "node.gender-nonbinary", style:{ shape: "diamond",        "background-color": "#d9c4f7", "border-color": "#a88ed7" } },
+        { selector: "node.gender-unknown", style: { shape: "round-rectangle", "background-color": "#ece2d6", "border-color": "#cbb49d" } },
+
+        { selector: "edge",                    style: { "curve-style": "straight", width: 2, "line-color": "#3d3126", opacity: 1 } },
+        { selector: "edge.marriage",           style: { width: 3 } },
+        { selector: "edge.marriage.divorced",  style: { "line-style": "dashed" } },
+        { selector: "edge.child-link",         style: { "target-arrow-shape": "triangle", "target-arrow-color": "#3d3126" } },
+        { selector: "edge.generic",            style: { "line-style": "dotted", "line-color": "#9f8c7a" } }
       ],
       layout: { name: "preset" },
       wheelSensitivity: 0.2
     });
 
-    window.addEventListener("resize", () => {
-      cy.resize();
-    });
+    window.addEventListener("resize", () => cy.resize());
 
-    const HORIZONTAL_SPACING = 220;
-    const VERTICAL_SPACING = 200;
-    const DROP_VERTICAL_OFFSET = 70;
-
+    // --- Basic helpers (frontend only) ---
     function normalizeGender(value) {
       if (value === null || value === undefined) return "unknown";
       const lower = String(value).trim().toLowerCase();
       if (!lower) return "unknown";
-      if (["m", "male", "man", "boy"].includes(lower)) return "male";
-      if (["f", "female", "woman", "girl"].includes(lower)) return "female";
-      if (["nb", "nonbinary", "non-binary", "non binary", "enby"].includes(lower)) {
-        return "nonbinary";
-      }
+      if (["m","male","man","boy"].includes(lower)) return "male";
+      if (["f","female","woman","girl"].includes(lower)) return "female";
+      if (["nb","nonbinary","non-binary","non binary","enby"].includes(lower)) return "nonbinary";
       return "unknown";
     }
 
-    const DOB_MONTH_MAP = {
-      jan: 1,
-      january: 1,
-      feb: 2,
-      february: 2,
-      mar: 3,
-      march: 3,
-      apr: 4,
-      april: 4,
-      may: 5,
-      jun: 6,
-      june: 6,
-      jul: 7,
-      july: 7,
-      aug: 8,
-      august: 8,
-      sep: 9,
-      sept: 9,
-      september: 9,
-      oct: 10,
-      october: 10,
-      nov: 11,
-      november: 11,
-      dec: 12,
-      december: 12
-    };
-
-    const DOB_SEASONS = {
-      spring: { month: 3, span: 3 },
-      summer: { month: 6, span: 3 },
-      autumn: { month: 9, span: 3 },
-      fall: { month: 9, span: 3 },
-      winter: { month: 12, span: 3 }
-    };
-
-    function dobClampYear(year) {
-      if (!year || Number.isNaN(year)) return null;
-      if (year < 1200 || year > 2100) return null;
-      return year;
+    function formatLabel(name, dob) {
+      if (!dob) return name || "Unnamed";
+      return `${name}\n(b. ${dob})`;
     }
 
-    function dobExpandTwoDigitYear(value) {
-      if (!value || value.length !== 2) return null;
-      const parsed = Number.parseInt(value, 10);
-      if (Number.isNaN(parsed)) return null;
-      const currentYear = new Date().getFullYear() % 100;
-      const century = parsed <= currentYear + 5 ? 2000 : 1900;
-      return dobClampYear(century + parsed);
-    }
-
-    function dobExtractTokens(raw) {
-      const trimmed = raw.trim();
-      if (!trimmed) return [];
-      const tokens = trimmed.split(/\s+/);
-      const out = [];
-      let seenNumeric = false;
-      for (const token of tokens) {
-        const lower = token.toLowerCase();
-        if (
-          /\d/.test(lower) ||
-          lower.startsWith("c.") ||
-          lower.startsWith("ca.") ||
-          lower === "circa" ||
-          lower === "c" ||
-          Object.prototype.hasOwnProperty.call(DOB_SEASONS, lower) ||
-          Object.prototype.hasOwnProperty.call(DOB_MONTH_MAP, lower)
-        ) {
-          out.push(token);
-          if (/\d/.test(lower)) seenNumeric = true;
-          continue;
+    // Map API payload → nodes/edges shape used by builder
+    function apiPeopleToNodes(people = []) {
+      return people.map(p => ({
+        data: {
+          id: String(p.id),
+          name: p.primary_name,
+          label: formatLabel(p.primary_name, p.dob_dmy || null),
+          dob: p.dob_dmy || null,
+          gender: normalizeGender(p.gender || null),
         }
-        if (seenNumeric) break;
-      }
-      return out;
+      }));
     }
 
-    function dobRangeForYear(year) {
-      if (!year) return null;
-      const start = Date.UTC(year, 0, 1);
-      const end = Date.UTC(year, 11, 31, 23, 59, 59, 999);
-      return { start, end };
+    function apiRelsToEdges(rels = []) {
+      return rels.map(r => ({
+        data: { a: String(r.a), b: String(r.b), kind: r.kind }
+      }));
     }
 
-    function dobRangeForMonth(year, month) {
-      if (!year || !month) return null;
-      const start = Date.UTC(year, month - 1, 1);
-      const end = Date.UTC(year, month, 0, 23, 59, 59, 999);
-      return { start, end };
-    }
+    // Build Cytoscape elements from simple nodes/edges
+    function buildElements(nodeList = [], edgeList = []) {
+      const elements = [];
 
-    function dobRangeForDecade(year) {
-      if (!year) return null;
-      const decadeStart = year - (year % 10);
-      const start = Date.UTC(decadeStart, 0, 1);
-      const end = Date.UTC(decadeStart + 9, 11, 31, 23, 59, 59, 999);
-      return { start, end };
-    }
-
-    function dobNormalizeSeason(year, key) {
-      const info = DOB_SEASONS[key];
-      if (!info || !year) return null;
-      const start = Date.UTC(year, info.month - 1, 1);
-      const end = Date.UTC(year, info.month - 1 + (info.span - 1), 0, 23, 59, 59, 999);
-      return { start, end };
-    }
-
-    function parseFlexibleDob(raw) {
-      if (raw === null || raw === undefined) return null;
-      const trimmed = String(raw).trim();
-      if (!trimmed) return null;
-      const tokens = dobExtractTokens(trimmed);
-      const candidate = tokens.length ? tokens.join(" ") : trimmed;
-      const normalized = candidate.replace(/[,\.]/g, " ").replace(/\s+/g, " ").trim();
-
-      const parsed = Date.parse(normalized);
-      if (!Number.isNaN(parsed)) {
-        const d = new Date(parsed);
-        const year = dobClampYear(d.getUTCFullYear());
-        if (year) {
-          const month = d.getUTCMonth() + 1;
-          const day = d.getUTCDate();
-          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
-        }
-      }
-
-      const dmy = normalized.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
-      if (dmy) {
-        const [, dStr, mStr, yStr] = dmy;
-        const day = Number.parseInt(dStr, 10);
-        const month = Number.parseInt(mStr, 10);
-        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
-        if (year && !Number.isNaN(day) && !Number.isNaN(month)) {
-          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
-        }
-      }
-
-      const ymd = normalized.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/);
-      if (ymd) {
-        const [, yStr, mStr, dStr] = ymd;
-        const year = dobClampYear(Number.parseInt(yStr, 10));
-        const month = Number.parseInt(mStr, 10);
-        const day = Number.parseInt(dStr, 10);
-        if (year && !Number.isNaN(month) && !Number.isNaN(day)) {
-          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
-        }
-      }
-
-      const monthDayYear = normalized.match(/^([a-zA-Z]+)[\s/-]+(\d{1,2})(?:st|nd|rd|th)?[\s/-]+(\d{2,4})$/);
-      if (monthDayYear) {
-        const [, monthRaw, dStr, yStr] = monthDayYear;
-        const month = DOB_MONTH_MAP[monthRaw.toLowerCase()];
-        const day = Number.parseInt(dStr, 10);
-        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
-        if (year && month && !Number.isNaN(day)) {
-          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
-        }
-      }
-
-      const dayMonthYear = normalized.match(/^(\d{1,2})(?:st|nd|rd|th)?[\s/-]+([a-zA-Z]+)[\s/-]+(\d{2,4})$/);
-      if (dayMonthYear) {
-        const [, dStr, monthRaw, yStr] = dayMonthYear;
-        const month = DOB_MONTH_MAP[monthRaw.toLowerCase()];
-        const day = Number.parseInt(dStr, 10);
-        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
-        if (year && month && !Number.isNaN(day)) {
-          return { range: { start: Date.UTC(year, month - 1, day), end: Date.UTC(year, month - 1, day, 23, 59, 59, 999) } };
-        }
-      }
-
-      const monthYear = normalized.match(/^([a-zA-Z]+)[\s-]+(\d{2,4})$/);
-      if (monthYear) {
-        const [, monthRaw, yStr] = monthYear;
-        const month = DOB_MONTH_MAP[monthRaw.toLowerCase()];
-        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
-        if (year && month) {
-          return { range: dobRangeForMonth(year, month) };
-        }
-      }
-
-      const circa = normalized.match(/^(?:c\.?|ca\.?|circa)\s*(\d{2,4})(?:s)?$/i);
-      if (circa) {
-        const [, yStr] = circa;
-        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
-        if (year) return { range: dobRangeForYear(year) };
-      }
-
-      const decade = normalized.match(/^(\d{3})(\d)s$/);
-      if (decade) {
-        const [, prefix, digit] = decade;
-        const year = dobClampYear(Number.parseInt(`${prefix}${digit}`, 10));
-        if (year) return { range: dobRangeForDecade(year) };
-      }
-
-      const apostropheDecade = normalized.match(/^'?([0-9]{2})s$/);
-      if (apostropheDecade) {
-        const [, two] = apostropheDecade;
-        const expanded = dobExpandTwoDigitYear(two);
-        if (expanded) return { range: dobRangeForDecade(expanded) };
-      }
-
-      const seasonYear = normalized.match(/^(spring|summer|autumn|fall|winter)[\s-]+(\d{2,4})$/i);
-      if (seasonYear) {
-        const [, seasonRaw, yStr] = seasonYear;
-        const key = seasonRaw.toLowerCase();
-        const year = dobClampYear(yStr.length === 2 ? dobExpandTwoDigitYear(yStr) : Number.parseInt(yStr, 10));
-        if (year) return { range: dobNormalizeSeason(year, key) };
-      }
-
-      const yearOnly = normalized.match(/^(\d{4})$/);
-      if (yearOnly) {
-        const year = dobClampYear(Number.parseInt(yearOnly[1], 10));
-        if (year) return { range: dobRangeForYear(year) };
-      }
-
-      return null;
-    }
-
-    function parseDobValue(dob) {
-      const info = parseFlexibleDob(dob);
-      if (!info?.range || !Number.isFinite(info.range.start)) return Number.POSITIVE_INFINITY;
-      return info.range.start;
-    }
-
-    function compareByBirthThenName(a, b, birthValues, labelMap) {
-      const aVal = birthValues.get(a) ?? Number.POSITIVE_INFINITY;
-      const bVal = birthValues.get(b) ?? Number.POSITIVE_INFINITY;
-      if (aVal !== bVal) return aVal - bVal;
-      const aLabel = (labelMap.get(a) || "").toLowerCase();
-      const bLabel = (labelMap.get(b) || "").toLowerCase();
-      if (aLabel && bLabel) return aLabel.localeCompare(bLabel);
-      if (aLabel) return -1;
-      if (bLabel) return 1;
-      return String(a).localeCompare(String(b));
-    }
-
-    function buildElements(nodeList = [], edgeList = [], families = []) {
-      const personMap = new Map();
-      const birthValues = new Map();
-      const labelByPerson = new Map();
-
-      for (const node of nodeList) {
-        if (!node?.data?.id) continue;
-        const gender = normalizeGender(node.data.gender);
-        const classes = ["person", `gender-${gender || "unknown"}`].join(" ");
-        const dobValue = parseDobValue(node.data.dob || null);
-        birthValues.set(node.data.id, dobValue);
-@@ -843,51 +1044,51 @@
+      // nodes
+      for (const n of nodeList) {
+        const g = normalizeGender(n.data.gender);
+        elements.push({
+          group: "nodes",
+          data: n.data,
+          classes: `person gender-${g}`
         });
+      }
+
+      // edges
+      for (const e of edgeList) {
+        if (!e?.data?.a || !e?.data?.b) continue;
+        const { a, b, kind } = e.data;
+        if (kind === "spouse_of" || kind === "partner_of" || kind === "divorced_from") {
+          elements.push({
+            group: "edges",
+            data: { id: `m:${a}:${b}:${kind}`, source: a, target: b },
+            classes: `marriage${kind === "divorced_from" ? " divorced" : ""}`
+          });
+        } else if (kind === "parent_of") {
+          elements.push({
+            group: "edges",
+            data: { id: `p:${a}:${b}`, source: a, target: b },
+            classes: "child-link"
+          });
+        } else {
+          elements.push({
+            group: "edges",
+            data: { id: `g:${a}:${b}:${kind}`, source: a, target: b },
+            classes: "generic"
+          });
+        }
       }
 
       return elements;
     }
 
-    function describePerson(person) {
-      if (!person) return null;
-      if (person.dob) return `${person.name} (b. ${person.dob})`;
-      return person.name || null;
+    // Alerts / sharing helpers
+    function updateIssuesPanel(messages = []) {
+      if (!alertsEl) return;
+      if (!messages.length) {
+        alertsEl.hidden = true;
+        alertsEl.innerHTML = "";
+        return;
+      }
+      alertsEl.hidden = false;
+      alertsEl.innerHTML = `
+        <strong>Warnings</strong>
+        <ul>${messages.map(m => `<li>${m}</li>`).join("")}</ul>
+      `;
     }
 
-    function formatIssue(issue) {
-      if (!issue || typeof issue !== "object") return null;
-      if (issue.message) return issue.message;
-      switch (issue.type) {
-        case "duplicate_person": {
-          const names = (issue.people || []).map(describePerson).filter(Boolean);
-          if (!names.length) return null;
-          return `Possible duplicate records: ${names.join(", ")}`;
-        }
-        case "parent_age_anomaly": {
-          const parent = describePerson(issue.parent);
-          const child = describePerson(issue.child);
-          if (!parent || !child) return null;
-          return `Error: ${parent} appears younger than ${child}. Please review their birth dates.`;
-        }
-        default:
-@@ -549,77 +914,64 @@
+    function enableSharing(treeName) {
+      if (!shareButton) return;
+      shareButton.disabled = false;
+      shareMessage = `Join our family tree “${treeName}”. Open this link: ${location.origin}${location.pathname}?code=${code}`;
+    }
 
+    function disableSharing() {
+      if (!shareButton) return;
+      shareButton.disabled = true;
+      shareMessage = null;
+    }
+
+    // --- Load & render the tree ---
     async function loadTree() {
       statusEl.textContent = "Loading…";
-
       try {
         const response = await fetch(`/api/tree?code=${code}`, { cache: "no-store" });
         let payload = null;
@@ -762,18 +335,25 @@
           disableSharing();
           return;
         }
-        treeNameEl.textContent = payload.tree?.name || "Family Tree";
-        document.title = payload.tree?.name ? `Family Tree: ${payload.tree.name}` : "Family Tree";
 
-        const elements = buildElements(
-          payload.nodes || [],
-          payload.edges || [],
-          payload.families || []
-        );
+        // Title
+        const treeName = payload.tree?.name || "Family Tree";
+        treeNameEl.textContent = treeName;
+        document.title = `Family Tree: ${treeName}`;
+
+        // Transform API payload
+        const nodes = apiPeopleToNodes(payload.people || []);
+        const edges = apiRelsToEdges(payload.rels || []);
+        const elements = buildElements(nodes, edges);
+
+        // Render
         cy.batch(() => {
           cy.elements().remove();
           cy.add(elements);
         });
+
+        // Use a quick layout for readability
+        cy.layout({ name: "cose", animate: false, nodeRepulsion: 60000, idealEdgeLength: 160 }).run();
 
         const personNodes = cy.nodes(".person");
         const personCount = personNodes.length;
@@ -785,7 +365,8 @@
         cy.resize();
         emptyEl.style.display = personCount ? "none" : "flex";
 
-        const issueMessages = (payload.issues || []).map(formatIssue).filter(Boolean);
+        // (Optional) issues from backend; if none, clear
+        const issueMessages = (payload.issues || []).filter(Boolean);
         updateIssuesPanel(issueMessages);
 
         const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -797,7 +378,7 @@
           statusEl.textContent = `Tree is empty · Updated ${stamp}`;
         }
 
-        enableSharing(payload.tree?.name || "this tree");
+        enableSharing(treeName);
       } catch (error) {
         console.error("Failed to load tree", error);
         statusEl.textContent = "Error loading tree";
