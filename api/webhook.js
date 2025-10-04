@@ -221,21 +221,6 @@ function menuGuidanceText(id, tree) {
   }
 }
 
-export default async function handler(req, res) {
-  if (req.method === "GET") {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      return res.status(200).send(challenge || "");
-    }
-    return res.status(403).send("Forbidden");
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
-
   try {
     const entry = req.body?.entry?.[0];
     const change = entry?.changes?.[0];
