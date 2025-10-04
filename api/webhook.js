@@ -21,10 +21,24 @@ import {
 
 import { parseOps } from "./_nlp.js";
 import { dobRange, normalizeDobInput, parseFlexibleDate } from "./date-utils.js";
-
 const BASE_URL = "https://family-tree-webhook.vercel.app";
-const VERIFY_TOKEN = "myfamilytree123";
-const FOLLOW_UP_PROMPT =
+// file: webhook.js
+
+export default async function handler(req, res) {
+  if (req.method === "GET") {
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
+
+    // Use the environment variable for the check
+    if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) { // ✅ Correct
+      return res.status(200).send(challenge || "");
+    }
+    return res.status(403).send("Forbidden");
+  }
+
+  // ... rest of the POST handler
+}const FOLLOW_UP_PROMPT =
   "What else would you like to do to your family tree? I understand plain english. Or type 'menu' to view your options.";
 
 function treeUrl(code) {
