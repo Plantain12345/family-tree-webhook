@@ -23,11 +23,13 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Tree not found" });
     }
 
+    // NOTE: Query only columns that definitely exist in your schema.
+    // (Omit "gender" to avoid 'column persons.gender does not exist')
     const [{ data: peopleRows, error: pErr }, { data: relsRows, error: rErr }] =
       await Promise.all([
         db
           .from("persons")
-          .select("id, primary_name, dob_dmy, gender")
+          .select("id, primary_name, dob_dmy") // <- safe set
           .eq("tree_id", tree.id),
         db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
       ]);
@@ -44,11 +46,116 @@ export default async function handler(req, res) {
 
     const rels = relsRows || [];
 
-    return res.status(200).json({ tree, people, rels });
+    // Build GEDCOM-like family groupings (partners + children)
+    const families = buildFamilies(people, rels);
+
+    return res.status(200).json({ tree, people, rels, families });
   } catch (e) {
     console.error("API /tree fatal error:", e);
     return res.status(500).json({ error: "Server error" });
   }
+}
+
+/* ----------------------------- families builder ----------------------------- */
+
+function buildFamilies(people, rels) {
+  const personIds = new Set((people || []).map((p) => String(p.id)));
+  const partnerKinds = new Set(["spouse_of", "partner_of", "divorced_from"]);
+  const parentKind = "parent_of";
+
+  // Map "A|B" -> { partners:[A,B], kinds:Set(), children:Set() }
+  const partnerPairs = new Map();
+  // Map childId -> Set(parentIds)
+  const childParents = new Map();
+
+  for (const rel of rels || []) {
+    if (!rel) continue;
+    const a = rel.a != null ? String(rel.a) : null;
+    const b = rel.b != null ? String(rel.b) : null;
+    if (!a || !b || !personIds.has(a) || !personIds.has(b)) continue;
+
+    if (partnerKinds.has(rel.kind)) {
+      const key = pairKey(a, b);
+      let entry = partnerPairs.get(key);
+      if (!entry) {
+        entry = { partners: [a, b], kinds: new Set(), children: new Set() };
+        partnerPairs.set(key, entry);
+      }
+      entry.kinds.add(rel.kind);
+    } else if (rel.kind === parentKind) {
+      if (!childParents.has(b)) childParents.set(b, new Set());
+      childParents.get(b).add(a);
+    }
+  }
+
+  // Attach children to partner pairs when BOTH parents are present
+  for (const [childId, parentsSet] of childParents.entries()) {
+    const parents = Array.from(parentsSet);
+    if (parents.length < 2) continue;
+
+    const sorted = parents
+      .map(String)
+      .filter((id) => personIds.has(id))
+      .sort(); // stable pair key
+
+    outer: for (let i = 0; i < sorted.length - 1; i++) {
+      for (let j = i + 1; j < sorted.length; j++) {
+        const key = pairKey(sorted[i], sorted[j]);
+        const pair = partnerPairs.get(key);
+        if (pair) {
+          pair.children.add(childId);
+          parentsSet.delete(sorted[i]);
+          parentsSet.delete(sorted[j]);
+          break outer;
+        }
+      }
+    }
+  }
+
+  const families = [];
+  let counter = 1;
+
+  // Convert partner pairs to family objects
+  for (const pair of partnerPairs.values()) {
+    const kinds = Array.from(pair.kinds);
+    const status = kinds.includes("divorced_from") ? "divorced" : "partnered";
+    families.push({
+      id: `fam_${counter++}`,
+      partners: pair.partners,                // [idA, idB]
+      children: Array.from(pair.children),    // [childId...]
+      partnership_kinds: kinds,               // e.g., ["spouse_of"]
+      status,                                 // "partnered" | "divorced"
+    });
+  }
+
+  // Make single-parent families for remaining parent links
+  const singleParentFamilies = new Map(); // parentId -> family
+  for (const [childId, parentsSet] of childParents.entries()) {
+    if (!parentsSet || !parentsSet.size) continue;
+    for (const parentIdRaw of parentsSet) {
+      const parentId = String(parentIdRaw);
+      if (!personIds.has(parentId)) continue;
+      let fam = singleParentFamilies.get(parentId);
+      if (!fam) {
+        fam = {
+          id: `fam_${counter++}`,
+          partners: [parentId],
+          children: [],
+          partnership_kinds: [],
+          status: "single",
+        };
+        singleParentFamilies.set(parentId, fam);
+      }
+      fam.children.push(childId);
+    }
+  }
+
+  families.push(...singleParentFamilies.values());
+  return families;
+}
+
+function pairKey(a, b) {
+  return [a, b].sort().join("|");
 }
 
 /* ------------------------ local helpers (no date-utils) ------------------------ */
@@ -58,6 +165,7 @@ function normalizeNameKey(name) {
   return name.toString().trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// (Kept for future use if you later add a gender column.)
 function normalizeGender(raw) {
   if (raw === null || raw === undefined) return null;
   const value = String(raw).trim().toLowerCase();
@@ -96,26 +204,21 @@ function parseFlexibleDate(input) {
   return null;
 }
 
-/**
- * dobRange
- * Returns a coarse year range for overlap checks: {start, end} or null.
- */
+/** Coarse year range for overlap checks. */
 function dobRange(dob) {
   const parsed = parseFlexibleDate(dob);
   return parsed?.range ? { start: parsed.range.start, end: parsed.range.end } : null;
 }
 
 /**
- * dobSortValue
- * Converts DOB strings into a sortable integer (YYYYMMDD/YYYYMM/YYYY0000).
- * Unknown/invalid returns null.
+ * Convert DOB to sortable integer (YYYYMMDD / YYYYMM00 / YYYY0000).
+ * Unknown/invalid -> null.
  */
 function dobSortValue(dob) {
   if (!dob) return null;
   const s = String(dob).trim();
   if (!s) return null;
 
-  // YYYY-MM-DD -> YYYYMMDD
   const mFull = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (mFull) {
     const y = Number(mFull[1]);
@@ -126,7 +229,6 @@ function dobSortValue(dob) {
     }
   }
 
-  // YYYY-MM -> YYYYMM00
   const mYM = s.match(/^(\d{4})-(\d{2})$/);
   if (mYM) {
     const y = Number(mYM[1]);
@@ -136,7 +238,6 @@ function dobSortValue(dob) {
     }
   }
 
-  // YYYY -> YYYY0000
   const mY = s.match(/^(\d{4})$/);
   if (mY) {
     const y = Number(mY[1]);
@@ -146,15 +247,10 @@ function dobSortValue(dob) {
   return null;
 }
 
-/**
- * normalizeDob
- * Public helper used above. Produces a sortable numeric or null.
- */
 function normalizeDob(dob) {
   return dobSortValue(dob);
 }
 
-/* Optionally used elsewhere; kept for completeness. */
 function normalizeDobKey(dob) {
   const range = dobRange(dob);
   if (!range) return "unknown";
