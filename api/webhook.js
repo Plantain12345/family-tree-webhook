@@ -20,7 +20,6 @@ import {
 } from "./_db.js";
 
 import { parseOps } from "./_nlp.js";
-import { dobRange, normalizeDobInput, parseFlexibleDate } from "./date-utils.js";
 
 // ---------- Config ----------
 const BASE_URL = "https://family-tree-webhook.vercel.app";
@@ -163,7 +162,7 @@ export default async function handler(req, res) {
 
     const replies = [];
 
-    // IMPORTANT: All op handlers live *inside* this loop so `continue` is legal.
+    // All op handlers live inside this loop so `continue` is legal.
     for (const op of ops) {
       // Help & menu
       if (op.op === "help") {
@@ -715,6 +714,47 @@ function nameSimilarity(aProfile, bProfile) {
     }
   }
   return matches / Math.max(aProfile.tokens.length, bProfile.tokens.length);
+}
+
+// ---- Minimal in-file DOB helpers (replacing deleted date-utils.js) ----
+function parseFlexibleDate(input) {
+  if (!input) return null;
+  const s = String(input).trim();
+  if (!s) return null;
+
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const y = Number.parseInt(s.slice(0, 4), 10);
+    if (Number.isInteger(y)) return { range: { start: y, end: y } };
+  }
+  // YYYY-MM
+  if (/^\d{4}-\d{2}$/.test(s)) {
+    const y = Number.parseInt(s.slice(0, 4), 10);
+    if (Number.isInteger(y)) return { range: { start: y, end: y } };
+  }
+  // YYYY
+  if (/^\d{4}$/.test(s)) {
+    const y = Number.parseInt(s, 10);
+    if (Number.isInteger(y)) return { range: { start: y, end: y } };
+  }
+  return null;
+}
+
+function dobRange(dob) {
+  // dob is expected to be stored as YYYY or YYYY-MM or YYYY-MM-DD
+  const parsed = parseFlexibleDate(dob);
+  return parsed?.range ? { start: parsed.range.start, end: parsed.range.end } : null;
+}
+
+function normalizeDobInput(input) {
+  if (input == null) return null;
+  const s = String(input).trim();
+  if (!s) return null;
+  // Accept plain YYYY / YYYY-MM / YYYY-MM-DD; otherwise just return trimmed for storage as-is.
+  if (/^\d{4}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return s;
 }
 
 function rangesOverlap(a, b) {
