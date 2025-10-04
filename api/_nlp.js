@@ -283,9 +283,7 @@ function fallback(text, ctx) {
   }
 
   // Add person with DOB
-  const mAddBorn = t.match(
-    /^add\s+([^,]+?)[,]?\s+(?:born|b\.)\s+(.+)$/i
-  );
+  const mAddBorn = t.match(/^add\s+([^,]+?)[,]?\s+(?:born|b\.)\s+(.+)$/i);
   if (mAddBorn) {
     pushUnique(ops, {
       op: "add_person",
@@ -331,6 +329,7 @@ function fallback(text, ctx) {
       op: "link",
       a: cleanupName(mLink[1], people),
       b: cleanupName(mLink[2], people),
+      // kind will be derived below if missing
     });
   }
 
@@ -345,9 +344,7 @@ function fallback(text, ctx) {
   }
 
   // Set DOB
-  const mDob = t.match(
-    /^set\s+(.+?)['’]s\s+(?:birth(?:\s+year)?)\s+to\s+(.+)$/i
-  );
+  const mDob = t.match(/^set\s+(.+?)['’]s\s+(?:birth(?:\s+year)?)\s+to\s+(.+)$/i);
   if (mDob) {
     pushUnique(ops, {
       op: "set_dob",
@@ -360,10 +357,7 @@ function fallback(text, ctx) {
     "male|female|man|woman|boy|girl|non[-\\s]?binary|nb|enby|m|f|unknown|unspecified|other";
 
   const mGenderSet = t.match(
-    new RegExp(
-      `^set\\s+(.+?)['’]s\\s+gender\\s+to\\s+(${genderLexeme})$`,
-      "i"
-    )
+    new RegExp(`^set\\s+(.+?)['’]s\\s+gender\\s+to\\s+(${genderLexeme})$`, "i")
   );
   if (mGenderSet) {
     const gender = canonicalGender(mGenderSet[2]);
@@ -377,10 +371,7 @@ function fallback(text, ctx) {
   }
 
   const mGenderIs = t.match(
-    new RegExp(
-      `^(.+?)\\s+(?:is|was)\\s+(?:a\\s+)?(${genderLexeme})$`,
-      "i"
-    )
+    new RegExp(`^(.+?)\\s+(?:is|was)\\s+(?:a\\s+)?(${genderLexeme})$`, "i")
   );
   if (mGenderIs) {
     const gender = canonicalGender(mGenderIs[2]);
@@ -394,10 +385,7 @@ function fallback(text, ctx) {
   }
 
   const mGenderMake = t.match(
-    new RegExp(
-      `^make\\s+(.+?)\\s+(?:a\\s+)?(${genderLexeme})$`,
-      "i"
-    )
+    new RegExp(`^make\\s+(.+?)\\s+(?:a\\s+)?(${genderLexeme})$`, "i")
   );
   if (mGenderMake) {
     const gender = canonicalGender(mGenderMake[2]);
@@ -418,6 +406,13 @@ function fallback(text, ctx) {
       to: cleanupName(mRename[2], people),
     });
 
+  // If we created a generic "link" without a kind, infer spouse/partner from wording
+  for (const op of ops) {
+    if (op.op === "link" && !op.kind) {
+      op.kind = pickPartnerKind(t);
+    }
+  }
+
   return ops.length ? ops : null;
 }
 
@@ -437,10 +432,7 @@ export async function parseOps(input, ctx = {}) {
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: SYSTEM },
-        {
-          role: "user",
-          content: JSON.stringify({ text, context: ctx }),
-        },
+        { role: "user", content: JSON.stringify({ text, context: ctx }) },
       ],
       tools,
       tool_choice: { type: "function", function: { name: "set_ops" } },
@@ -453,7 +445,7 @@ export async function parseOps(input, ctx = {}) {
     const parsed = JSON.parse(toolCall.function.arguments || "{}");
     let ops = parsed.ops || [];
 
-    // Fill in pronoun defaults when possible (fallback safety)
+    // Normalize/infer kinds where missing (safety net)
     ops = ops.map((op) => {
       if (op?.op === "link") {
         const k = (op.kind || "").toLowerCase();
@@ -472,7 +464,7 @@ export async function parseOps(input, ctx = {}) {
       return op;
     });
 
-    // --- Correct capitalization using known people[] (title-case match) ---
+    // Correct capitalization using known people[]
     if (ctx?.people?.length) {
       ops = ops.map((op) => {
         if (op.name) op.name = titleCaseFromKnown(op.name, ctx.people);
@@ -487,6 +479,7 @@ export async function parseOps(input, ctx = {}) {
       });
     }
 
+    // Canonicalize gender strings
     ops = ops.map((op) => {
       if (op?.op === "set_gender" && op.gender) {
         const canon = canonicalGender(op.gender) || op.gender.trim().toLowerCase();
