@@ -543,60 +543,49 @@ export default async function handler(req, res) {
         continue;
       }
 
-      if (op.op === "new_tree") {
-        const name = (op.name || "").trim();
-        if (!name) {
-          replies.push("Tell me the name you'd like for the new family tree.");
-          continue;
-        }
-        const treeRecord = await createTree(from, name);
-        activeTree = treeRecord;
-        knownNames = [];
-        personRecords = [];
-        await setActiveTreeState(from, treeRecord.id);
-        await setLastPerson(from, treeRecord.id, null, null);
-        const share = shareLinkText(treeRecord);
-        const messageLines = [
-          `I've started a family tree called “${treeRecord.name || name}”. Its join code is ${treeRecord.join_code}.`,
-        ];
-        if (share) messageLines.push(share);
-        replies.push(messageLines.join("\n"));
-        continue;
-      }
+if (op.op === "new_tree") {
+  const name = (op.name || "My Family").slice(0, 80);
+  try {
+    // NOTE: createTree(phone, name) — phone first
+    const tree = await createTree(from, name);
 
-      if (op.op === "join_tree") {
-        const code = (op.code || "").trim().toUpperCase();
-        const result = await joinTreeByCode(from, code);
-        if (!result.joined) {
-          if (result.reason === "not_found") {
-            replies.push("I couldn't find a tree with that code. Double-check the letters and try again.");
-          } else if (result.reason === "invalid_code") {
-            replies.push("That doesn't look like a valid join code. It should be six letters or numbers.");
-          } else {
-            replies.push("Something went wrong while joining that tree. Please try again in a moment.");
-          }
-          continue;
-        }
+    const tip = `You’re now active in “${tree.name}”. Try: Add Alice born 1950
+Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
 
-        await setActiveTreeState(from, result.tree.id);
-        const refreshed = await listPersonsForTree(from);
-        activeTree = refreshed.tree;
-        knownNames = (refreshed.people || []).map((p) => p.primary_name);
-        personRecords = (refreshed.people || []).map((p) => ({
-          id: p.id,
-          primary_name: p.primary_name,
-          dob_dmy: p.dob_dmy || null,
-        }));
-        await setLastPerson(from, activeTree.id, null, null);
-        const share = shareLinkText(activeTree);
-        const lines = [
-          `You're now part of “${activeTree.name}”. The join code is ${activeTree.join_code}.`,
-        ];
-        if (share) lines.push(share);
-        replies.push(lines.join("\n"));
-        continue;
-      }
+    await setActiveTreeState(from, tree.id);
+    replies.push(`✅ Created “${tree.name}”. Code: ${tree.join_code}\n${tip}`);
+  } catch (e) {
+    console.error("Error creating tree:", e);
+    replies.push("❌ Couldn't create the tree. Try a different name.");
+  }
+  continue;
+}
 
+if (op.op === "join_tree") {
+  const code = (op.code || "").toUpperCase();
+
+  // NOTE: joinTreeByCode(phone, code) — phone first
+  const { joined, reason, tree } = await joinTreeByCode(from, code);
+
+  const tip = joined
+    ? `You’re now active in “${tree.name}”. Try: Add Alice born 1950
+Live tree: ${BASE_URL}/tree.html?code=${tree.join_code}`
+    : null;
+
+  replies.push(
+    joined
+      ? `✅ Switched to “${tree.name}”.\n${tip}`
+      : reason === "invalid_code"
+        ? "❌ That code looks invalid."
+        : reason === "not_found"
+          ? "❌ Code not found. Ask the owner to re-share."
+          : "❌ Couldn’t join right now. Please try again."
+  );
+
+  if (joined && tree) await setActiveTreeState(from, tree.id);
+  continue;
+}
+      
       if (!activeTree) {
         replies.push(
           "You're not currently part of a family tree. Start a new one or join with a code before making other changes."
