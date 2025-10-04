@@ -1,6 +1,5 @@
 // api/_db.js
 import { createClient } from "@supabase/supabase-js";
-import { normalizeDobInput } from "./date-utils.js";
 
 export const db = createClient(
   process.env.SUPABASE_URL,
@@ -8,6 +7,18 @@ export const db = createClient(
 );
 
 /* ------------------------------ utils ------------------------------ */
+
+// Minimal replacement for the deleted date-utils.js
+function normalizeDobInput(input) {
+  if (input == null) return null;
+  const s = String(input).trim();
+  if (!s) return null;
+  // Accept YYYY / YYYY-MM / YYYY-MM-DD as-is; anything else, store the trimmed string
+  if (/^\d{4}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return s;
+}
 
 export function makeJoinCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -38,6 +49,8 @@ async function generateJoinCode() {
   }
   throw new Error("Failed to generate unique join code");
 }
+
+/* ------------------------------- trees ------------------------------ */
 
 export async function createTree(phone, name) {
   if (!phone) throw new Error("Phone number is required to create a tree");
@@ -383,3 +396,4 @@ export async function setActiveTreeState(phone, treeId) {
     console.error("setActiveTreeState error:", error);
   }
 }
+
