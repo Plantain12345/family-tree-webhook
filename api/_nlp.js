@@ -108,10 +108,13 @@ You receive CONTEXT with:
 
 RULES
 - Output exactly one tool call (set_ops) with fully resolved names (no pronouns like his/her/their/my/our/I).
-- If a pronoun is used and the subject is not otherwise explicit, default to last_person_name.
-- Prefer capitalization from people[] when resolving existing names (case-insensitive match).
+- If a pronoun is used, its subject MUST be clear from the immediate context or the last_person_name. When adding new people in a complex sentence, attribute relationships to the correct new person (e.g., in "Add Corinna, mother of Alex", Corinna is the mother, not the last_person_name).
+- When a user states two people divorced, you MUST generate TWO operations: one to link them as spouses (\`op:"link", kind:"spouse_of"\`) and a second to mark them as divorced (\`op:"divorce"\`). This ensures their past relationship is recorded correctly.
+- Do not create redundant relationships. If the context shows X is already the parent of Y, do not generate another op to link them again.
+- SIBLINGS: When the user adds "siblings" of an existing person, the siblings share the same parents. Create \`add_child\` operations for each new sibling, assigning them to the same parent(s) as the existing person. If the parents are unknown, just add the people with \`add_person\`. Do NOT make the siblings children of each other.
+- Prefer capitalization from the people[] list when resolving existing names (case-insensitive match).
 - Never invent dates. If a birth or death date is missing, omit it.
-- For gender, use normalized values male, female, nonbinary, or unknown unless user specifies a different explicit term.
+- For gender, use normalized values: male, female, nonbinary, or unknown.
 - You may output op:"menu" when the user explicitly requests the menu or similar shortcuts.
 
 MAPPING EXAMPLES (non-exhaustive)
