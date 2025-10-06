@@ -23,13 +23,11 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Tree not found" });
     }
 
-    // NOTE: Query only columns that definitely exist in your schema.
-    // (Omit "gender" to avoid 'column persons.gender does not exist')
     const [{ data: peopleRows, error: pErr }, { data: relsRows, error: rErr }] =
       await Promise.all([
         db
           .from("persons")
-          .select("id, primary_name, dob_dmy") // <- safe set
+          .select("id, primary_name, dob_dmy, gender") // <-- FIX: Added gender column
           .eq("tree_id", tree.id),
         db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
       ]);
@@ -72,9 +70,9 @@ function buildFamilies(people, rels) {
     if (!rel) continue;
     const a = rel.a != null ? String(rel.a) : null;
     const b = rel.b != null ? String(rel.b) : null;
-    if (!a || !b || !personIds.has(a) || !personIds.has(b)) continue;
-
+    // For directed relationships, b might not be a person (e.g., parent_of event)
     if (partnerKinds.has(rel.kind)) {
+      if (!a || !b || !personIds.has(a) || !personIds.has(b)) continue;
       const key = pairKey(a, b);
       let entry = partnerPairs.get(key);
       if (!entry) {
@@ -83,10 +81,12 @@ function buildFamilies(people, rels) {
       }
       entry.kinds.add(rel.kind);
     } else if (rel.kind === parentKind) {
+      if (!a || !b || !personIds.has(a) || !personIds.has(b)) continue;
       if (!childParents.has(b)) childParents.set(b, new Set());
       childParents.get(b).add(a);
     }
   }
+
 
   // Attach children to partner pairs when BOTH parents are present
   for (const [childId, parentsSet] of childParents.entries()) {
@@ -104,6 +104,7 @@ function buildFamilies(people, rels) {
         const pair = partnerPairs.get(key);
         if (pair) {
           pair.children.add(childId);
+          // Mark parents as handled for this child to avoid single-parent family creation
           parentsSet.delete(sorted[i]);
           parentsSet.delete(sorted[j]);
           break outer;
@@ -154,8 +155,9 @@ function buildFamilies(people, rels) {
   return families;
 }
 
+
 function pairKey(a, b) {
-  return [a, b].sort().join("|");
+  return [String(a), String(b)].sort().join("|");
 }
 
 /* ------------------------ local helpers (no date-utils) ------------------------ */
@@ -163,51 +165,6 @@ function pairKey(a, b) {
 function normalizeNameKey(name) {
   if (!name) return "";
   return name.toString().trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-// (Kept for future use if you later add a gender column.)
-function normalizeGender(raw) {
-  if (raw === null || raw === undefined) return null;
-  const value = String(raw).trim().toLowerCase();
-  if (!value) return null;
-  if (["m", "male", "man", "boy"].includes(value)) return "male";
-  if (["f", "female", "woman", "girl"].includes(value)) return "female";
-  if (["nb", "nonbinary", "non-binary", "non binary"].includes(value)) return "nonbinary";
-  return value;
-}
-
-/**
- * parseFlexibleDate
- * Accepts: "YYYY", "YYYY-MM", "YYYY-MM-DD"
- * Returns { range: { start:number, end:number } } or null
- */
-function parseFlexibleDate(input) {
-  if (!input) return null;
-  const s = String(input).trim();
-  if (!s) return null;
-
-  // YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const y = Number.parseInt(s.slice(0, 4), 10);
-    if (Number.isInteger(y)) return { range: { start: y, end: y } };
-  }
-  // YYYY-MM
-  if (/^\d{4}-\d{2}$/.test(s)) {
-    const y = Number.parseInt(s.slice(0, 4), 10);
-    if (Number.isInteger(y)) return { range: { start: y, end: y } };
-  }
-  // YYYY
-  if (/^\d{4}$/.test(s)) {
-    const y = Number.parseInt(s, 10);
-    if (Number.isInteger(y)) return { range: { start: y, end: y } };
-  }
-  return null;
-}
-
-/** Coarse year range for overlap checks. */
-function dobRange(dob) {
-  const parsed = parseFlexibleDate(dob);
-  return parsed?.range ? { start: parsed.range.start, end: parsed.range.end } : null;
 }
 
 /**
@@ -249,12 +206,4 @@ function dobSortValue(dob) {
 
 function normalizeDob(dob) {
   return dobSortValue(dob);
-}
-
-function normalizeDobKey(dob) {
-  const range = dobRange(dob);
-  if (!range) return "unknown";
-  const start = Number.isFinite(range.start) ? range.start : "start";
-  const end = Number.isFinite(range.end) ? range.end : "end";
-  return `${start}-${end}`;
 }
