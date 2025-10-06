@@ -26,6 +26,21 @@ const BASE_URL = "https://family-tree-webhook.vercel.app";
 const FOLLOW_UP_PROMPT =
   "What else would you like to do to your family tree? I understand plain english. Or type 'menu' to view your options.";
 
+// ---------- Anti-spam: suppress duplicate replies per phone ----------
+const LAST_REPLY = new Map(); // phone -> { body, at }
+const SUPPRESS_WINDOW_MS = 12_000; // 12s
+
+function shouldSuppress(phone, body) {
+  const now = Date.now();
+  const prev = LAST_REPLY.get(phone);
+  const dup =
+    prev &&
+    prev.body === body &&
+    now - prev.at < SUPPRESS_WINDOW_MS;
+  if (!dup) LAST_REPLY.set(phone, { body, at: now });
+  return dup;
+}
+
 // ---------- Constants / Utilities ----------
 const PRONOUNS = new Set(["his", "her", "their", "him", "hers", "theirs", "my", "our", "i"]);
 const looksLikePronoun = (s) => PRONOUNS.has((s || "").trim().toLowerCase());
@@ -164,329 +179,376 @@ export default async function handler(req, res) {
 
     // All op handlers live inside this loop so `continue` is legal.
     for (const op of ops) {
-      // Help & menu
-      if (op.op === "help") {
-        replies.push(helpText());
-        continue;
-      }
-      if (op.op === "menu") {
-        await sendMenu(from);
-        replies.push("I've sent a menu with shortcuts you can tap.");
-        continue;
-      }
+      try {
+        // Help & menu
+        if (op.op === "help") {
+          replies.push(helpText());
+          continue;
+        }
+        if (op.op === "menu") {
+          await sendMenu(from);
+          replies.push("I've sent a menu with shortcuts you can tap.");
+          continue;
+        }
 
-      // Tree creation
-      if (op.op === "new_tree") {
-        const name = (op.name || "My Family").slice(0, 80);
-        try {
-          const newTree = await createTree(from, name); // phone first
-          const tip = `You’re now active in “${newTree.name}”. Try: Add Alice born 1950
+        // Tree creation
+        if (op.op === "new_tree") {
+          const name = (op.name || "My Family").slice(0, 80);
+          try {
+            const newTree = await createTree(from, name); // phone first
+            const tip = `You’re now active in “${newTree.name}”. Try: Add Alice born 1950
 Live tree: ${BASE_URL}/tree.html?code=${newTree.join_code}`;
 
-          await setActiveTreeState(from, newTree.id);
-          activeTree = newTree;
-          replies.push(`✅ Created “${newTree.name}”. Code: ${newTree.join_code}\n${tip}`);
-        } catch (e) {
-          console.error("Error creating tree:", e);
-          replies.push("❌ Couldn't create the tree. Try a different name.");
+            await setActiveTreeState(from, newTree.id);
+            activeTree = newTree;
+            replies.push(`✅ Created “${newTree.name}”. Code: ${newTree.join_code}\n${tip}`);
+          } catch (e) {
+            console.error("Error creating tree:", e);
+            replies.push("❌ Couldn't create the tree. Try a different name.");
+          }
+          continue;
         }
-        continue;
-      }
 
-      // Join tree
-      if (op.op === "join_tree") {
-        const code = (op.code || "").toUpperCase();
-        const { joined, reason, tree: joinedTree } = await joinTreeByCode(from, code);
+        // Join tree
+        if (op.op === "join_tree") {
+          const code = (op.code || "").toUpperCase();
+          const { joined, reason, tree: joinedTree } = await joinTreeByCode(from, code);
 
-        const tip = joined
-          ? `You’re now active in “${joinedTree.name}”. Try: Add Alice born 1950
+          const tip = joined
+            ? `You’re now active in “${joinedTree.name}”. Try: Add Alice born 1950
 Live tree: ${BASE_URL}/tree.html?code=${joinedTree.join_code}`
-          : null;
+            : null;
 
-        replies.push(
-          joined
-            ? `✅ Switched to “${joinedTree.name}”.\n${tip}`
-            : reason === "invalid_code"
-            ? "❌ That code looks invalid."
-            : reason === "not_found"
-            ? "❌ Code not found. Ask the owner to re-share."
-            : "❌ Couldn’t join right now. Please try again."
-        );
+          replies.push(
+            joined
+              ? `✅ Switched to “${joinedTree.name}”.\n${tip}`
+              : reason === "invalid_code"
+              ? "❌ That code looks invalid."
+              : reason === "not_found"
+              ? "❌ Code not found. Ask the owner to re-share."
+              : "❌ Couldn’t join right now. Please try again."
+          );
 
-        if (joined && joinedTree) {
-          await setActiveTreeState(from, joinedTree.id);
-          activeTree = joinedTree;
-        }
-        continue;
-      }
-
-      // Everything below needs an active tree
-      if (!activeTree) {
-        replies.push("You're not currently part of a family tree. Start a new one or join with a code before making other changes.");
-        break;
-      }
-
-      // View tree
-      if (op.op === "view_tree") {
-        const lines = [`You're viewing “${activeTree.name}”. The join code is ${activeTree.join_code}.`];
-        const share = shareLinkText(activeTree);
-        if (share) lines.push(share);
-        replies.push(lines.join("\n"));
-        continue;
-      }
-
-      // View person
-      if (op.op === "view_person") {
-        const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
-        if (!ok) continue;
-
-        const target = await findInTreeByName(activeTree.id, op.name);
-        if (!target) {
-          replies.push(`I couldn't find anyone named ${op.name} in this tree.`);
-          continue;
-        }
-        const summary = await personSummary(activeTree.id, target.id);
-        const parts = [`I didn't change anything; here's what I know about ${summary.me || target.primary_name}.`];
-        if (summary.parents?.length) parts.push(`Parents: ${summary.parents.join(", ")}.`);
-        if (summary.spouses?.length) parts.push(`Partners: ${summary.spouses.join(", ")}.`);
-        if (summary.children?.length) parts.push(`Children: ${summary.children.join(", ")}.`);
-        replies.push(parts.join(" "));
-        await setLastPerson(from, activeTree.id, target.id, target.primary_name);
-        lastPersonName = target.primary_name;
-        continue;
-      }
-
-      // Add person
-      if (op.op === "add_person") {
-        const name = (op.name || "").trim();
-        if (!name) {
-          replies.push("Please tell me the person's name so I can add them.");
+          if (joined && joinedTree) {
+            await setActiveTreeState(from, joinedTree.id);
+            activeTree = joinedTree;
+          }
           continue;
         }
 
-        const existing = await findInTreeByName(activeTree.id, name);
-        if (!existing) {
-          const duplicates = findDuplicateCandidates(personRecords, name, op.dob || null);
+        // Everything below needs an active tree
+        if (!activeTree) {
+          replies.push("You're not currently part of a family tree. Start a new one or join with a code before making other changes.");
+          break;
+        }
+
+        // View tree
+        if (op.op === "view_tree") {
+          const lines = [`You're viewing “${activeTree.name}”. The join code is ${activeTree.join_code}.`];
+          const share = shareLinkText(activeTree);
+          if (share) lines.push(share);
+          replies.push(lines.join("\n"));
+          continue;
+        }
+
+        // View person
+        if (op.op === "view_person") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
+          if (!ok) continue;
+
+          const target = await findInTreeByName(activeTree.id, op.name);
+          if (!target) {
+            replies.push(`I couldn't find anyone named ${op.name} in this tree.`);
+            continue;
+          }
+          const summary = await personSummary(activeTree.id, target.id);
+          const parts = [`I didn't change anything; here's what I know about ${summary.me || target.primary_name}.`];
+          if (summary.parents?.length) parts.push(`Parents: ${summary.parents.join(", ")}.`);
+          if (summary.spouses?.length) parts.push(`Partners: ${summary.spouses.join(", ")}.`);
+          if (summary.children?.length) parts.push(`Children: ${summary.children.join(", ")}.`);
+          replies.push(parts.join(" "));
+          await setLastPerson(from, activeTree.id, target.id, target.primary_name);
+          lastPersonName = target.primary_name;
+          continue;
+        }
+
+        // Add person
+        if (op.op === "add_person") {
+          const name = (op.name || "").trim();
+          if (!name) {
+            replies.push("Please tell me the person's name so I can add them.");
+            continue;
+          }
+
+          const existing = await findInTreeByName(activeTree.id, name);
+          if (!existing) {
+            const duplicates = findDuplicateCandidates(personRecords, name, op.dob || null);
+            if (duplicates.length) {
+              const summary = formatDuplicateSummary(duplicates);
+              const normalizedDob = normalizeDobInput(op.dob);
+              await savePending(from, activeTree.id, {
+                type: "add_person_duplicate",
+                name,
+                dob: normalizedDob || op.dob || null,
+              });
+              const prefix = duplicates.length > 1 ? "There are already" : "There is already";
+              replies.push(`${prefix} ${summary} in this tree. Reply YES to add another one anyway or NO to cancel. I haven't added anyone yet.`);
+              continue;
+            }
+          }
+
+          const person = await upsertPersonByName(activeTree.id, name, op.dob || null);
+
+          let message;
+          if (!existing) {
+            const formattedDob = formatDobForSpeech(person.dob_dmy);
+            const birthDetail = formattedDob ? `, born ${formattedDob}` : "";
+            message = `I've added ${person.primary_name}${birthDetail} to your family tree.`;
+          } else if (op.dob && op.dob !== (existing.dob_dmy || "")) {
+            const formattedDob = formatDobForSpeech(person.dob_dmy) || "unknown";
+            message = `I've updated ${person.primary_name}'s birth information to ${formattedDob} in the tree.`;
+          } else {
+            message = `${person.primary_name} was already in the tree, so nothing changed.`;
+          }
+
+          replies.push(message);
+          await setLastPerson(from, activeTree.id, person.id, person.primary_name);
+          lastPersonName = person.primary_name;
+          ensureKnownName(knownNames, person.primary_name);
+          upsertLocalPerson(personRecords, person);
+          continue;
+        }
+
+        // Link relationship
+        if (op.op === "link") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.a, op.b], replies);
+          if (!ok) continue;
+
+          const A = await upsertPersonByName(activeTree.id, op.a);
+          const B = await upsertPersonByName(activeTree.id, op.b);
+          ensureKnownName(knownNames, A.primary_name);
+          ensureKnownName(knownNames, B.primary_name);
+
+          let kind = (op.kind || "").toLowerCase();
+          if (!["spouse_of", "partner_of", "parent_of"].includes(kind)) {
+            const msgLower = text.toLowerCase();
+            if (/(married|wife|husband|spouse|wed|weds)/.test(msgLower)) kind = "spouse_of";
+            else if (/partner/.test(msgLower)) kind = "partner_of";
+            else if (/(father|mother|parent|son|daughter|child)/.test(msgLower)) kind = "parent_of";
+            else kind = "spouse_of";
+          }
+
+          if (kind === "parent_of") {
+            let parent = A;
+            let child = B;
+            const guess = guessParentDirection(text, A.primary_name, B.primary_name);
+            if (guess?.parent === "b") {
+              parent = B;
+              child = A;
+            }
+            await addRelationship(activeTree.id, parent.id, "parent_of", child.id);
+            replies.push(`I've linked ${parent.primary_name} as the parent of ${child.primary_name} on the family tree.`);
+            await setLastPerson(from, activeTree.id, child.id, child.primary_name);
+            lastPersonName = child.primary_name;
+            continue;
+          }
+
+          await addRelationship(activeTree.id, A.id, kind, B.id);
+          const pretty = kind === "partner_of" ? "partners" : "spouses";
+          replies.push(`I've linked ${A.primary_name} and ${B.primary_name} as ${pretty} on the family tree.`);
+          await setLastPerson(from, activeTree.id, B.id, B.primary_name);
+          lastPersonName = B.primary_name;
+          continue;
+        }
+
+        // Add child
+        if (op.op === "add_child") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.parentA, op.parentB].filter(Boolean), replies);
+          if (!ok) continue;
+
+          const duplicates = findDuplicateCandidates(personRecords, op.child, op.dob || null);
           if (duplicates.length) {
             const summary = formatDuplicateSummary(duplicates);
             const normalizedDob = normalizeDobInput(op.dob);
             await savePending(from, activeTree.id, {
-              type: "add_person_duplicate",
-              name,
+              type: "add_child_duplicate",
+              child: op.child,
               dob: normalizedDob || op.dob || null,
+              parentA: op.parentA,
+              parentB: op.parentB || null,
             });
             const prefix = duplicates.length > 1 ? "There are already" : "There is already";
-            replies.push(`${prefix} ${summary} in this tree. Reply YES to add another one anyway or NO to cancel. I haven't added anyone yet.`);
+            replies.push(`${prefix} ${summary} in this tree. Reply YES to add another child with that name anyway or NO to cancel. I haven't added them yet.`);
             continue;
           }
-        }
 
-        const person = await upsertPersonByName(activeTree.id, name, op.dob || null);
+          const child = await addChildWithParents(
+            activeTree.id,
+            op.child,
+            op.dob || null,
+            op.parentA,
+            op.parentB || null
+          );
 
-        let message;
-        if (!existing) {
-          const formattedDob = formatDobForSpeech(person.dob_dmy);
-          const birthDetail = formattedDob ? `, born ${formattedDob}` : "";
-          message = `I've added ${person.primary_name}${birthDetail} to your family tree.`;
-        } else if (op.dob && op.dob !== (existing.dob_dmy || "")) {
-          const formattedDob = formatDobForSpeech(person.dob_dmy) || "unknown";
-          message = `I've updated ${person.primary_name}'s birth information to ${formattedDob} in the tree.`;
-        } else {
-          message = `${person.primary_name} was already in the tree, so nothing changed.`;
-        }
-
-        replies.push(message);
-        await setLastPerson(from, activeTree.id, person.id, person.primary_name);
-        lastPersonName = person.primary_name;
-        ensureKnownName(knownNames, person.primary_name);
-        upsertLocalPerson(personRecords, person);
-        continue;
-      }
-
-      // Link relationship
-      if (op.op === "link") {
-        const ok = await ensureNamesAreDistinct(activeTree, [op.a, op.b], replies);
-        if (!ok) continue;
-
-        const A = await upsertPersonByName(activeTree.id, op.a);
-        const B = await upsertPersonByName(activeTree.id, op.b);
-        ensureKnownName(knownNames, A.primary_name);
-        ensureKnownName(knownNames, B.primary_name);
-
-        let kind = (op.kind || "").toLowerCase();
-        if (!["spouse_of", "partner_of", "parent_of"].includes(kind)) {
-          const msgLower = text.toLowerCase();
-          if (/(married|wife|husband|spouse|wed|weds)/.test(msgLower)) kind = "spouse_of";
-          else if (/partner/.test(msgLower)) kind = "partner_of";
-          else if (/(father|mother|parent|son|daughter|child)/.test(msgLower)) kind = "parent_of";
-          else kind = "spouse_of";
-        }
-
-        if (kind === "parent_of") {
-          let parent = A;
-          let child = B;
-          const guess = guessParentDirection(text, A.primary_name, B.primary_name);
-          if (guess?.parent === "b") {
-            parent = B;
-            child = A;
-          }
-          await addRelationship(activeTree.id, parent.id, "parent_of", child.id);
-          replies.push(`I've linked ${parent.primary_name} as the parent of ${child.primary_name} on the family tree.`);
+          const parents = [op.parentA, op.parentB].filter(Boolean).join(" and ");
+          const childDob = formatDobForSpeech(child.dob_dmy);
+          const childBirthDetail = childDob ? `, born ${childDob}` : "";
+          replies.push(`I've added ${child.primary_name}${childBirthDetail} as the child of ${parents} and connected them to the family.`);
           await setLastPerson(from, activeTree.id, child.id, child.primary_name);
           lastPersonName = child.primary_name;
+          ensureKnownName(knownNames, child.primary_name);
+          upsertLocalPerson(personRecords, child);
           continue;
         }
 
-        await addRelationship(activeTree.id, A.id, kind, B.id);
-        const pretty = kind === "partner_of" ? "partners" : "spouses";
-        replies.push(`I've linked ${A.primary_name} and ${B.primary_name} as ${pretty} on the family tree.`);
-        await setLastPerson(from, activeTree.id, B.id, B.primary_name);
-        lastPersonName = B.primary_name;
-        continue;
-      }
+        // Rename
+        if (op.op === "rename") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.from], replies);
+          if (!ok) continue;
 
-      // Add child
-      if (op.op === "add_child") {
-        const ok = await ensureNamesAreDistinct(activeTree, [op.parentA, op.parentB].filter(Boolean), replies);
-        if (!ok) continue;
-
-        const duplicates = findDuplicateCandidates(personRecords, op.child, op.dob || null);
-        if (duplicates.length) {
-          const summary = formatDuplicateSummary(duplicates);
-          const normalizedDob = normalizeDobInput(op.dob);
-          await savePending(from, activeTree.id, {
-            type: "add_child_duplicate",
-            child: op.child,
-            dob: normalizedDob || op.dob || null,
-            parentA: op.parentA,
-            parentB: op.parentB || null,
-          });
-          const prefix = duplicates.length > 1 ? "There are already" : "There is already";
-          replies.push(`${prefix} ${summary} in this tree. Reply YES to add another child with that name anyway or NO to cancel. I haven't added them yet.`);
-          continue;
-        }
-
-        const child = await addChildWithParents(
-          activeTree.id,
-          op.child,
-          op.dob || null,
-          op.parentA,
-          op.parentB || null
-        );
-
-        const parents = [op.parentA, op.parentB].filter(Boolean).join(" and ");
-        const childDob = formatDobForSpeech(child.dob_dmy);
-        const childBirthDetail = childDob ? `, born ${childDob}` : "";
-        replies.push(`I've added ${child.primary_name}${childBirthDetail} as the child of ${parents} and connected them to the family.`);
-        await setLastPerson(from, activeTree.id, child.id, child.primary_name);
-        lastPersonName = child.primary_name;
-        ensureKnownName(knownNames, child.primary_name);
-        upsertLocalPerson(personRecords, child);
-        continue;
-      }
-
-      // Rename
-      if (op.op === "rename") {
-        const ok = await ensureNamesAreDistinct(activeTree, [op.from], replies);
-        if (!ok) continue;
-
-        const candidates = await listPersonsByExactName(activeTree.id, op.from);
-        if (!candidates?.length) {
-          replies.push(`I couldn't find anyone named ${op.from} in this tree.`);
-          continue;
-        }
-        if (candidates.length > 1) {
-          const note = await describeAmbiguity(activeTree.id, op.from);
-          if (note) {
-            replies.push(`${note}\nI haven't made any changes yet.`);
+          const candidates = await listPersonsByExactName(activeTree.id, op.from);
+          if (!candidates?.length) {
+            replies.push(`I couldn't find anyone named ${op.from} in this tree.`);
             continue;
           }
-        }
-        const person = candidates[0];
-        const newName = (op.to || "").trim();
-        if (!newName) {
-          replies.push("Tell me the new name you'd like to use.");
-          continue;
-        }
-        await editPerson(activeTree.id, person.id, { newName });
-        replies.push(`I've renamed ${person.primary_name} to "${newName}" in the family tree.`);
-        await setLastPerson(from, activeTree.id, person.id, newName);
-        lastPersonName = newName;
-        ensureKnownName(knownNames, newName);
-        upsertLocalPerson(personRecords, { ...person, primary_name: newName });
-        continue;
-      }
-
-      // Set DOB
-      if (op.op === "set_dob") {
-        const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
-        if (!ok) continue;
-
-        const person = await upsertPersonByName(activeTree.id, op.name, op.dob || null);
-        const message =
-          op.dob
-            ? `I've updated ${person.primary_name}'s birth information to ${formatDobForSpeech(person.dob_dmy) || "unknown"} on the tree.`
-            : `I've cleared ${person.primary_name}'s birth information in the tree.`;
-        replies.push(message);
-        await setLastPerson(from, activeTree.id, person.id, person.primary_name);
-        lastPersonName = person.primary_name;
-        ensureKnownName(knownNames, person.primary_name);
-        upsertLocalPerson(personRecords, person);
-        continue;
-      }
-
-      // Set gender
-      if (op.op === "set_gender") {
-        const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
-        if (!ok) continue;
-
-        const normalized = normalizeGenderValue(op.gender);
-        if (!normalized) {
-          replies.push(`I couldn't understand the gender you provided for ${op.name}, so I didn't change anything.`);
+          if (candidates.length > 1) {
+            const note = await describeAmbiguity(activeTree.id, op.from);
+            if (note) {
+              replies.push(`${note}\nI haven't made any changes yet.`);
+              continue;
+            }
+          }
+          const person = candidates[0];
+          const newName = (op.to || "").trim();
+          if (!newName) {
+            replies.push("Tell me the new name you'd like to use.");
+            continue;
+          }
+          await editPerson(activeTree.id, person.id, { newName });
+          replies.push(`I've renamed ${person.primary_name} to "${newName}" in the family tree.`);
+          await setLastPerson(from, activeTree.id, person.id, newName);
+          lastPersonName = newName;
+          ensureKnownName(knownNames, newName);
+          upsertLocalPerson(personRecords, { ...person, primary_name: newName });
           continue;
         }
 
-        const person = await upsertPersonByName(activeTree.id, op.name);
-        await editPerson(activeTree.id, person.id, { gender: normalized });
-        const prettyGender = normalized.charAt(0).toUpperCase() + normalized.slice(1);
-        replies.push(`I've recorded ${person.primary_name}'s gender as ${prettyGender} in the family tree.`);
-        await setLastPerson(from, activeTree.id, person.id, person.primary_name);
-        lastPersonName = person.primary_name;
-        ensureKnownName(knownNames, person.primary_name);
-        continue;
-      }
+        // Set DOB
+        if (op.op === "set_dob") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
+          if (!ok) continue;
 
-      // Divorce
-      if (op.op === "divorce") {
-        const ok = await ensureNamesAreDistinct(activeTree, [op.a, op.b], replies);
-        if (!ok) continue;
-        const A = await upsertPersonByName(activeTree.id, op.a);
-        const B = await upsertPersonByName(activeTree.id, op.b);
-        await addRelationship(activeTree.id, A.id, "divorced_from", B.id);
-        replies.push(`I've marked ${A.primary_name} and ${B.primary_name} as divorced on the family tree.`);
-        await setLastPerson(from, activeTree.id, B.id, B.primary_name);
-        lastPersonName = B.primary_name;
-        continue;
-      }
-
-      // Leave tree
-      if (op.op === "leave") {
-        const result = await leaveCurrentTree(from);
-        if (result.left) {
-          const treeName = result.tree?.name || "the tree";
-          replies.push(`You're no longer a member of “${treeName}”.`);
-          activeTree = null;
-          knownNames = [];
-          personRecords = [];
-          await setLastPerson(from, null, null, null);
-        } else {
-          replies.push("You're not currently part of a family tree, so nothing changed.");
+          const person = await upsertPersonByName(activeTree.id, op.name, op.dob || null);
+          const message =
+            op.dob
+              ? `I've updated ${person.primary_name}'s birth information to ${formatDobForSpeech(person.dob_dmy) || "unknown"} on the tree.`
+              : `I've cleared ${person.primary_name}'s birth information in the tree.`;
+          replies.push(message);
+          await setLastPerson(from, activeTree.id, person.id, person.primary_name);
+          lastPersonName = person.primary_name;
+          ensureKnownName(knownNames, person.primary_name);
+          upsertLocalPerson(personRecords, person);
+          continue;
         }
-        continue;
-      }
 
-      // Fallback
-      replies.push("I didn't change anything because I didn't recognise that instruction.");
+        // NEW: Set DOD (death date)
+        if (op.op === "set_dod") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
+          if (!ok) continue;
+
+          const person = await upsertPersonByName(activeTree.id, op.name);
+          await editPerson(activeTree.id, person.id, { dod_dmy: normalizeDobInput(op.dod) });
+          const formatted = formatDobForSpeech(op.dod) || "unknown";
+          replies.push(`I've updated ${person.primary_name}'s death information to ${formatted} on the tree.`);
+          await setLastPerson(from, activeTree.id, person.id, person.primary_name);
+          lastPersonName = person.primary_name;
+          ensureKnownName(knownNames, person.primary_name);
+          continue;
+        }
+
+        // Set gender
+        if (op.op === "set_gender") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.name], replies);
+          if (!ok) continue;
+
+          const normalized = normalizeGenderValue(op.gender);
+          if (!normalized) {
+            replies.push(`I couldn't understand the gender you provided for ${op.name}, so I didn't change anything.`);
+            continue;
+          }
+
+          const person = await upsertPersonByName(activeTree.id, op.name);
+          await editPerson(activeTree.id, person.id, { gender: normalized });
+          const prettyGender = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+          replies.push(`I've recorded ${person.primary_name}'s gender as ${prettyGender} in the family tree.`);
+          await setLastPerson(from, activeTree.id, person.id, person.primary_name);
+          lastPersonName = person.primary_name;
+          ensureKnownName(knownNames, person.primary_name);
+          continue;
+        }
+
+        // Divorce
+        if (op.op === "divorce") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.a, op.b], replies);
+          if (!ok) continue;
+          const A = await upsertPersonByName(activeTree.id, op.a);
+          const B = await upsertPersonByName(activeTree.id, op.b);
+          await addRelationship(activeTree.id, A.id, "divorced_from", B.id);
+          replies.push(`I've marked ${A.primary_name} and ${B.primary_name} as divorced on the family tree.`);
+          await setLastPerson(from, activeTree.id, B.id, B.primary_name);
+          lastPersonName = B.primary_name;
+          continue;
+        }
+
+        // NEW: Separation
+        if (op.op === "separate") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.a, op.b], replies);
+          if (!ok) continue;
+          const A = await upsertPersonByName(activeTree.id, op.a);
+          const B = await upsertPersonByName(activeTree.id, op.b);
+          await addRelationship(activeTree.id, A.id, "separated_from", B.id);
+          replies.push(`I've marked ${A.primary_name} and ${B.primary_name} as separated on the family tree.`);
+          await setLastPerson(from, activeTree.id, B.id, B.primary_name);
+          lastPersonName = B.primary_name;
+          continue;
+        }
+
+        // NEW: Affair / secret relationship
+        if (op.op === "affair") {
+          const ok = await ensureNamesAreDistinct(activeTree, [op.a, op.b], replies);
+          if (!ok) continue;
+          const A = await upsertPersonByName(activeTree.id, op.a);
+          const B = await upsertPersonByName(activeTree.id, op.b);
+          await addRelationship(activeTree.id, A.id, "affair_with", B.id);
+          replies.push(`I've recorded a secret relationship between ${A.primary_name} and ${B.primary_name}.`);
+          await setLastPerson(from, activeTree.id, B.id, B.primary_name);
+          lastPersonName = B.primary_name;
+          continue;
+        }
+
+        // Leave tree
+        if (op.op === "leave") {
+          const result = await leaveCurrentTree(from);
+          if (result.left) {
+            const treeName = result.tree?.name || "the tree";
+            replies.push(`You're no longer a member of “${treeName}”.`);
+            activeTree = null;
+            knownNames = [];
+            personRecords = [];
+            await setLastPerson(from, null, null, null);
+          } else {
+            replies.push("You're not currently part of a family tree, so nothing changed.");
+          }
+          continue;
+        }
+
+        // Fallback
+        replies.push("I didn't change anything because I didn't recognise that instruction.");
+      } catch (opError) {
+        console.error("webhook op error:", opError);
+        replies.push("Something went wrong while handling your request. Please try again in a moment.");
+        break; // avoid repeating identical error replies for multi-op parses
+      }
     } // end for ops
 
     if (replies.length) await sendText(from, withFollowUp(replies.join("\n\n")));
@@ -494,10 +556,8 @@ Live tree: ${BASE_URL}/tree.html?code=${joinedTree.join_code}`
   } catch (error) {
     console.error("Webhook handler error:", error);
     try {
-      await sendText(
-        req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from,
-        withFollowUp("Something went wrong while handling your request. Please try again in a moment.")
-      );
+      const phone = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+      if (phone) await sendText(phone, withFollowUp("Something went wrong while handling your request. Please try again in a moment."));
     } catch (notifyError) {
       console.error("Failed to notify user of error:", notifyError);
     }
@@ -530,8 +590,11 @@ function helpText() {
     "• \"Add Alice born 1950\"",
     "• \"Add his son Zaake born 1983\"",
     "• \"Link Alice is Bob's mother\" or \"Link Alice married to Bob\"",
+    "• \"John and Katie divorced\" or \"John and Katie separated\"",
+    "• \"John had an affair with Katie\"",
+    "• \"Set Alice's birth year to 1950\" or \"Set Alice's death year to 2003\"",
+    "• \"Rename Alice to Aaliyah\"",
     "• \"Show Alice\" or \"Show the tree\"",
-    "• \"Set Alice's birth year to 1950\" or \"Rename Alice to Aaliyah\"",
     "• \"Leave tree\"",
     "Type 'menu' any time for quick shortcuts.",
   ].join("\n");
@@ -660,11 +723,9 @@ function tokenizeName(raw) {
   if (!raw) return [];
   return raw
     .toString()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+    .lowerCase?.() // safeguard in case it's not a string
+    ? raw.toString().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean)
+    : raw.toString().replace(/[^a-z0-9]+/gi, " ").trim().split(/\s+/).map((t) => t.toLowerCase()).filter(Boolean);
 }
 
 function tokenMatches(a, b) {
@@ -876,8 +937,11 @@ function menuGuidanceText(id, tree) {
 
 // ---------- WhatsApp helpers ----------
 async function sendText(to, body) {
-  if (!to) return;
+  if (!to || !body) return;
   try {
+    // suppress duplicate outgoing text to the same number
+    if (shouldSuppress(to, body)) return;
+
     const resp = await fetch(`https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`, {
       method: "POST",
       headers: {
