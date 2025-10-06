@@ -238,27 +238,23 @@ function minmax(a, b) {
 }
 
 export async function addRelationship(treeId, aId, kind, bId) {
-  if (["spouse_of", "partner_of", "divorced_from"].includes(kind)) {
+  // undirected kinds (normalize a<b)
+  if (["spouse_of", "partner_of", "divorced_from", "separated_from", "affair_with"].includes(kind)) {
     const [x, y] = minmax(aId, bId);
     const { error } = await db
       .from("relationships")
-      .upsert(
-        { tree_id: treeId, a: x, b: y, kind },
-        { onConflict: "tree_id,a,b,kind" }
-      );
+      .upsert({ tree_id: treeId, a: x, b: y, kind }, { onConflict: "tree_id,a,b,kind" });
     if (error && error.code !== "23505") throw error;
     return;
   }
   if (kind === "parent_of") {
     const { error } = await db
       .from("relationships")
-      .upsert(
-        { tree_id: treeId, a: aId, b: bId, kind },
-        { onConflict: "tree_id,a,b,kind" }
-      );
+      .upsert({ tree_id: treeId, a: aId, b: bId, kind }, { onConflict: "tree_id,a,b,kind" });
     if (error && error.code !== "23505") throw error;
   }
 }
+
 
 export async function addChildWithParents(treeId, childName, dob, parentAName, parentBName) {
   const child = await upsertPersonByName(treeId, childName, dob || null);
