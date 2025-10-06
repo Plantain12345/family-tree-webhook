@@ -23,8 +23,7 @@ import { parseOps } from "./_nlp.js";
 
 // ---------- Config ----------
 const BASE_URL = "https://family-tree-webhook.vercel.app";
-const FOLLOW_UP_PROMPT =
-  "What else would you like to do to your family tree? I understand plain english. Or type 'menu' to view your options.";
+const FOLLOW_UP_PROMPT = "What else?";
 
 // ---------- Anti-spam: suppress duplicate replies per phone ----------
 const LAST_REPLY = new Map(); // phone -> { body, at }
@@ -196,12 +195,12 @@ export default async function handler(req, res) {
           const name = (op.name || "My Family").slice(0, 80);
           try {
             const newTree = await createTree(from, name); // phone first
-            const tip = `You’re now active in “${newTree.name}”. Try: Add Alice born 1950
-Live tree: ${BASE_URL}/tree.html?code=${newTree.join_code}`;
+            const tip = `You can start by adding a person, like "Add Alice born 1950".
+View your tree any time at: ${BASE_URL}/tree.html?code=${newTree.join_code}`;
 
             await setActiveTreeState(from, newTree.id);
             activeTree = newTree;
-            replies.push(`✅ Created “${newTree.name}”. Code: ${newTree.join_code}\n${tip}`);
+            replies.push(`✅ Created your family tree: “${newTree.name}”.\n${tip}`);
           } catch (e) {
             console.error("Error creating tree:", e);
             replies.push("❌ Couldn't create the tree. Try a different name.");
