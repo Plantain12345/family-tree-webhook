@@ -266,7 +266,7 @@ export async function addChildWithParents(treeId, childName, dob, parentAName, p
   return child;
 }
 
-export async function editPerson(treeId, personId, { newName, dob_dmy, gender }) {
+export async function editPerson(treeId, personId, { newName, dob_dmy, dod_dmy, gender }) {
   const patch = {};
   if (newName !== undefined && newName !== null) {
     const trimmed = newName.trim();
@@ -276,12 +276,17 @@ export async function editPerson(treeId, personId, { newName, dob_dmy, gender })
     const normalized = normalizeDobInput(dob_dmy);
     patch.dob_dmy = normalized || null;
   }
+  if (dod_dmy !== undefined) {
+    const normalized = normalizeDobInput(dod_dmy);
+    patch.dod_dmy = normalized || null;
+  }
   if (gender !== undefined) patch.gender = gender;
   if (Object.keys(patch).length) {
     const r = await db.from("persons").update(patch).eq("id", personId);
     if (r.error) throw r.error;
   }
 }
+
 
 export async function personSummary(treeId, personId) {
   const [{ data: me }, { data: rels }, { data: ppl }] = await Promise.all([
