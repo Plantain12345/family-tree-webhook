@@ -11,8 +11,8 @@
   <style>
     :root {
       --bg:#212121; --text:#fff; --muted:#aaa; --panel:#2a2a2a; --panel-border:#3a3a3a;
-      --male:#7fa3b2;   /* matches family-chart's male card tone */
-      --female:#b9838e; /* matches family-chart's female card tone */
+      --male:#7fa3b2;   /* match family-chart tones */
+      --female:#b9838e;
     }
     body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
     #Header {
@@ -30,29 +30,20 @@
 
     #Status { padding:12px 16px; font-size:14px; opacity:.85; }
     #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
+
+    /* cards mode (for unlinked people and/or when no relationships yet) */
     #CardsMode { padding:16px; }
     .cards-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
-    .card {
-      position:relative; background:var(--panel); border:1px solid var(--panel-border);
-      border-radius:12px; padding:14px; box-shadow:0 4px 14px rgba(0,0,0,0.25);
-    }
+    .card { position:relative; background:var(--panel); border:1px solid var(--panel-border); border-radius:12px; padding:14px; box-shadow:0 4px 14px rgba(0,0,0,0.25); }
     .card h3 { margin:0 0 6px; font-size:16px; line-height:1.3; }
     .card .muted { color:var(--muted); font-size:12px; }
-    .badge-unknown {
-      position:absolute; top:8px; right:8px; width:8px; height:8px; border-radius:50%; background:#aaa;
-    }
+    .badge-unknown { position:absolute; top:8px; right:8px; width:8px; height:8px; border-radius:50%; background:#aaa; }
     .hint { padding:10px 0 0; line-height:1.5; color:#ddd; }
     code { background:#333; padding:2px 6px; border-radius:4px; }
 
     /* Share button (bottom-left) */
-    #ShareWrap {
-      position:fixed; left:16px; bottom:16px; z-index:5;
-      display:flex; gap:10px; align-items:center;
-    }
-    .btn {
-      border:1px solid #4a4a4a; background:#2b2b2b; color:#ddd;
-      padding:8px 12px; border-radius:10px; font-size:13px; cursor:pointer;
-    }
+    #ShareWrap { position:fixed; left:16px; bottom:16px; z-index:5; display:flex; gap:10px; align-items:center; }
+    .btn { border:1px solid #4a4a4a; background:#2b2b2b; color:#ddd; padding:8px 12px; border-radius:10px; font-size:13px; cursor:pointer; }
     .btn:hover { background:#333; }
 
     /* Ensure Family-Chart HTML cards show both lines comfortably */
@@ -62,7 +53,7 @@
 <body>
   <div id="Header">
     <div>
-      <div class="title" id="TreeName">Family Tree</div>
+      <div class="title" id="TreeName">Family Tree Name: —</div>
       <div class="code" id="TreeCode"></div>
     </div>
     <div id="Legend" aria-label="Legend">
@@ -90,70 +81,79 @@
   </div>
 
   <script type="module">
-    const statusEl = document.getElementById('Status');
-    const chartHostSel = '#FamilyChart';
-    const cardsHost   = document.getElementById('CardsMode');
-    const cardsGrid   = document.getElementById('CardsGrid');
-    const cardsHint   = document.getElementById('CardsHint');
-    const treeNameEl  = document.getElementById('TreeName');
-    const treeCodeEl  = document.getElementById('TreeCode');
-    const shareBtn    = document.getElementById('ShareBtn');
-    const shareWA     = document.getElementById('ShareWhatsApp');
+    const statusEl   = document.getElementById('Status');
+    const chartSel   = '#FamilyChart';
+    const cardsHost  = document.getElementById('CardsMode');
+    const cardsGrid  = document.getElementById('CardsGrid');
+    const cardsHint  = document.getElementById('CardsHint');
+    const treeNameEl = document.getElementById('TreeName');
+    const treeCodeEl = document.getElementById('TreeCode');
+    const shareBtn   = document.getElementById('ShareBtn');
+    const shareWA    = document.getElementById('ShareWhatsApp');
 
-    const params = new URLSearchParams(location.search);
-    const code   = params.get('code') || '';
+    const code = new URLSearchParams(location.search).get('code') || '';
 
     const showError = (msg, err) => {
       console.error(msg, err || '');
       statusEl.innerHTML = `${msg}<br><small>Open Console for details.</small>`;
     };
 
-    function waShareLink(url) {
-      const text = `Open our family tree: ${url}`;
-      return `https://wa.me/?text=${encodeURIComponent(text)}`;
-    }
+    const waShareLink = (url) => `https://wa.me/?text=${encodeURIComponent(`Open our family tree: ${url}`)}`;
 
     function hasAnyFamily(persons){
-      // At least one spouse pair OR explicit father/mother OR children link
       if (!persons.length) return false;
-      // Fast check
-      if (persons.some(d=>{
-        const r=d?.rels||{};
-        return (r?.spouses?.length>0)||r?.father||r?.mother||(r?.children?.length>0);
-      })) return true;
-      // If parents didn’t get set due to unknown genders, detect “is child of someone”:
-      const parentHasChild = new Set();
-      persons.forEach(d => (d?.rels?.children||[]).forEach(cid => parentHasChild.add(String(cid))));
-      return persons.some(d => parentHasChild.has(String(d.id)));
+      if (persons.some(d=>{ const r=d?.rels||{}; return (r?.spouses?.length>0)||r?.father||r?.mother||(r?.children?.length>0);} )) return true;
+      // also treat "appears as someone’s child" as linked
+      const children = new Set();
+      persons.forEach(d => (d?.rels?.children||[]).forEach(cid => children.add(String(cid))));
+      return persons.some(d => children.has(String(d.id)));
     }
 
     function splitLinkedOrphans(persons){
-      // Build a set of linked IDs: has spouses, has children, has father/mother,
-      // or appears in someone else's children array.
       const linked = new Set();
-      const childOfSomeone = new Set();
-      persons.forEach(p => (p?.rels?.children||[]).forEach(cid => childOfSomeone.add(String(cid))));
+      const childOf = new Set();
+      persons.forEach(p => (p?.rels?.children||[]).forEach(cid => childOf.add(String(cid))));
       persons.forEach(p => {
         const r = p?.rels || {};
-        if ((r.spouses&&r.spouses.length) || (r.children&&r.children.length) || r.father || r.mother || childOfSomeone.has(String(p.id))) {
-          linked.add(String(p.id));
-        }
+        if ((r.spouses?.length)||(r.children?.length)||r.father||r.mother||childOf.has(String(p.id))) linked.add(String(p.id));
       });
-      const linkedArr  = persons.filter(p => linked.has(String(p.id)));
-      const orphansArr = persons.filter(p => !linked.has(String(p.id)));
-      return { linkedArr, orphansArr };
+      return {
+        linkedArr:  persons.filter(p => linked.has(String(p.id))),
+        orphansArr: persons.filter(p => !linked.has(String(p.id))),
+      };
+    }
+
+    // --- robust data helpers ---
+    const getBirthday = (d) =>
+      d?.data?.["birthday"] || d?.data?.["dob_dmy"] || d?.data?.["birth date"] || "";
+
+    function prepPersons(apiPersons){
+      return (apiPersons||[]).map(d=>{
+        const g = d?.data?.gender;
+        const unknown = (g==='U'||g===undefined||g===null||g==='');
+        // normalize the birthday key so CardHtml can always find it
+        const birthday = getBirthday(d);
+        return {
+          ...d,
+          data: {
+            ...d.data,
+            gender: unknown ? 'M' : g,  // ONLY for layout; we keep neutrality with a flag
+            unknown,
+            birthday,                    // ensure the field exists
+          }
+        };
+      });
     }
 
     function renderCards(list, mode) {
-      // mode: 'alone' (no relationships in tree) or 'orphans' (chart + extra people)
       const html = list.map(d=>{
-        const f=d?.data?.["first name"]||'', l=d?.data?.["last name"]||'';
-        const b=d?.data?.["birthday"]||'';
-        const unknown = d?.data?.unknown || d?.data?.gender==='U' || !d?.data?.gender;
+        const first=d?.data?.["first name"]||'', last=d?.data?.["last name"]||'';
+        const bday=getBirthday(d);
+        const unknown=d?.data?.unknown || d?.data?.gender==='U' || !d?.data?.gender;
         return `<div class="card">
           ${unknown ? '<span class="badge-unknown" title="Gender not set"></span>' : ''}
-          <h3>${(f+' '+l).trim() || 'Unnamed'}</h3>
-          <div class="muted">${b?`Born ${b}`:'&nbsp;'}</div>
+          <h3>${(first+' '+last).trim() || 'Unnamed'}</h3>
+          <div class="muted">${bday?`Born ${bday}`:'&nbsp;'}</div>
         </div>`;
       }).join('');
       cardsGrid.innerHTML = html;
@@ -175,80 +175,69 @@
       catch (e) {
         console.warn('ESM failed; trying UMD…', e);
         await new Promise((ok, fail)=>{
-          const s=document.createElement('script');
-          s.src='https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
+          const s=document.createElement('script'); s.src='https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
           s.onload=ok; s.onerror=fail; document.head.appendChild(s);
         });
         return window.familyChart || window.f3;
       }
     }
 
-    function prepPersons(apiPersons){
-      return (apiPersons||[]).map(d=>{
-        const g=d?.data?.gender;
-        const isUnknown = (g==='U'||g===undefined||g===null||g==='');
-        const layoutGender = isUnknown ? 'M' : g; // ONLY for layout
-        return { ...d, data:{ ...d.data, gender: layoutGender, unknown: isUnknown } };
-      });
-    }
-
     async function renderOnce(){
       const api = await fetchTree();
 
-      // Header info
+      // Header + share
       const joinUrl = `${location.origin}/tree.html?code=${api?.tree?.join_code||code}`;
-      treeNameEl.textContent = api?.tree?.name || 'Family Tree';
+      treeNameEl.textContent = `Family Tree Name: ${api?.tree?.name || '—'}`;
       treeCodeEl.textContent = api?.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
       shareWA.href = waShareLink(joinUrl);
       shareBtn.onclick = async () => {
         try {
-          if (navigator.share) {
-            await navigator.share({ title: api?.tree?.name || 'Family Tree', text: 'Open our family tree', url: joinUrl });
-          } else {
-            location.href = waShareLink(joinUrl);
-          }
-        } catch { /* ignore cancel */ }
+          if (navigator.share) await navigator.share({ title: api?.tree?.name || 'Family Tree', text: 'Open our family tree', url: joinUrl });
+          else location.href = waShareLink(joinUrl);
+        } catch {}
       };
 
       if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
 
-      // Prepare people
+      // Prepare people (ensure gender + birthday present for the chart)
       const persons = prepPersons(api.persons);
 
       if (!persons.length) {
         statusEl.innerHTML = `No people yet. Add someone via WhatsApp, then refresh.<br>Tip: <code>Add Alice born 1950</code>`;
-        document.querySelector(chartHostSel).style.display='none';
+        document.querySelector(chartSel).style.display='none';
         renderCards([], 'alone');
         return;
       }
 
-      // If the tree has zero families, show all as cards
+      // If *no* relationships yet, cards-only
       if (!hasAnyFamily(persons)) {
         statusEl.textContent = '';
-        document.querySelector(chartHostSel).style.display='none';
+        document.querySelector(chartSel).style.display='none';
         renderCards(persons, 'alone');
         return;
       }
 
-      // Otherwise: split into linked (chart) + orphans (cards)
+      // Otherwise chart + any unlinked cards underneath
       const { linkedArr, orphansArr } = splitLinkedOrphans(persons);
       const f3 = await loadFamilyChartLib();
       if (!f3) { showError('family-chart library not available.'); return; }
 
-      // Chart expects the array directly
       statusEl.textContent = '';
-      document.querySelector(chartHostSel).style.display='';
-      const chart = f3.createChart(chartHostSel, linkedArr)
+      document.querySelector(chartSel).style.display='';
+
+      // IMPORTANT: pass the array directly
+      const chart = f3.createChart(chartSel, linkedArr)
         .setTransitionTime(900)
         .setCardXSpacing(250)
         .setCardYSpacing(150);
 
+      // Show name on row 1 and our normalized "birthday" on row 2
       chart.setCard(f3.CardHtml)
         .setCardDisplay([["first name","last name"],["birthday"]]);
 
       chart.updateTree({ initial:true });
 
-      // Show unlinked people under the chart (if any)
+      // Orphans (still unlinked) as cards below
       renderCards(orphansArr, 'orphans');
     }
 
