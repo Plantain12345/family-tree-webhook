@@ -5,61 +5,39 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Family Tree</title>
 
-  <!-- family-chart base styles -->
   <link rel="stylesheet" href="/family-chart.css" />
-  <!-- d3 (peer dep for family-chart UMD) -->
   <script src="https://unpkg.com/d3@7"></script>
 
   <style>
     :root {
       --bg:#212121; --text:#fff; --muted:#aaa; --panel:#2a2a2a; --panel-border:#3a3a3a;
-      --male:#7fa3b2;   /* match family-chart tones */
-      --female:#b9838e;
+      --male:#7fa3b2; --female:#b9838e; --unknown:#888;
     }
     body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
-
-    /* Header (title + code + legend) */
     #Header {
       display:flex; justify-content:space-between; align-items:center;
       padding:12px 16px; border-bottom:1px solid #2b2b2b; background:rgba(0,0,0,.15);
       position:sticky; top:0; z-index:5; backdrop-filter: blur(6px);
     }
     .title { font-weight:600; }
-    .code  { color:var(--muted); font-size:12px; margin-top:2px; }
+    .code { color:var(--muted); font-size:12px; margin-top:2px; }
     #Legend { display:flex; gap:14px; align-items:center; font-size:13px; color:#ddd; }
     .dot { display:inline-block; width:12px; height:12px; border-radius:50%; margin-right:6px; vertical-align:middle; }
-    .dot.m { background:var(--male);   border:1px solid #cfd9df22; }
-    .dot.f { background:var(--female); border:1px solid #cfd9df22; }
-    .dot.u { background:#888;          border:1px solid #ffffff22; }
-
+    .dot.m { background:var(--male); }
+    .dot.f { background:var(--female); }
+    .dot.u { background:var(--unknown); }
     #Status { padding:12px 16px; font-size:14px; opacity:.85; }
-
-    /* family-chart canvas */
     #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
-
-    /* Cards mode (for unlinked people and/or when no relationships yet) */
     #CardsMode { padding:16px; }
     .cards-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
-    .card {
-      position:relative; background:var(--panel); border:1px solid var(--panel-border);
-      border-radius:12px; padding:14px; box-shadow:0 4px 14px rgba(0,0,0,0.25);
-    }
+    .card { position:relative; background:var(--panel); border:1px solid var(--panel-border); border-radius:12px; padding:14px; box-shadow:0 4px 14px rgba(0,0,0,0.25); }
     .card h3 { margin:0 0 6px; font-size:16px; line-height:1.3; }
     .card .muted { color:var(--muted); font-size:12px; }
-    .badge-unknown { position:absolute; top:8px; right:8px; width:8px; height:8px; border-radius:50%; background:#aaa; }
     .hint { padding:10px 0 0; line-height:1.5; color:#ddd; }
     code { background:#333; padding:2px 6px; border-radius:4px; }
-    /* tint orphan cards by gender */
-    .card.m { box-shadow: inset 0 0 0 2px rgba(127,163,178,.35); }
-    .card.f { box-shadow: inset 0 0 0 2px rgba(185,131,142,.45); }
-
-    /* Share button (bottom-left) */
     #ShareWrap { position:fixed; left:16px; bottom:16px; z-index:5; display:flex; gap:10px; align-items:center; }
     .btn { border:1px solid #4a4a4a; background:#2b2b2b; color:#ddd; padding:8px 12px; border-radius:10px; font-size:13px; cursor:pointer; }
     .btn:hover { background:#333; }
-
-    /* Make sure card second line has room */
-    .f3 .card-html .line { min-height:18px; }
   </style>
 </head>
 <body>
@@ -76,224 +54,90 @@
   </div>
 
   <div id="Status">Loading…</div>
-
-  <!-- Chart mode target -->
   <div id="FamilyChart" class="f3"></div>
+  <div id="CardsMode" style="display:none"><div class="cards-grid" id="CardsGrid"></div><div class="hint" id="CardsHint"></div></div>
 
-  <!-- Cards mode for unlinked people (also used alongside chart for orphans) -->
-  <div id="CardsMode" style="display:none">
-    <div class="cards-grid" id="CardsGrid"></div>
-    <div class="hint" id="CardsHint"></div>
-  </div>
-
-  <!-- Share (bottom-left) -->
   <div id="ShareWrap">
     <button class="btn" id="ShareBtn">Share this tree</button>
-    <a class="btn" id="ShareWhatsApp" target="_blank" rel="noopener noreferrer">Share via WhatsApp</a>
+    <a class="btn" id="ShareWA" target="_blank" rel="noopener noreferrer">Share via WhatsApp</a>
   </div>
 
   <script type="module">
-    const statusEl   = document.getElementById('Status');
-    const chartSel   = '#FamilyChart';
-    const cardsHost  = document.getElementById('CardsMode');
-    const cardsGrid  = document.getElementById('CardsGrid');
-    const cardsHint  = document.getElementById('CardsHint');
-    const treeNameEl = document.getElementById('TreeName');
-    const treeCodeEl = document.getElementById('TreeCode');
-    const shareBtn   = document.getElementById('ShareBtn');
-    const shareWA    = document.getElementById('ShareWhatsApp');
+    const statusEl=document.getElementById('Status');
+    const chartSel='#FamilyChart';
+    const cardsGrid=document.getElementById('CardsGrid');
+    const cardsHost=document.getElementById('CardsMode');
+    const cardsHint=document.getElementById('CardsHint');
+    const treeNameEl=document.getElementById('TreeName');
+    const treeCodeEl=document.getElementById('TreeCode');
+    const shareWA=document.getElementById('ShareWA');
+    const shareBtn=document.getElementById('ShareBtn');
+    const code=new URLSearchParams(location.search).get('code');
 
-    const code = new URLSearchParams(location.search).get('code') || '';
+    const waLink=(url)=>`https://wa.me/?text=${encodeURIComponent("Open our family tree: "+url)}`;
 
-    const showError = (msg, err) => {
-      console.error(msg, err || '');
-      statusEl.innerHTML = `${msg}<br><small>Open Console for details.</small>`;
-    };
-    const waShareLink = (url) => `https://wa.me/?text=${encodeURIComponent(`Open our family tree: ${url}`)}`;
-
-    function hasAnyFamily(persons){
-      if (!persons.length) return false;
-      if (persons.some(d=>{ const r=d?.rels||{}; return (r?.spouses?.length>0)||r?.father||r?.mother||(r?.children?.length>0);} )) return true;
-      // also treat "appears as someone’s child" as linked
-      const children = new Set();
-      persons.forEach(d => (d?.rels?.children||[]).forEach(cid => children.add(String(cid))));
-      return persons.some(d => children.has(String(d.id)));
-    }
-
-    function splitLinkedOrphans(persons){
-      const linked = new Set();
-      const childOf = new Set();
-      persons.forEach(p => (p?.rels?.children||[]).forEach(cid => childOf.add(String(cid))));
-      persons.forEach(p => {
-        const r = p?.rels || {};
-        if ((r.spouses?.length)||(r.children?.length)||r.father||r.mother||childOf.has(String(p.id))) linked.add(String(p.id));
-      });
-      return {
-        linkedArr:  persons.filter(p => linked.has(String(p.id))),
-        orphansArr: persons.filter(p => !linked.has(String(p.id))),
-      };
-    }
-
-    /* ---------- robust data helpers ---------- */
-    function canonGender(g){
-      if (g == null) return 'U';
-      const s = String(g).trim().toLowerCase();
-      if (!s) return 'U';
-      if (/^(f|female|woman|girl)$/.test(s)) return 'F';
-      if (/^(m|male|man|boy)$/.test(s)) return 'M';
-      if (s === 'u' || s === 'unknown' || s === 'unspecified' || s === 'other') return 'U';
-      return 'U';
-    }
-    function nameParts(d){
-      const first = d?.data?.['first name'];
-      const last  = d?.data?.['last name'];
-      if (first || last) return { first:first||'', last:last||'' };
-      const pn = d?.data?.primary_name || '';
-      const parts = String(pn).trim().split(/\s+/).filter(Boolean);
-      if (!parts.length) return { first:'', last:'' };
-      if (parts.length === 1) return { first:parts[0], last:'' };
-      return { first:parts.slice(0,-1).join(' '), last:parts.at(-1) };
-    }
-    function getBirthdayRaw(d){
-      return d?.data?.['birthday'] ?? d?.data?.['dob_dmy'] ?? d?.data?.['birth date'] ?? '';
-    }
-    function normalizeBirthday(v){
-      if (v == null) return '';
-      const s = String(v).trim();
-      // Accept YYYY, YYYY-MM, YYYY-MM-DD; anything else: return as-is
-      return s;
-    }
-
-    function prepPersons(apiPersons){
-      return (apiPersons||[]).map(d=>{
-        const { first, last } = nameParts(d);
-        const cg = canonGender(d?.data?.gender);               // 'M' | 'F' | 'U'
-        const birthday = normalizeBirthday(getBirthdayRaw(d)); // normalized string
-        const layoutGender = (cg === 'U') ? 'M' : cg;           // family-chart requires 'M'|'F'
-        return {
-          ...d,
-          data: {
-            ...d.data,
-            'first name': first,
-            'last name':  last,
-            gender: layoutGender,   // used by family-chart to pick color
-            gender_canon: cg,       // our canonical value for UI tinting
-            unknown: (cg === 'U'),
-            birthday,               // always present for card display
-          }
-        };
-      });
-    }
-    /* ---------- end helpers ---------- */
-
-    function renderCards(list, mode) {
-      const html = list.map(d=>{
-        const first=d?.data?.['first name']||'', last=d?.data?.['last name']||'';
-        const bday=d?.data?.birthday||'';
-        const cg  = d?.data?.gender_canon || 'U';        // 'M'|'F'|'U'
-        const cls = (cg==='M') ? 'm' : (cg==='F' ? 'f' : '');
-        return `<div class="card ${cls}">
-          ${cg==='U' ? '<span class="badge-unknown" title="Gender not set"></span>' : ''}
-          <h3>${(first+' '+last).trim() || 'Unnamed'}</h3>
-          <div class="muted">${bday?`Born ${bday}`:'&nbsp;'}</div>
-        </div>`;
-      }).join('');
-      cardsGrid.innerHTML = html;
-      cardsHost.style.display = list.length ? 'block' : 'none';
-      const hintBase = `Add or link relatives in WhatsApp. This page auto-updates every 5s.`;
-      cardsHint.innerHTML = mode==='alone'
-        ? `${hintBase}<br>Try: <code>Link Alice and Bob</code>, or <code>Add Chloe, daughter of Alice and Bob</code>`
-        : `${hintBase}<br>These people are not linked yet. Try: <code>John is Zaake's father</code>`;
-    }
+    const getBirthday=(d)=>d?.data?.birthday||'';
+    const colorGender=(g)=>g==='M'?'var(--male)':g==='F'?'var(--female)':'var(--unknown)';
 
     async function fetchTree(){
-      const res = await fetch(`/api/tree?code=${encodeURIComponent(code)}`, { cache:'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
+      const r=await fetch(`/api/tree?code=${encodeURIComponent(code)}`,{cache:'no-store'});
+      if(!r.ok)throw new Error(r.statusText);
+      return r.json();
     }
 
-    async function loadFamilyChartLib(){
-      try { return (await import('https://unpkg.com/family-chart@0.8.0?module')).default; }
-      catch (e) {
-        console.warn('ESM failed; trying UMD…', e);
-        await new Promise((ok, fail)=>{
-          const s=document.createElement('script');
-          s.src='https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
-          s.onload=ok; s.onerror=fail; document.head.appendChild(s);
-        });
-        return window.familyChart || window.f3;
-      }
+    async function loadLib(){
+      try{return (await import('https://unpkg.com/family-chart@0.8.0?module')).default;}
+      catch{const s=document.createElement('script');s.src='https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';await new Promise(r=>s.onload=r);return window.f3;}
+    }
+
+    function renderCards(list){
+      const html=list.map(p=>{
+        const d=p.data||{};
+        return `<div class="card" style="border-left:4px solid ${colorGender(d.gender)};">
+          <h3>${(d.first_name||'Unnamed')} ${d.last_name||''}</h3>
+          <div class="muted">${d.birthday?`Born ${d.birthday}`:'&nbsp;'}</div>
+        </div>`;
+      }).join('');
+      cardsGrid.innerHTML=html;
+      cardsHost.style.display=list.length?'block':'none';
+      cardsHint.textContent="These individuals are not yet linked in the family tree.";
+    }
+
+    function hasRels(persons){
+      return persons.some(p=>{
+        const r=p.rels||{};
+        return (r.father||r.mother||(r.spouses?.length)||(r.children?.length));
+      });
     }
 
     async function renderOnce(){
-      const api = await fetchTree();
+      const api=await fetchTree();
+      const persons=api.persons||[];
+      const linked=persons.filter(p=>hasRels([p]));
+      const orphans=persons.filter(p=>!hasRels([p]));
 
-      // Header + share
-      const joinUrl = `${location.origin}/tree.html?code=${api?.tree?.join_code||code}`;
-      document.title = `Family Tree — ${api?.tree?.name || '—'}`;
-      treeNameEl.textContent = `Family Tree Name: ${api?.tree?.name || '—'}`;
-      treeCodeEl.textContent = api?.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
-      shareWA.href = waShareLink(joinUrl);
-      shareBtn.onclick = async () => {
-        try {
-          if (navigator.share) {
-            await navigator.share({ title: api?.tree?.name || 'Family Tree', text: 'Open our family tree', url: joinUrl });
-          } else {
-            location.href = waShareLink(joinUrl);
-          }
-        } catch {}
-      };
+      treeNameEl.textContent=`Family Tree Name: ${api.tree?.name||'—'}`;
+      treeCodeEl.textContent=api.tree?.join_code?`Code: ${api.tree.join_code}`:'';
+      const joinUrl=`${location.origin}/tree.html?code=${api.tree?.join_code||code}`;
+      shareWA.href=waLink(joinUrl);
+      shareBtn.onclick=()=>navigator.share?.({title:api.tree?.name,text:'Open our family tree',url:joinUrl})||window.open(waLink(joinUrl),'_blank');
 
-      // Normalize people for viewer
-      const persons = prepPersons(api.persons);
-
-      if (!persons.length) {
-        statusEl.innerHTML = `No people yet. Add someone via WhatsApp, then refresh.<br>Tip: <code>Add Alice born 1950</code>`;
-        document.querySelector(chartSel).style.display='none';
-        renderCards([], 'alone');
-        return;
-      }
-
-      // No relationships yet → cards-only
-      if (!hasAnyFamily(persons)) {
-        statusEl.textContent = '';
-        document.querySelector(chartSel).style.display='none';
-        renderCards(persons, 'alone');
-        return;
-      }
-
-      // Chart + orphans
-      const { linkedArr, orphansArr } = splitLinkedOrphans(persons);
-      const f3 = await loadFamilyChartLib();
-      if (!f3) { showError('family-chart library not available.'); return; }
-
-      statusEl.textContent = '';
-      document.querySelector(chartSel).style.display='';
-
-      // IMPORTANT: pass the array directly
-      const chart = f3.createChart(chartSel, linkedArr)
+      const f3=await loadLib();
+      statusEl.textContent='';
+      const chart=f3.createChart(chartSel,linked)
         .setTransitionTime(900)
         .setCardXSpacing(250)
         .setCardYSpacing(150);
-
-      // Use normalized keys: first/last on line 1, "birthday" on line 2
-      chart.setCard(f3.CardHtml)
-        .setCardDisplay([['first name','last name'],['birthday']]);
-
-      chart.updateTree({ initial:true });
-
-      // Orphans grid (still-unlinked people)
-      renderCards(orphansArr, 'orphans');
+      chart.setCard(f3.CardHtml).setCardDisplay([["first_name","last_name"],["birthday"]]);
+      chart.updateTree({initial:true});
+      renderCards(orphans);
     }
 
     async function main(){
-      if (!code) { showError('Missing ?code in the URL.'); return; }
-      const loop = async () => {
-        try { await renderOnce(); }
-        catch (e) { showError('Render error. Retrying…', e); }
-      };
+      if(!code){statusEl.textContent='Missing ?code.';return;}
+      const loop=async()=>{try{await renderOnce();}catch(e){console.error(e);statusEl.textContent='Render error. Retrying…';}};
       await loop();
-      setInterval(loop, 5000); // auto-refresh
+      setInterval(loop,5000);
     }
 
     main();
