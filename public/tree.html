@@ -5,17 +5,14 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Family Tree</title>
 
-  <!-- family-chart base styles (local copy) -->
   <link rel="stylesheet" href="/family-chart.css" />
-
-  <!-- d3 is required by family-chart -->
   <script src="https://unpkg.com/d3@7"></script>
 
   <style>
     body { margin: 0; background:#212121; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
     #Status { padding:16px; font-size:14px; opacity:.85; }
-    a { color:#9ad; }
+    code { background:#333; padding:2px 6px; border-radius:4px; }
   </style>
 </head>
 <body>
@@ -28,89 +25,54 @@
 
     const params = new URLSearchParams(location.search);
     const code = params.get('code');
-
     if (!code) {
       statusEl.textContent = 'Missing ?code=… in the URL.';
       throw new Error('Missing join code');
     }
 
-    // Helper to show errors on the page too
     function showError(msg, err) {
       console.error(msg, err || '');
-      statusEl.innerHTML =
-        `${msg}<br><small>Open DevTools → Console for details.</small>`;
+      statusEl.innerHTML = `${msg}<br><small>Open Console for details.</small>`;
     }
 
-    // Try to import ESM. If that fails, fall back to UMD global.
     let f3;
     try {
-      // Safer ESM entry for unpkg (resolves "module" field automatically)
       f3 = (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
     } catch (e) {
-      console.warn('ESM import failed, falling back to UMD...', e);
+      console.warn('ESM import failed, trying UMD…', e);
       await new Promise((resolve, reject) => {
         const s = document.createElement('script');
         s.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
-        s.onload = resolve;
-        s.onerror = reject;
-        document.head.appendChild(s);
+        s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
       }).catch(err => showError('Could not load family-chart from CDN.', err));
-      // UMD exposes global "familyChart"
-      // If your package exposes "f3" instead, adjust here:
       f3 = (window.familyChart || window.f3);
     }
-
-    if (!f3) {
-      showError('family-chart library not available.');
-      throw new Error('family-chart not loaded');
-    }
+    if (!f3) { showError('family-chart library not available.'); throw new Error('family-chart not loaded'); }
 
     // Fetch your API (already Family-Chart shape)
-    let api;
     const url = `/api/tree?code=${encodeURIComponent(code)}`;
-    try {
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) {
-        const txt = await res.text().catch(()=>'');
-        showError(`Could not load this tree (HTTP ${res.status}).`, txt);
-        throw new Error(`Fetch failed ${res.status}: ${txt}`);
-      }
-      api = await res.json();
-    } catch (e) {
-      showError('Network error fetching /api/tree.', e);
-      throw e;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) {
+      showError(`Could not load this tree (HTTP ${res.status}).`, await res.text().catch(()=>'')); 
+      throw new Error('Tree fetch failed');
+    }
+    const api = await res.json();
+    console.log('API payload', api);
+
+    if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
+
+    const data = Array.isArray(api?.persons) ? api.persons : [];
+    if (!data.length) {
+      statusEl.innerHTML = `No people in this tree yet. Add someone via WhatsApp, then refresh.<br>
+      Tip: send <code>Add Alice born 1950</code>`;
+      // Do NOT call updateTree when there is no data — family-chart throws “No data”.
+      return;
     }
 
-    try {
-      if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
+    statusEl.textContent = '';
+    const chart = f3.createChart(rootSel, { data })
+      .setTransitionTime(900)
+      .setCardXSpacing(250)
+      .setCardYSpacing(150);
 
-      // Persons is already an array of Datum { id, data:{gender,...}, rels:{...} }
-      const fcData = { data: api.persons || [] };
-
-      // If there are truly no persons, tell the user
-      if (!fcData.data.length) {
-        statusEl.innerHTML = 'No people in this tree yet. Add someone via WhatsApp, then refresh.';
-      } else {
-        statusEl.textContent = '';
-      }
-
-      const chart = f3.createChart(rootSel, fcData)
-        .setTransitionTime(900)
-        .setCardXSpacing(250)
-        .setCardYSpacing(150);
-
-      chart.setCard(f3.CardHtml)
-        .setCardDisplay([["first name","last name"],["birthday"]]);
-
-      chart.updateTree({ initial: true });
-
-      // Debug aid
-      console.log('fcData', fcData);
-      console.log('relationships (normalized)', api.relationships);
-    } catch (e) {
-      showError('Render error building the chart.', e);
-      throw e;
-    }
-  </script>
-</body>
-</html>
+    chart.setCard(f3.Ca
