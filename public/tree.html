@@ -14,7 +14,8 @@
   <style>
     body { margin: 0; background:#212121; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
-    #Status { padding: 16px; font-size: 14px; opacity:.85; }
+    #Status { padding:16px; font-size:14px; opacity:.85; }
+    a { color:#9ad; }
   </style>
 </head>
 <body>
@@ -22,53 +23,93 @@
   <div id="FamilyChart" class="f3"></div>
 
   <script type="module">
-    // Use the published ESM build from unpkg (no extra build step needed)
-    import f3 from 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.esm.js';
-
     const statusEl = document.getElementById('Status');
     const rootSel = '#FamilyChart';
 
-    // 1) Get ?code=XXXXXX from the URL
     const params = new URLSearchParams(location.search);
     const code = params.get('code');
+
     if (!code) {
       statusEl.textContent = 'Missing ?code=… in the URL.';
       throw new Error('Missing join code');
     }
 
-    try {
-      // 2) Load your API data (already in Family-Chart format)
-      const res = await fetch(`/api/tree?code=${encodeURIComponent(code)}`);
-      if (!res.ok) {
-        statusEl.textContent = 'Could not load this tree.';
-        throw new Error('Tree fetch failed');
-      }
-      const api = await res.json();
+    // Helper to show errors on the page too
+    function showError(msg, err) {
+      console.error(msg, err || '');
+      statusEl.innerHTML =
+        `${msg}<br><small>Open DevTools → Console for details.</small>`;
+    }
 
-      // Optional: set page title from tree name
+    // Try to import ESM. If that fails, fall back to UMD global.
+    let f3;
+    try {
+      // Safer ESM entry for unpkg (resolves "module" field automatically)
+      f3 = (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
+    } catch (e) {
+      console.warn('ESM import failed, falling back to UMD...', e);
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      }).catch(err => showError('Could not load family-chart from CDN.', err));
+      // UMD exposes global "familyChart"
+      // If your package exposes "f3" instead, adjust here:
+      f3 = (window.familyChart || window.f3);
+    }
+
+    if (!f3) {
+      showError('family-chart library not available.');
+      throw new Error('family-chart not loaded');
+    }
+
+    // Fetch your API (already Family-Chart shape)
+    let api;
+    const url = `/api/tree?code=${encodeURIComponent(code)}`;
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) {
+        const txt = await res.text().catch(()=>'');
+        showError(`Could not load this tree (HTTP ${res.status}).`, txt);
+        throw new Error(`Fetch failed ${res.status}: ${txt}`);
+      }
+      api = await res.json();
+    } catch (e) {
+      showError('Network error fetching /api/tree.', e);
+      throw e;
+    }
+
+    try {
       if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
 
-      // 3) Family-Chart wants { data: Datum[] } where each Datum has:
-      //    { id, data:{ gender:'M'|'F', ... }, rels:{ father?, mother?, spouses[], children[] } }
-      // We already built that server-side in /api/tree.js as `persons`.
+      // Persons is already an array of Datum { id, data:{gender,...}, rels:{...} }
       const fcData = { data: api.persons || [] };
 
-      // 4) Render it
+      // If there are truly no persons, tell the user
+      if (!fcData.data.length) {
+        statusEl.innerHTML = 'No people in this tree yet. Add someone via WhatsApp, then refresh.';
+      } else {
+        statusEl.textContent = '';
+      }
+
       const chart = f3.createChart(rootSel, fcData)
         .setTransitionTime(900)
         .setCardXSpacing(250)
         .setCardYSpacing(150);
 
-      // Use HTML cards and choose which fields to show on each line:
       chart.setCard(f3.CardHtml)
         .setCardDisplay([["first name","last name"],["birthday"]]);
 
       chart.updateTree({ initial: true });
-      statusEl.textContent = '';
+
+      // Debug aid
       console.log('fcData', fcData);
-    } catch (err) {
-      console.error(err);
-      // leave the status text as-is if we hit an error
+      console.log('relationships (normalized)', api.relationships);
+    } catch (e) {
+      showError('Render error building the chart.', e);
+      throw e;
     }
   </script>
 </body>
