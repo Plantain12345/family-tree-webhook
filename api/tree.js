@@ -27,7 +27,7 @@ export default async function handler(req, res) {
       await Promise.all([
         db
           .from("persons")
-          .select("id, primary_name, dob_dmy, gender") // <-- FIX: Added gender column
+          .select("id, primary_name, dob_dmy, gender")
           .eq("tree_id", tree.id),
         db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
       ]);
@@ -47,7 +47,7 @@ export default async function handler(req, res) {
     // Build GEDCOM-like family groupings (partners + children)
     const families = buildFamilies(people, rels);
 
-    return res.status(200).json({ tree, people, rels, families });
+    return res.status(200).json({ tree, people, relationships: rels, rels, families });
   } catch (e) {
     console.error("API /tree fatal error:", e);
     return res.status(500).json({ error: "Server error" });
