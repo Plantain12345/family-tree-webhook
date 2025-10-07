@@ -10,18 +10,66 @@
 
   <style>
     body { margin: 0; background:#212121; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-    #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
     #Status { padding:16px; font-size:14px; opacity:.85; }
+    #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
+    #CardsMode { display:none; padding:16px; }
+    .cards-grid {
+      display:grid;
+      grid-template-columns: repeat(auto-fill,minmax(220px,1fr));
+      gap:16px;
+      align-items:stretch;
+    }
+    .card {
+      position:relative;
+      background:#2a2a2a;
+      border:1px solid #3a3a3a;
+      border-radius:12px;
+      padding:14px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+    }
+    .card h3 { margin:0 0 6px; font-size:16px; line-height:1.25; color:#fff; }
+    .card .muted { color:#aaa; font-size:12px; }
+    .badge-unknown {
+      position:absolute; top:8px; right:8px;
+      width:8px; height:8px; border-radius:50%; background:#aaa;
+      cursor:help;
+    }
+    .hint { padding:16px; line-height:1.5; color:#ddd; }
     code { background:#333; padding:2px 6px; border-radius:4px; }
+    .toolbar { display:flex; gap:10px; align-items:center; margin:10px 0 6px; }
+    .btn {
+      appearance:none; border:1px solid #4a4a4a; background:#2b2b2b; color:#ddd;
+      padding:6px 10px; border-radius:8px; font-size:12px; cursor:pointer;
+    }
+    .btn:hover { background:#333; }
   </style>
 </head>
 <body>
   <div id="Status">Loading…</div>
+
+  <!-- Mode A: chart -->
   <div id="FamilyChart" class="f3"></div>
+
+  <!-- Mode B: cards (when no relationships yet) -->
+  <div id="CardsMode">
+    <div class="toolbar">
+      <button class="btn" id="refreshBtn">Refresh</button>
+      <div class="muted">Add more people via WhatsApp, then link them (e.g. <code>Link Alice and Bob</code>).</div>
+    </div>
+    <div class="cards-grid" id="CardsGrid"></div>
+    <div class="hint">
+      To see the full family chart, create a relationship:<br>
+      • <code>Link Alice and Bob</code><br>
+      • <code>Add Chloe, daughter of Alice and Bob</code>
+    </div>
+  </div>
 
   <script type="module">
     const statusEl = document.getElementById('Status');
-    const rootSel = '#FamilyChart';
+    const chartHostSel = '#FamilyChart';
+    const cardsHost = document.getElementById('CardsMode');
+    const cardsGrid = document.getElementById('CardsGrid');
+    document.getElementById('refreshBtn').onclick = () => location.reload();
 
     const showError = (msg, err) => {
       console.error(msg, err || '');
@@ -29,27 +77,51 @@
     };
 
     async function loadFamilyChartLib() {
-      let f3;
       try {
-        // ESM (preferred)
-        f3 = (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
+        return (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
       } catch (e) {
         console.warn('ESM import failed, trying UMD…', e);
-        // UMD fallback
         await new Promise((resolve, reject) => {
           const s = document.createElement('script');
           s.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
-          s.onload = resolve;
-          s.onerror = reject;
-          document.head.appendChild(s);
+          s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
         });
-        f3 = (window.familyChart || window.f3);
+        return (window.familyChart || window.f3);
       }
-      return f3;
+    }
+
+    function hasAnyFamily(data) {
+      // At least one spouse pair OR a parent/child link
+      return data.some(d => {
+        const r = d?.rels || {};
+        return (r?.spouses?.length > 0) || r?.father || r?.mother || (r?.children?.length > 0);
+      });
+    }
+
+    function renderCardsMode(data) {
+      // Show simple cards for standalone people
+      const html = data.map(d => {
+        const first = d?.data?.["first name"] || '';
+        const last = d?.data?.["last name"] || '';
+        const bday = d?.data?.["birthday"] || '';
+        const unknown = !!d?.data?.unknown || d?.data?.gender === 'U' || !d?.data?.gender;
+        return `
+          <div class="card">
+            ${unknown ? '<span class="badge-unknown" title="Gender not set"></span>' : ''}
+            <h3>${(first + ' ' + last).trim() || 'Unnamed'}</h3>
+            <div class="muted">${bday ? `Born ${bday}` : '&nbsp;'}</div>
+          </div>
+        `;
+      }).join('');
+      cardsGrid.innerHTML = html;
+      // Toggle visibility
+      document.querySelector(chartHostSel).style.display = 'none';
+      cardsHost.style.display = 'block';
+      statusEl.textContent = '';
     }
 
     async function main() {
-      // 1) Get ?code=...
+      // 1) Get ?code
       const params = new URLSearchParams(location.search);
       const code = params.get('code');
       if (!code) {
@@ -57,25 +129,12 @@
         return;
       }
 
-      // 2) Load library
-      let f3;
-      try {
-        f3 = await loadFamilyChartLib();
-      } catch (e) {
-        showError('Could not load family-chart from CDN.', e);
-        return;
-      }
-      if (!f3) {
-        showError('family-chart library not available.');
-        return;
-      }
-
-      // 3) Fetch API
+      // 2) Fetch API
       let api;
       try {
         const res = await fetch(`/api/tree?code=${encodeURIComponent(code)}`, { cache: 'no-store' });
         if (!res.ok) {
-          const txt = await res.text().catch(() => '');
+          const txt = await res.text().catch(()=>'');
           showError(`Could not load this tree (HTTP ${res.status}).`, txt);
           return;
         }
@@ -88,27 +147,42 @@
 
       if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
 
-      // 4) Prep data for the chart:
-      //    - Keep 'U' (unknown) in a flag
-      //    - Coerce 'U' -> 'M' only for the layout engine so it won’t crash
+      // 3) Prep data (neutral gender supported)
       const prepped = (api.persons || []).map(d => {
         const g = d?.data?.gender;
         const isUnknown = (g === 'U' || g === undefined || g === null || g === '');
-        const layoutGender = isUnknown ? 'M' : g;
+        const layoutGender = isUnknown ? 'M' : g; // chart needs 'M'|'F'; we only coerce for chart mode
         return { ...d, data: { ...d.data, gender: layoutGender, unknown: isUnknown } };
       });
 
       if (!prepped.length) {
         statusEl.innerHTML = `No people in this tree yet. Add someone via WhatsApp, then refresh.<br>
         Tip: send <code>Add Alice born 1950</code>`;
-        // No render call when empty to avoid "No data" error.
         return;
       }
 
-      // 5) Render
+      // 4) If there are no relationships yet, SHOW CARDS MODE instead of chart
+      if (!hasAnyFamily(prepped)) {
+        renderCardsMode(prepped);
+        return;
+      }
+
+      // 5) Otherwise render full chart
+      let f3;
+      try {
+        f3 = await loadFamilyChartLib();
+      } catch (e) {
+        showError('Could not load family-chart from CDN.', e);
+        return;
+      }
+      if (!f3) {
+        showError('family-chart library not available.');
+        return;
+      }
+
       try {
         statusEl.textContent = '';
-        const chart = f3.createChart(rootSel, { data: prepped })
+        const chart = f3.createChart(chartHostSel, { data: prepped })
           .setTransitionTime(900)
           .setCardXSpacing(250)
           .setCardYSpacing(150);
@@ -118,20 +192,17 @@
 
         chart.updateTree({ initial: true });
 
-        // Optional: decorate unknown gender with a small gray dot
-        const host = document.querySelector(rootSel);
+        // Optional: mark unknowns with a dot
+        const host = document.querySelector(chartHostSel);
         host.querySelectorAll('.f3-card').forEach((el, i) => {
           const item = prepped[i];
           if (item?.data?.unknown) {
             el.setAttribute('data-unknown', '1');
             const dot = document.createElement('div');
             dot.style.position = 'absolute';
-            dot.style.top = '6px';
-            dot.style.right = '6px';
-            dot.style.width = '8px';
-            dot.style.height = '8px';
-            dot.style.borderRadius = '50%';
-            dot.style.background = '#aaa';
+            dot.style.top = '6px'; dot.style.right = '6px';
+            dot.style.width = '8px'; dot.style.height = '8px';
+            dot.style.borderRadius = '50%'; dot.style.background = '#aaa';
             dot.title = 'Gender not set';
             el.style.position = 'relative';
             el.appendChild(dot);
@@ -142,7 +213,6 @@
       }
     }
 
-    // Kick off
     main();
   </script>
 </body>
