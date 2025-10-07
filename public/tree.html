@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Family Tree</title>
 
+  <!-- family-chart base styles -->
   <link rel="stylesheet" href="/family-chart.css" />
+  <!-- d3 (peer dep for family-chart UMD) -->
   <script src="https://unpkg.com/d3@7"></script>
 
   <style>
@@ -15,38 +17,48 @@
       --female:#b9838e;
     }
     body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+
+    /* Header (title + code + legend) */
     #Header {
       display:flex; justify-content:space-between; align-items:center;
       padding:12px 16px; border-bottom:1px solid #2b2b2b; background:rgba(0,0,0,.15);
       position:sticky; top:0; z-index:5; backdrop-filter: blur(6px);
     }
     .title { font-weight:600; }
-    .code { color:var(--muted); font-size:12px; margin-top:2px; }
+    .code  { color:var(--muted); font-size:12px; margin-top:2px; }
     #Legend { display:flex; gap:14px; align-items:center; font-size:13px; color:#ddd; }
     .dot { display:inline-block; width:12px; height:12px; border-radius:50%; margin-right:6px; vertical-align:middle; }
-    .dot.m { background:var(--male); border:1px solid #cfd9df22; }
+    .dot.m { background:var(--male);   border:1px solid #cfd9df22; }
     .dot.f { background:var(--female); border:1px solid #cfd9df22; }
-    .dot.u { background:#888; border:1px solid #ffffff22; }
+    .dot.u { background:#888;          border:1px solid #ffffff22; }
 
     #Status { padding:12px 16px; font-size:14px; opacity:.85; }
+
+    /* family-chart canvas */
     #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
 
-    /* cards mode (for unlinked people and/or when no relationships yet) */
+    /* Cards mode (for unlinked people and/or when no relationships yet) */
     #CardsMode { padding:16px; }
     .cards-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
-    .card { position:relative; background:var(--panel); border:1px solid var(--panel-border); border-radius:12px; padding:14px; box-shadow:0 4px 14px rgba(0,0,0,0.25); }
+    .card {
+      position:relative; background:var(--panel); border:1px solid var(--panel-border);
+      border-radius:12px; padding:14px; box-shadow:0 4px 14px rgba(0,0,0,0.25);
+    }
     .card h3 { margin:0 0 6px; font-size:16px; line-height:1.3; }
     .card .muted { color:var(--muted); font-size:12px; }
     .badge-unknown { position:absolute; top:8px; right:8px; width:8px; height:8px; border-radius:50%; background:#aaa; }
     .hint { padding:10px 0 0; line-height:1.5; color:#ddd; }
     code { background:#333; padding:2px 6px; border-radius:4px; }
+    /* tint orphan cards by gender */
+    .card.m { box-shadow: inset 0 0 0 2px rgba(127,163,178,.35); }
+    .card.f { box-shadow: inset 0 0 0 2px rgba(185,131,142,.45); }
 
     /* Share button (bottom-left) */
     #ShareWrap { position:fixed; left:16px; bottom:16px; z-index:5; display:flex; gap:10px; align-items:center; }
     .btn { border:1px solid #4a4a4a; background:#2b2b2b; color:#ddd; padding:8px 12px; border-radius:10px; font-size:13px; cursor:pointer; }
     .btn:hover { background:#333; }
 
-    /* Ensure Family-Chart HTML cards show both lines comfortably */
+    /* Make sure card second line has room */
     .f3 .card-html .line { min-height:18px; }
   </style>
 </head>
@@ -97,7 +109,6 @@
       console.error(msg, err || '');
       statusEl.innerHTML = `${msg}<br><small>Open Console for details.</small>`;
     };
-
     const waShareLink = (url) => `https://wa.me/?text=${encodeURIComponent(`Open our family tree: ${url}`)}`;
 
     function hasAnyFamily(persons){
@@ -123,35 +134,66 @@
       };
     }
 
-    // --- robust data helpers ---
-    const getBirthday = (d) =>
-      d?.data?.["birthday"] || d?.data?.["dob_dmy"] || d?.data?.["birth date"] || "";
+    /* ---------- robust data helpers ---------- */
+    function canonGender(g){
+      if (g == null) return 'U';
+      const s = String(g).trim().toLowerCase();
+      if (!s) return 'U';
+      if (/^(f|female|woman|girl)$/.test(s)) return 'F';
+      if (/^(m|male|man|boy)$/.test(s)) return 'M';
+      if (s === 'u' || s === 'unknown' || s === 'unspecified' || s === 'other') return 'U';
+      return 'U';
+    }
+    function nameParts(d){
+      const first = d?.data?.['first name'];
+      const last  = d?.data?.['last name'];
+      if (first || last) return { first:first||'', last:last||'' };
+      const pn = d?.data?.primary_name || '';
+      const parts = String(pn).trim().split(/\s+/).filter(Boolean);
+      if (!parts.length) return { first:'', last:'' };
+      if (parts.length === 1) return { first:parts[0], last:'' };
+      return { first:parts.slice(0,-1).join(' '), last:parts.at(-1) };
+    }
+    function getBirthdayRaw(d){
+      return d?.data?.['birthday'] ?? d?.data?.['dob_dmy'] ?? d?.data?.['birth date'] ?? '';
+    }
+    function normalizeBirthday(v){
+      if (v == null) return '';
+      const s = String(v).trim();
+      // Accept YYYY, YYYY-MM, YYYY-MM-DD; anything else: return as-is
+      return s;
+    }
 
     function prepPersons(apiPersons){
       return (apiPersons||[]).map(d=>{
-        const g = d?.data?.gender;
-        const unknown = (g==='U'||g===undefined||g===null||g==='');
-        // normalize the birthday key so CardHtml can always find it
-        const birthday = getBirthday(d);
+        const { first, last } = nameParts(d);
+        const cg = canonGender(d?.data?.gender);               // 'M' | 'F' | 'U'
+        const birthday = normalizeBirthday(getBirthdayRaw(d)); // normalized string
+        const layoutGender = (cg === 'U') ? 'M' : cg;           // family-chart requires 'M'|'F'
         return {
           ...d,
           data: {
             ...d.data,
-            gender: unknown ? 'M' : g,  // ONLY for layout; we keep neutrality with a flag
-            unknown,
-            birthday,                    // ensure the field exists
+            'first name': first,
+            'last name':  last,
+            gender: layoutGender,   // used by family-chart to pick color
+            gender_canon: cg,       // our canonical value for UI tinting
+            unknown: (cg === 'U'),
+            birthday,               // always present for card display
           }
         };
       });
     }
+    /* ---------- end helpers ---------- */
 
     function renderCards(list, mode) {
       const html = list.map(d=>{
-        const first=d?.data?.["first name"]||'', last=d?.data?.["last name"]||'';
-        const bday=getBirthday(d);
-        const unknown=d?.data?.unknown || d?.data?.gender==='U' || !d?.data?.gender;
-        return `<div class="card">
-          ${unknown ? '<span class="badge-unknown" title="Gender not set"></span>' : ''}
+        const first=d?.data?.['first name']||'', last=d?.data?.['last name']||'';
+        const bday=d?.data?.birthday||'';
+        const cg  = d?.data?.gender_canon || 'U';        // 'M'|'F'|'U'
+        const cls = (cg==='M') ? 'm' : (cg==='F' ? 'f' : '');
+        return `<div class="card ${cls}">
+          ${cg==='U' ? '<span class="badge-unknown" title="Gender not set"></span>' : ''}
           <h3>${(first+' '+last).trim() || 'Unnamed'}</h3>
           <div class="muted">${bday?`Born ${bday}`:'&nbsp;'}</div>
         </div>`;
@@ -175,7 +217,8 @@
       catch (e) {
         console.warn('ESM failed; trying UMD…', e);
         await new Promise((ok, fail)=>{
-          const s=document.createElement('script'); s.src='https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
+          const s=document.createElement('script');
+          s.src='https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
           s.onload=ok; s.onerror=fail; document.head.appendChild(s);
         });
         return window.familyChart || window.f3;
@@ -187,19 +230,21 @@
 
       // Header + share
       const joinUrl = `${location.origin}/tree.html?code=${api?.tree?.join_code||code}`;
+      document.title = `Family Tree — ${api?.tree?.name || '—'}`;
       treeNameEl.textContent = `Family Tree Name: ${api?.tree?.name || '—'}`;
       treeCodeEl.textContent = api?.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
       shareWA.href = waShareLink(joinUrl);
       shareBtn.onclick = async () => {
         try {
-          if (navigator.share) await navigator.share({ title: api?.tree?.name || 'Family Tree', text: 'Open our family tree', url: joinUrl });
-          else location.href = waShareLink(joinUrl);
+          if (navigator.share) {
+            await navigator.share({ title: api?.tree?.name || 'Family Tree', text: 'Open our family tree', url: joinUrl });
+          } else {
+            location.href = waShareLink(joinUrl);
+          }
         } catch {}
       };
 
-      if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
-
-      // Prepare people (ensure gender + birthday present for the chart)
+      // Normalize people for viewer
       const persons = prepPersons(api.persons);
 
       if (!persons.length) {
@@ -209,7 +254,7 @@
         return;
       }
 
-      // If *no* relationships yet, cards-only
+      // No relationships yet → cards-only
       if (!hasAnyFamily(persons)) {
         statusEl.textContent = '';
         document.querySelector(chartSel).style.display='none';
@@ -217,7 +262,7 @@
         return;
       }
 
-      // Otherwise chart + any unlinked cards underneath
+      // Chart + orphans
       const { linkedArr, orphansArr } = splitLinkedOrphans(persons);
       const f3 = await loadFamilyChartLib();
       if (!f3) { showError('family-chart library not available.'); return; }
@@ -231,13 +276,13 @@
         .setCardXSpacing(250)
         .setCardYSpacing(150);
 
-      // Show name on row 1 and our normalized "birthday" on row 2
+      // Use normalized keys: first/last on line 1, "birthday" on line 2
       chart.setCard(f3.CardHtml)
-        .setCardDisplay([["first name","last name"],["birthday"]]);
+        .setCardDisplay([['first name','last name'],['birthday']]);
 
       chart.updateTree({ initial:true });
 
-      // Orphans (still unlinked) as cards below
+      // Orphans grid (still-unlinked people)
       renderCards(orphansArr, 'orphans');
     }
 
