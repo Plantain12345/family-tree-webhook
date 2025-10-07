@@ -12,128 +12,63 @@
   <script src="https://unpkg.com/d3@7"></script>
 
   <style>
-    /* You can theme these later */
     body { margin: 0; background:#212121; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
+    #Status { padding: 16px; font-size: 14px; opacity:.85; }
   </style>
 </head>
 <body>
+  <div id="Status">Loading…</div>
   <div id="FamilyChart" class="f3"></div>
 
   <script type="module">
     // Use the published ESM build from unpkg (no extra build step needed)
     import f3 from 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.esm.js';
 
+    const statusEl = document.getElementById('Status');
+    const rootSel = '#FamilyChart';
+
     // 1) Get ?code=XXXXXX from the URL
     const params = new URLSearchParams(location.search);
     const code = params.get('code');
     if (!code) {
-      document.getElementById('FamilyChart').innerHTML = '<p style="padding:20px">Missing ?code=… in the URL.</p>';
+      statusEl.textContent = 'Missing ?code=… in the URL.';
       throw new Error('Missing join code');
     }
 
-    // 2) Load your API data
-    const res = await fetch(`/api/tree?code=${encodeURIComponent(code)}`);
-    if (!res.ok) {
-      document.getElementById('FamilyChart').innerHTML = '<p style="padding:20px">Could not load this tree.</p>';
-      throw new Error('Tree fetch failed');
-    }
-    const api = await res.json();
-
-    // 3) Map your API shape -> family-chart "Data" shape
-    // family-chart wants an object { data: Datum[] }
-    // Each Datum = { id, gender, data: {...display fields...}, rels: { father?, mother?, spouses:[], children:[] } }
-    const fcData = { data: mapToFamilyChart(api) };
-
-    // 4) Render it
-    const chart = f3.createChart('#FamilyChart', fcData)
-      .setTransitionTime(900)
-      .setCardXSpacing(250)
-      .setCardYSpacing(150);
-
-    // Use HTML cards and choose which fields to show on each line:
-    chart.setCard(f3.CardHtml)
-      .setCardDisplay([["first name","last name"],["birthday"]]);
-
-    chart.updateTree({ initial: true });
-
-    // ------- mapper: api -> family-chart -------
-    function mapToFamilyChart(api) {
-      // Expecting api like: { persons: [...], relationships: [...], tree: {...}, families:[...] }
-      // We'll compute rels from relationships.
-
-      const persons = api.persons || [];
-
-      // Index people by id
-      const byId = new Map(persons.map(p => [p.id, p]));
-
-      // Build empty rels for everyone
-      const rels = {};
-      for (const p of persons) {
-        rels[p.id] = { father: undefined, mother: undefined, spouses: [], children: [] };
+    try {
+      // 2) Load your API data (already in Family-Chart format)
+      const res = await fetch(`/api/tree?code=${encodeURIComponent(code)}`);
+      if (!res.ok) {
+        statusEl.textContent = 'Could not load this tree.';
+        throw new Error('Tree fetch failed');
       }
+      const api = await res.json();
 
-      // Walk relationships to fill spouse/child links
-      for (const r of api.relationships || []) {
-        const { kind, a, b } = r;
+      // Optional: set page title from tree name
+      if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
 
-        if (kind === 'parent_of') {
-          // a = parent, b = child
-          rels[a]?.children.push(b);
+      // 3) Family-Chart wants { data: Datum[] } where each Datum has:
+      //    { id, data:{ gender:'M'|'F', ... }, rels:{ father?, mother?, spouses[], children[] } }
+      // We already built that server-side in /api/tree.js as `persons`.
+      const fcData = { data: api.persons || [] };
 
-          // Set father/mother if we know parent gender
-          const parent = byId.get(a);
-          if (parent?.gender?.toLowerCase() === 'male' || parent?.gender?.toLowerCase() === 'm') {
-            rels[b].father = a;
-          } else if (parent?.gender?.toLowerCase() === 'female' || parent?.gender?.toLowerCase() === 'f') {
-            rels[b].mother = a;
-          } else {
-            // Unknown gender -> leave both unset (family-chart can still draw)
-          }
-        }
+      // 4) Render it
+      const chart = f3.createChart(rootSel, fcData)
+        .setTransitionTime(900)
+        .setCardXSpacing(250)
+        .setCardYSpacing(150);
 
-        if (['spouse_of','partner_of','divorced_from'].includes(kind)) {
-          // treat these as partner bars for layout
-          pushUnique(rels[a].spouses, b);
-          pushUnique(rels[b].spouses, a);
-        }
-        // (If you want separated_from / affair_with to also anchor a bar, add them here)
-      }
+      // Use HTML cards and choose which fields to show on each line:
+      chart.setCard(f3.CardHtml)
+        .setCardDisplay([["first name","last name"],["birthday"]]);
 
-      // Split your primary_name into first/last if possible, else put everything in "first name"
-      function splitName(name) {
-        if (!name) return { first: '', last: '' };
-        const parts = String(name).trim().split(/\s+/);
-        return parts.length > 1
-          ? { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1] }
-          : { first: parts[0], last: '' };
-      }
-
-      // Produce the Data[]
-      return persons.map(p => {
-        const nm = splitName(p.primary_name);
-        return {
-          id: p.id,
-          gender: normaliseGender(p.gender),         // "male" | "female" | undefined
-          data: {
-            "first name": nm.first,
-            "last name":  nm.last,
-            "birthday":   p.dob_dmy || "",           // family-chart examples use this key
-            // you can add more fields here; extra keys are fine
-          },
-          rels: rels[p.id]
-        };
-      });
-
-      function pushUnique(arr, v) { if (!arr.includes(v)) arr.push(v); }
-
-      function normaliseGender(g) {
-        if (!g) return undefined;
-        g = String(g).toLowerCase();
-        if (g.startsWith('m')) return 'male';
-        if (g.startsWith('f')) return 'female';
-        return undefined; // renders as genderless card
-      }
+      chart.updateTree({ initial: true });
+      statusEl.textContent = '';
+      console.log('fcData', fcData);
+    } catch (err) {
+      console.error(err);
+      // leave the status text as-is if we hit an error
     }
   </script>
 </body>
