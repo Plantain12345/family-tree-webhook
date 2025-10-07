@@ -7,11 +7,13 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method Not Allowed" });
     }
 
+    // --- validate code ---
     const code = (req.query.code || "").toString().trim().toUpperCase();
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       return res.status(400).json({ error: "Bad code" });
     }
 
+    // --- load tree by join_code ---
     const { data: tree, error: tErr } = await db
       .from("trees")
       .select("id, name, join_code, created_at")
@@ -23,144 +25,153 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Tree not found" });
     }
 
-    const [{ data: peopleRows, error: pErr }, { data: relsRows, error: rErr }] =
-      await Promise.all([
-        db
-          .from("persons")
-          .select("id, primary_name, dob_dmy, gender")
-          .eq("tree_id", tree.id),
-        db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
-      ]);
+    // --- load persons and relationships for tree ---
+    const [
+      { data: peopleRows, error: pErr },
+      { data: relsRows, error: rErr },
+    ] = await Promise.all([
+      db
+        .from("persons")
+        .select("id, primary_name, dob_dmy, dod_dmy, gender")
+        .eq("tree_id", tree.id),
+      db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
+    ]);
 
     if (pErr) console.error("API /tree persons error:", pErr);
     if (rErr) console.error("API /tree relationships error:", rErr);
 
-    const people =
-      (peopleRows || []).map((p) => ({
-        ...p,
-        normalized_name: normalizeNameKey(p.primary_name),
-        normalized_dob: normalizeDob(p.dob_dmy), // sortable numeric or null
-      })) || [];
+    const people = (peopleRows || []).map((p) => ({
+      ...p,
+      normalized_name: normalizeNameKey(p.primary_name),
+      normalized_dob: normalizeDob(p.dob_dmy),
+    }));
 
-    const rels = relsRows || [];
+    const original_relationships = relsRows || [];
 
-    // Build GEDCOM-like family groupings (partners + children)
-    const families = buildFamilies(people, rels);
+    // --- normalize relationships to only {parent_of, spouse_of} ---
+    // We collapse partner kinds (spouse_of | partner_of | divorced_from) -> spouse_of
+    const partnerKinds = new Set(["spouse_of", "partner_of", "divorced_from"]);
+    const normalized_relationships = [];
+    const personIds = new Set(people.map((p) => String(p.id)));
 
-    return res.status(200).json({ tree, people, relationships: rels, rels, families });
+    for (const rel of original_relationships) {
+      if (!rel) continue;
+      const a = rel.a != null ? String(rel.a) : null;
+      const b = rel.b != null ? String(rel.b) : null;
+      if (!a || !b || !personIds.has(a) || !personIds.has(b)) continue;
+
+      if (rel.kind === "parent_of") {
+        normalized_relationships.push({ kind: "parent_of", a, b });
+      } else if (partnerKinds.has(rel.kind)) {
+        // normalize all partner-status to 'spouse_of' for the layout engine
+        normalized_relationships.push({ kind: "spouse_of", a, b });
+      }
+      // any other kinds are ignored for Option A viewer (can be re-added later)
+    }
+
+    // --- build 'rels' per person (father/mother/spouses/children) ---
+    const byId = new Map(people.map((p) => [String(p.id), p]));
+    const relsMap = new Map(
+      people.map((p) => [
+        String(p.id),
+        { father: undefined, mother: undefined, spouses: [], children: [] },
+      ])
+    );
+
+    // 1) spouse links (undirected)
+    for (const rel of normalized_relationships) {
+      if (rel.kind !== "spouse_of") continue;
+      const { a, b } = rel;
+      const ra = relsMap.get(a);
+      const rb = relsMap.get(b);
+      if (ra && !ra.spouses.includes(b)) ra.spouses.push(b);
+      if (rb && !rb.spouses.includes(a)) rb.spouses.push(a);
+    }
+
+    // 2) parent/child links (directed)
+    // Also try to assign father/mother if parent has a known gender.
+    for (const rel of normalized_relationships) {
+      if (rel.kind !== "parent_of") continue;
+      const { a: parentId, b: childId } = rel;
+      const parent = byId.get(parentId);
+      const childRels = relsMap.get(childId);
+      const parentRels = relsMap.get(parentId);
+      if (!parent || !childRels || !parentRels) continue;
+
+      // push child under parent
+      if (!parentRels.children.includes(childId)) parentRels.children.push(childId);
+
+      // set father/mother on child if we can infer from parent.gender
+      const g = normalizeGenderToMF(parent.gender);
+      if (g === "M") {
+        // set father only if empty or matches same parentId
+        if (!childRels.father || childRels.father === parentId) {
+          childRels.father = parentId;
+        }
+      } else if (g === "F") {
+        if (!childRels.mother || childRels.mother === parentId) {
+          childRels.mother = parentId;
+        }
+      }
+      // if unknown gender, we leave both unset (tree still renders fine)
+    }
+
+    // --- final persons array in Family-Chart 'Datum' shape ---
+    // We keep your raw text fields but split primary_name to first/last for nicer cards.
+    const fcPersons = people.map((p) => {
+      const { first, last } = splitName(p.primary_name);
+      const genderMF = normalizeGenderToMF(p.gender); // 'M' | 'F' | undefined
+      const rels = relsMap.get(String(p.id)) || {
+        father: undefined,
+        mother: undefined,
+        spouses: [],
+        children: [],
+      };
+      return {
+        id: String(p.id),
+        // Family-Chart expects gender inside 'data'
+        data: {
+          gender: genderMF, // 'M' | 'F' (undefined is ok too)
+          "first name": first,
+          "last name": last,
+          "birthday": p.dob_dmy || "",
+          "death date": p.dod_dmy || "",
+          // Keep anything else you might later want to display:
+          primary_name: p.primary_name || "",
+        },
+        rels,
+      };
+    });
+
+    // Response: clean FC format + original rows for reference
+    return res.status(200).json({
+      tree,
+      persons: fcPersons,
+      relationships: normalized_relationships,
+      original_relationships,
+    });
   } catch (e) {
     console.error("API /tree fatal error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 }
 
-/* ----------------------------- families builder ----------------------------- */
+/* ------------------------------ local helpers ------------------------------ */
 
-function buildFamilies(people, rels) {
-  const personIds = new Set((people || []).map((p) => String(p.id)));
-  const partnerKinds = new Set(["spouse_of", "partner_of", "divorced_from"]);
-  const parentKind = "parent_of";
-
-  // Map "A|B" -> { partners:[A,B], kinds:Set(), children:Set() }
-  const partnerPairs = new Map();
-  // Map childId -> Set(parentIds)
-  const childParents = new Map();
-
-  for (const rel of rels || []) {
-    if (!rel) continue;
-    const a = rel.a != null ? String(rel.a) : null;
-    const b = rel.b != null ? String(rel.b) : null;
-    // For directed relationships, b might not be a person (e.g., parent_of event)
-    if (partnerKinds.has(rel.kind)) {
-      if (!a || !b || !personIds.has(a) || !personIds.has(b)) continue;
-      const key = pairKey(a, b);
-      let entry = partnerPairs.get(key);
-      if (!entry) {
-        entry = { partners: [a, b], kinds: new Set(), children: new Set() };
-        partnerPairs.set(key, entry);
-      }
-      entry.kinds.add(rel.kind);
-    } else if (rel.kind === parentKind) {
-      if (!a || !b || !personIds.has(a) || !personIds.has(b)) continue;
-      if (!childParents.has(b)) childParents.set(b, new Set());
-      childParents.get(b).add(a);
-    }
-  }
-
-
-  // Attach children to partner pairs when BOTH parents are present
-  for (const [childId, parentsSet] of childParents.entries()) {
-    const parents = Array.from(parentsSet);
-    if (parents.length < 2) continue;
-
-    const sorted = parents
-      .map(String)
-      .filter((id) => personIds.has(id))
-      .sort(); // stable pair key
-
-    outer: for (let i = 0; i < sorted.length - 1; i++) {
-      for (let j = i + 1; j < sorted.length; j++) {
-        const key = pairKey(sorted[i], sorted[j]);
-        const pair = partnerPairs.get(key);
-        if (pair) {
-          pair.children.add(childId);
-          // Mark parents as handled for this child to avoid single-parent family creation
-          parentsSet.delete(sorted[i]);
-          parentsSet.delete(sorted[j]);
-          break outer;
-        }
-      }
-    }
-  }
-
-  const families = [];
-  let counter = 1;
-
-  // Convert partner pairs to family objects
-  for (const pair of partnerPairs.values()) {
-    const kinds = Array.from(pair.kinds);
-    const status = kinds.includes("divorced_from") ? "divorced" : "partnered";
-    families.push({
-      id: `fam_${counter++}`,
-      partners: pair.partners,                // [idA, idB]
-      children: Array.from(pair.children),    // [childId...]
-      partnership_kinds: kinds,               // e.g., ["spouse_of"]
-      status,                                 // "partnered" | "divorced"
-    });
-  }
-
-  // Make single-parent families for remaining parent links
-  const singleParentFamilies = new Map(); // parentId -> family
-  for (const [childId, parentsSet] of childParents.entries()) {
-    if (!parentsSet || !parentsSet.size) continue;
-    for (const parentIdRaw of parentsSet) {
-      const parentId = String(parentIdRaw);
-      if (!personIds.has(parentId)) continue;
-      let fam = singleParentFamilies.get(parentId);
-      if (!fam) {
-        fam = {
-          id: `fam_${counter++}`,
-          partners: [parentId],
-          children: [],
-          partnership_kinds: [],
-          status: "single",
-        };
-        singleParentFamilies.set(parentId, fam);
-      }
-      fam.children.push(childId);
-    }
-  }
-
-  families.push(...singleParentFamilies.values());
-  return families;
+function splitName(name) {
+  if (!name) return { first: "", last: "" };
+  const parts = String(name).trim().split(/\s+/);
+  if (parts.length === 1) return { first: parts[0], last: "" };
+  return { first: parts.slice(0, -1).join(" "), last: parts[parts.length - 1] };
 }
 
-
-function pairKey(a, b) {
-  return [String(a), String(b)].sort().join("|");
+function normalizeGenderToMF(g) {
+  if (!g) return undefined;
+  const s = String(g).trim().toLowerCase();
+  if (s.startsWith("m")) return "M";
+  if (s.startsWith("f")) return "F";
+  return undefined;
 }
-
-/* ------------------------ local helpers (no date-utils) ------------------------ */
 
 function normalizeNameKey(name) {
   if (!name) return "";
