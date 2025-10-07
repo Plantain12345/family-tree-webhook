@@ -19,60 +19,102 @@
   <div id="Status">Loading…</div>
   <div id="FamilyChart" class="f3"></div>
 
-  <script type="module">
-    const statusEl = document.getElementById('Status');
-    const rootSel = '#FamilyChart';
+ <script type="module">
+  const statusEl = document.getElementById('Status');
+  const rootSel = '#FamilyChart';
 
-    const params = new URLSearchParams(location.search);
-    const code = params.get('code');
-    if (!code) {
-      statusEl.textContent = 'Missing ?code=… in the URL.';
-      throw new Error('Missing join code');
-    }
+  function showError(msg, err) {
+    console.error(msg, err || '');
+    statusEl.innerHTML = `${msg}<br><small>Open Console for details.</small>`;
+  }
 
-    function showError(msg, err) {
-      console.error(msg, err || '');
-      statusEl.innerHTML = `${msg}<br><small>Open Console for details.</small>`;
-    }
+  // Load library (ESM with UMD fallback)
+  let f3;
+  try {
+    f3 = (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
+  } catch (e) {
+    console.warn('ESM import failed, trying UMD…', e);
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
+      s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
+    }).catch(err => showError('Could not load family-chart from CDN.', err));
+    f3 = (window.familyChart || window.f3);
+  }
+  if (!f3) { showError('family-chart library not available.'); throw new Error('family-chart not loaded'); }
 
-    let f3;
-    try {
-      f3 = (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
-    } catch (e) {
-      console.warn('ESM import failed, trying UMD…', e);
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
-        s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
-      }).catch(err => showError('Could not load family-chart from CDN.', err));
-      f3 = (window.familyChart || window.f3);
-    }
-    if (!f3) { showError('family-chart library not available.'); throw new Error('family-chart not loaded'); }
+  // Get code
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+  if (!code) {
+    statusEl.textContent = 'Missing ?code=… in the URL.';
+    throw new Error('Missing join code');
+  }
 
-    // Fetch your API (already Family-Chart shape)
-    const url = `/api/tree?code=${encodeURIComponent(code)}`;
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) {
-      showError(`Could not load this tree (HTTP ${res.status}).`, await res.text().catch(()=>'')); 
-      throw new Error('Tree fetch failed');
-    }
-    const api = await res.json();
-    console.log('API payload', api);
+  // Fetch API
+  const res = await fetch(`/api/tree?code=${encodeURIComponent(code)}`, { cache: 'no-store' });
+  if (!res.ok) {
+    showError(`Could not load this tree (HTTP ${res.status}).`, await res.text().catch(()=>'')); 
+    throw new Error('Tree fetch failed');
+  }
+  const api = await res.json();
+  console.log('API payload', api);
+  if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
 
-    if (api?.tree?.name) document.title = `Family Tree — ${api.tree.name}`;
+  // Prepare data for family-chart:
+  // - keep 'U' (unknown) in a flag
+  // - coerce 'U' -> 'M' for layout only (so the lib won’t crash)
+  const prepped = (api.persons || []).map(d => {
+    const g = d?.data?.gender;
+    const isUnknown = (g === 'U' || g === undefined || g === null || g === '');
+    const layoutGender = isUnknown ? 'M' : g;  // layout-safe
+    return {
+      ...d,
+      data: { ...d.data, gender: layoutGender, unknown: isUnknown }
+    };
+  });
 
-    const data = Array.isArray(api?.persons) ? api.persons : [];
-    if (!data.length) {
-      statusEl.innerHTML = `No people in this tree yet. Add someone via WhatsApp, then refresh.<br>
-      Tip: send <code>Add Alice born 1950</code>`;
-      // Do NOT call updateTree when there is no data — family-chart throws “No data”.
-      return;
-    }
+  if (!prepped.length) {
+    statusEl.innerHTML = `No people in this tree yet. Add someone via WhatsApp, then refresh.<br>
+    Tip: send <code>Add Alice born 1950</code>`;
+    return;
+  }
 
-    statusEl.textContent = '';
-    const chart = f3.createChart(rootSel, { data })
-      .setTransitionTime(900)
-      .setCardXSpacing(250)
-      .setCardYSpacing(150);
+  statusEl.textContent = '';
+  const chart = f3.createChart(rootSel, { data: prepped })
+    .setTransitionTime(900)
+    .setCardXSpacing(250)
+    .setCardYSpacing(150);
 
-    chart.setCard(f3.Ca
+  // Show first/last on first line, birthday second line
+  chart.setCard(f3.CardHtml)
+    .setCardDisplay([["first name","last name"],["birthday"]]);
+
+  chart.updateTree({ initial: true });
+
+  // Optional: visually mark unknown gender cards with a subtle badge
+  // (purely cosmetic; remove if you don't want)
+  try {
+    const host = document.querySelector(rootSel);
+    host.querySelectorAll('.f3-card').forEach((el, i) => {
+      const item = prepped[i];
+      if (item?.data?.unknown) {
+        el.setAttribute('data-unknown', '1');
+        // Add a tiny corner dot
+        const dot = document.createElement('div');
+        dot.style.position = 'absolute';
+        dot.style.top = '6px';
+        dot.style.right = '6px';
+        dot.style.width = '8px';
+        dot.style.height = '8px';
+        dot.style.borderRadius = '50%';
+        dot.style.background = '#aaa';
+        dot.title = 'Gender not set';
+        el.style.position = 'relative';
+        el.appendChild(dot);
+      }
+    });
+  } catch (e) {
+    console.warn('Badge render skipped:', e);
+  }
+</script>
