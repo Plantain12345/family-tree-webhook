@@ -120,7 +120,7 @@ export default async function handler(req, res) {
     // We keep your raw text fields but split primary_name to first/last for nicer cards.
     const fcPersons = people.map((p) => {
       const { first, last } = splitName(p.primary_name);
-      const genderMF = normalizeGenderToMF(p.gender); // 'M' | 'F' | undefined
+      const genderMF = normalizeGenderToMF(p.gender) ?? "U"; // 'M' | 'F' | 'U' (unknown)
       const rels = relsMap.get(String(p.id)) || {
         father: undefined,
         mother: undefined,
@@ -131,14 +131,13 @@ export default async function handler(req, res) {
         id: String(p.id),
         // Family-Chart expects gender inside 'data'
         data: {
-          gender: genderMF, // 'M' | 'F' (undefined is ok too)
+          gender: genderMF,    // now 'M' | 'F' | 'U'  
           "first name": first,
           "last name": last,
           "birthday": p.dob_dmy || "",
           "death date": p.dod_dmy || "",
-          // Keep anything else you might later want to display:
           primary_name: p.primary_name || "",
-        },
+        },        
         rels,
       };
     });
