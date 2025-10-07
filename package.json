@@ -1,11 +1,12 @@
 {
   "name": "family-tree-webhook",
-  "private": true,
+  "version": "1.0.0",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node api/webhook.js"
+  },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4",
-    "openai": "^4.56.0",
-    "cytoscape": "^3.27.0"
+    "@supabase/supabase-js": "^2.43.3"
   }
 }
