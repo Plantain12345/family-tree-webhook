@@ -2,7 +2,9 @@
 import {
   createTree,
   getTreeByCode,
-  listPersons,
+  getUserState,
+  setUserState,
+  findPersonByName,
   insertPerson,
   addRelationship
 } from "./_db.js";
@@ -16,7 +18,6 @@ const FOLLOW_UP_PROMPT =
 
 // ---------- Meta verification ----------
 export default async function handler(req, res) {
-  // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
   
@@ -68,15 +69,59 @@ async function processMessage(from, text) {
   if (!text) return "Please say something 🙂";
 
   const ops = parseOps(text);
+  
+  // Get user's current state
+  const userState = await getUserState(from);
 
-  if (ops.action === "create_tree") {
-    const tree = await createTree(from, ops.name);
-    return `✅ Created your family tree: "${tree.name}".\nYou can start by adding a person, like "Add Alice born 1950".\nView your tree any time at: ${BASE_URL}/tree.html?code=${tree.join_code}\n\n${FOLLOW_UP_PROMPT}`;
+  // --- HELP/MENU ---
+  if (ops.action === "help") {
+    return `📋 *Family Tree Bot Commands*
+
+*Getting Started:*
+• "Create tree called [name]" - Start a new family tree
+
+*Adding People:*
+• "Add [name] born [year]" - Add a new person
+• "Add [name]" - Add person without birth year
+
+*Creating Relationships:*
+• "[Name] is [Name]'s father/mother/son/daughter"
+• "Link [Name] and [Name] as spouses"
+• "[Name] is [Name]'s husband/wife"
+
+*Examples:*
+• "Create tree called Smith Family"
+• "Add John Smith born 1980"
+• "Add Mary Johnson born 1982"
+• "John is Mary's husband"
+• "Add baby Alice born 2010"
+• "Alice is John's daughter"
+
+*View Tree:*
+Your tree link will be sent after creation!`;
   }
 
+  // --- CREATE TREE ---
+  if (ops.action === "create_tree") {
+    const tree = await createTree(from, ops.name);
+    // Save this as user's active tree
+    await setUserState(from, tree.id, null, null);
+    
+    return `✅ Created your family tree: "${tree.name}"\n\n📋 Join Code: *${tree.join_code}*\n\nYou can start by adding a person:\n• "Add John born 1980"\n• "Add Mary"\n\n🌐 View your tree at:\n${BASE_URL}/tree.html?code=${tree.join_code}\n\n${FOLLOW_UP_PROMPT}`;
+  }
+
+  // For all other actions, we need an active tree
+  if (!userState?.tree_id) {
+    return "❌ You don't have an active tree. Create one first:\n• \"Create tree called Smith Family\"";
+  }
+
+  const tree = await getTreeByCode(null, userState.tree_id);
+  if (!tree) {
+    return "❌ Your active tree was not found. Please create a new one.";
+  }
+
+  // --- ADD PERSON ---
   if (ops.action === "add_person") {
-    const tree = await getTreeByCode(ops.tree_code || ops.active_tree_code);
-    if (!tree) return "❌ No active tree found.";
     const person = await insertPerson(
       tree.id,
       ops.first_name,
@@ -84,35 +129,73 @@ async function processMessage(from, text) {
       ops.gender,
       ops.birthday
     );
-    return `I've added ${person.data.first_name}${
-      person.data.birthday ? `, born ${person.data.birthday}` : ""
-    } to your family tree.\n\n${FOLLOW_UP_PROMPT}`;
+    
+    // Remember this person as the last one added
+    await setUserState(from, tree.id, person.id, `${ops.first_name} ${ops.last_name}`.trim());
+    
+    return `✅ I've added *${person.data.first_name}${person.data.last_name ? ' ' + person.data.last_name : ''}*${
+      person.data.birthday ? ` (born ${person.data.birthday})` : ""
+    } to your family tree.\n\nYou can now:\n• Add more people\n• Create relationships: "[Name] is [Name]'s father"\n\n${FOLLOW_UP_PROMPT}`;
   }
 
+  // --- SET GENDER ---
+  if (ops.action === "set_gender") {
+    const persons = await findPersonByName(tree.id, ops.first_name);
+    if (persons.length === 0) {
+      return `❌ I couldn't find anyone named "${ops.first_name}" in your tree.`;
+    }
+    
+    const person = persons[0];
+    await updatePersonGender(person.id, ops.gender);
+    
+    return `✅ Updated ${ops.first_name}'s gender to ${ops.gender === 'M' ? 'male' : 'female'}.\n\n${FOLLOW_UP_PROMPT}`;
+  }
+
+  // --- ADD RELATIONSHIP ---
   if (ops.action === "add_relationship") {
-    const tree = await getTreeByCode(ops.tree_code || ops.active_tree_code);
-    if (!tree) return "❌ No active tree found.";
-    await addRelationship(tree.id, ops.kind, ops.a_id, ops.b_id);
-    return `I've linked ${ops.a_name} as the ${ops.kind.replace(
-      "_",
-      " "
-    )} of ${ops.b_name} on the family tree.\n\n${FOLLOW_UP_PROMPT}`;
+    // Find person A
+    const personsA = await findPersonByName(tree.id, ops.a_name);
+    if (personsA.length === 0) {
+      return `❌ I couldn't find "${ops.a_name}" in your tree. Add them first:\n• "Add ${ops.a_name} born [year]"`;
+    }
+    if (personsA.length > 1) {
+      const names = personsA.map(p => `${p.data.first_name} ${p.data.last_name || ''} (born ${p.data.birthday || 'unknown'})`).join('\n• ');
+      return `❌ I found multiple people named "${ops.a_name}":\n• ${names}\n\nPlease use full names to be more specific.`;
+    }
+
+    // Find person B
+    const personsB = await findPersonByName(tree.id, ops.b_name);
+    if (personsB.length === 0) {
+      return `❌ I couldn't find "${ops.b_name}" in your tree. Add them first:\n• "Add ${ops.b_name} born [year]"`;
+    }
+    if (personsB.length > 1) {
+      const names = personsB.map(p => `${p.data.first_name} ${p.data.last_name || ''} (born ${p.data.birthday || 'unknown'})`).join('\n• ');
+      return `❌ I found multiple people named "${ops.b_name}":\n• ${names}\n\nPlease use full names to be more specific.`;
+    }
+
+    const personA = personsA[0];
+    const personB = personsB[0];
+
+    // Create the relationship
+    await addRelationship(tree.id, ops.kind, personA.id, personB.id);
+    
+    const kindDisplay = ops.kind.replace(/_/g, ' ');
+    return `✅ I've linked *${ops.a_name}* as the ${kindDisplay} of *${ops.b_name}*.\n\n🌐 View your tree:\n${BASE_URL}/tree.html?code=${tree.join_code}\n\n${FOLLOW_UP_PROMPT}`;
   }
 
-  return "I didn't quite understand that. Try: "Add John born 1980" or "Link John and Mary as spouses."";
+  return "❌ I didn't quite understand that. Try:\n• \"Add John born 1980\"\n• \"Link John and Mary as spouses\"\n• Type 'menu' for all commands";
 }
 
 // ---------- Outgoing message ----------
 async function sendWhatsAppMessage(to, text) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   
-  if (!token || !phoneNumberId) {
-    console.error("Missing WhatsApp credentials");
+  if (!token) {
+    console.error("Missing WhatsApp access token");
     return;
   }
   
-  const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
+  const url = "https://graph.facebook.com/v18.0/me/messages";
 
   const payload = {
     messaging_product: "whatsapp",
