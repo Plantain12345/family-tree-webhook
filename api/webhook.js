@@ -208,13 +208,19 @@ async function processMessage(from, text) {
 // ---------- Outgoing message ----------
 async function sendWhatsAppMessage(to, text) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   
   if (!token) {
     console.error("Missing WhatsApp access token");
     return;
   }
   
-  const url = "https://graph.facebook.com/v18.0/me/messages";
+  if (!phoneNumberId) {
+    console.error("Missing WhatsApp phone number ID");
+    return;
+  }
+  
+  const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
 
   const payload = {
     messaging_product: "whatsapp",
