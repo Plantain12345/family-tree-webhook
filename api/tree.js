@@ -1,10 +1,6 @@
 // api/tree.js
 import { db } from "./_db.js";
 
-// -----------------------------------------------------------------------------
-//  /api/tree?code=XXXXXX
-//  Returns a clean { tree, persons, relationships } for the chart and web UI
-// -----------------------------------------------------------------------------
 export default async function handler(req, res) {
   try {
     if (req.method !== "GET")
@@ -24,11 +20,11 @@ export default async function handler(req, res) {
     if (tErr || !tree)
       return res.status(404).json({ error: "Tree not found" });
 
-    // Fetch persons and relationships
+    // Fetch persons and relationships - FIXED column names
     const [{ data: personRows, error: pErr }, { data: relRows, error: rErr }] =
       await Promise.all([
         db.from("persons").select("id, data").eq("tree_id", tree.id),
-        db.from("relationships").select("a, b, kind").eq("tree_id", tree.id),
+        db.from("relationships").select("person_a_id, person_b_id, kind").eq("tree_id", tree.id),
       ]);
 
     if (pErr) console.error("Persons fetch error:", pErr);
@@ -45,8 +41,8 @@ export default async function handler(req, res) {
     const rels = relRows || [];
 
     for (const r of rels) {
-      const a = String(r.a);
-      const b = String(r.b);
+      const a = String(r.person_a_id);  // Changed from r.a
+      const b = String(r.person_b_id);  // Changed from r.b
       if (!byId.has(a) || !byId.has(b)) continue;
 
       if (r.kind === "parent_of") {
@@ -77,9 +73,6 @@ export default async function handler(req, res) {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
 function normalizePersonData(data) {
   if (!data) return {};
   const clean = {
@@ -101,7 +94,6 @@ function normalizeGender(g) {
 
 function normalizeBirthday(b) {
   if (!b) return "";
-  // Extract just the year if needed
   const match = b.match(/\d{4}/);
   return match ? match[0] : b;
 }
