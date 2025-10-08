@@ -6,7 +6,42 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 export const db = createClient(supabaseUrl, supabaseKey);
 
-// ---------- Helper functions ----------
+// ---------- User State Management ----------
+export async function getUserState(phone) {
+  const { data, error } = await db
+    .from("user_states")
+    .select("*")
+    .eq("phone", phone)
+    .single();
+
+  if (error && error.code !== 'PGRST116') {
+    console.error("Error fetching user state:", error);
+  }
+  
+  return data || null;
+}
+
+export async function setUserState(phone, tree_id, last_person_id, last_person_name) {
+  const { data, error } = await db
+    .from("user_states")
+    .upsert(
+      {
+        phone,
+        tree_id,
+        last_person_id,
+        last_person_name,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "phone" }
+    )
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+// ---------- Tree Management ----------
 export async function createTree(from, name) {
   const join_code = generateJoinCode();
   const { data, error } = await db
@@ -19,17 +54,27 @@ export async function createTree(from, name) {
   return data;
 }
 
-export async function getTreeByCode(code) {
-  const { data, error } = await db
-    .from("trees")
-    .select("*")
-    .eq("join_code", code)
-    .single();
+export async function getTreeByCode(code, tree_id = null) {
+  let query = db.from("trees").select("*");
+  
+  if (tree_id) {
+    query = query.eq("id", tree_id);
+  } else if (code) {
+    query = query.eq("join_code", code.toUpperCase());
+  } else {
+    return null;
+  }
 
-  if (error) throw error;
+  const { data, error } = await query.single();
+
+  if (error) {
+    if (error.code === 'PGRST116') return null; // Not found
+    throw error;
+  }
   return data;
 }
 
+// ---------- Person Management ----------
 export async function listPersons(tree_id) {
   const { data, error } = await db
     .from("persons")
@@ -38,6 +83,20 @@ export async function listPersons(tree_id) {
 
   if (error) throw error;
   return data || [];
+}
+
+export async function findPersonByName(tree_id, name) {
+  const persons = await listPersons(tree_id);
+  const searchName = name.toLowerCase().trim();
+  
+  return persons.filter(p => {
+    const fullName = `${p.data.first_name || ''} ${p.data.last_name || ''}`.toLowerCase().trim();
+    const firstName = (p.data.first_name || '').toLowerCase().trim();
+    
+    return fullName.includes(searchName) || 
+           firstName === searchName ||
+           fullName === searchName;
+  });
 }
 
 export async function insertPerson(tree_id, first_name, last_name, gender, birthday) {
@@ -61,22 +120,34 @@ export async function insertPerson(tree_id, first_name, last_name, gender, birth
 }
 
 export async function updatePersonGender(person_id, gender) {
+  // First fetch the current person
+  const { data: person, error: fetchError } = await db
+    .from("persons")
+    .select("data")
+    .eq("id", person_id)
+    .single();
+
+  if (fetchError) throw fetchError;
+
+  // Update the gender in the data object
+  const updatedData = {
+    ...person.data,
+    gender: normalizeGender(gender)
+  };
+
+  // Update the person
   const { data, error } = await db
     .from("persons")
-    .update({
-      data: db.rpc("jsonb_set", {
-        target: "data",
-        path: "{gender}",
-        value: normalizeGender(gender)
-      })
-    })
+    .update({ data: updatedData })
     .eq("id", person_id)
-    .select("*");
+    .select("*")
+    .single();
 
   if (error) throw error;
   return data;
 }
 
+// ---------- Relationship Management ----------
 export async function addRelationship(tree_id, kind, a, b) {
   const { data, error } = await db
     .from("relationships")
@@ -92,8 +163,8 @@ export async function addRelationship(tree_id, kind, a, b) {
 function normalizeGender(g) {
   if (!g) return "U";
   g = String(g).trim().toLowerCase();
-  if (g.startsWith("m")) return "M";
-  if (g.startsWith("f")) return "F";
+  if (g.startsWith("m") || g === "boy") return "M";
+  if (g.startsWith("f") || g === "girl") return "F";
   return "U";
 }
 
