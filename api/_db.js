@@ -68,7 +68,7 @@ export async function getTreeByCode(code, tree_id = null) {
   const { data, error } = await query.single();
 
   if (error) {
-    if (error.code === 'PGRST116') return null; // Not found
+    if (error.code === 'PGRST116') return null;
     throw error;
   }
   return data;
@@ -120,7 +120,6 @@ export async function insertPerson(tree_id, first_name, last_name, gender, birth
 }
 
 export async function updatePersonGender(person_id, gender) {
-  // First fetch the current person
   const { data: person, error: fetchError } = await db
     .from("persons")
     .select("data")
@@ -129,13 +128,11 @@ export async function updatePersonGender(person_id, gender) {
 
   if (fetchError) throw fetchError;
 
-  // Update the gender in the data object
   const updatedData = {
     ...person.data,
     gender: normalizeGender(gender)
   };
 
-  // Update the person
   const { data, error } = await db
     .from("persons")
     .update({ data: updatedData })
@@ -148,10 +145,16 @@ export async function updatePersonGender(person_id, gender) {
 }
 
 // ---------- Relationship Management ----------
-export async function addRelationship(tree_id, kind, a, b) {
+// FIXED: Using correct column names from your schema
+export async function addRelationship(tree_id, kind, person_a_id, person_b_id) {
   const { data, error } = await db
     .from("relationships")
-    .insert({ tree_id, kind, a, b })
+    .insert({ 
+      tree_id, 
+      kind, 
+      person_a_id,  // Changed from 'a' to 'person_a_id'
+      person_b_id   // Changed from 'b' to 'person_b_id'
+    })
     .select("*")
     .single();
 
@@ -163,8 +166,8 @@ export async function addRelationship(tree_id, kind, a, b) {
 function normalizeGender(g) {
   if (!g) return "U";
   g = String(g).trim().toLowerCase();
-  if (g.startsWith("m") || g === "boy") return "M";
-  if (g.startsWith("f") || g === "girl") return "F";
+  if (g.startsWith("m") || g === "boy" || g === "male") return "M";
+  if (g.startsWith("f") || g === "girl" || g === "female") return "F";
   return "U";
 }
 
