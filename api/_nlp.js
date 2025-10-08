@@ -18,7 +18,7 @@ export function parseOps(text) {
   }
 
   // --- 2️⃣ Add Person ---
-  const mAdd = msg.match(/^add\s+([a-z\s']+)(?:,?\s*born\s+([\w\s-]+))?/i);
+  const mAdd = msg.match(/^add\s+([a-z\s']+?)(?:,?\s*born\s+([\w\s-]+))?$/i);
   if (mAdd) {
     const full = mAdd[1].trim();
     const { first, last } = splitName(full);
@@ -40,7 +40,7 @@ export function parseOps(text) {
     return { action: "set_gender", first_name: titleCase(first), gender: g };
   }
 
-  // --- 4️⃣ Relationship: A is B’s father/mother/son/daughter/spouse/partner ---
+  // --- 4️⃣ Relationship: A is B's father/mother/son/daughter/spouse/partner ---
   const mRel = msg.match(/^([a-z\s']+)\s+is\s+([a-z\s']+)'?s\s+(\w+)/i);
   if (mRel) {
     const aName = titleCase(mRel[1].trim());
@@ -50,10 +50,13 @@ export function parseOps(text) {
     const map = {
       father: "parent_of",
       mother: "parent_of",
+      dad: "parent_of",
+      mom: "parent_of",
       parent: "parent_of",
       son: "child_of",
       daughter: "child_of",
       child: "child_of",
+      kid: "child_of",
       wife: "spouse_of",
       husband: "spouse_of",
       spouse: "spouse_of",
@@ -63,13 +66,13 @@ export function parseOps(text) {
     const kind = map[relWord] || "related_to";
     let flipped = false;
     if (["child_of"].includes(kind)) {
-      // invert direction (child → parent)
+      // invert direction (child -> parent becomes parent -> child)
       flipped = true;
     }
 
     return {
       action: "add_relationship",
-      kind,
+      kind: kind === "child_of" ? "parent_of" : kind,
       a_name: flipped ? bName : aName,
       b_name: flipped ? aName : bName,
       direction_flipped: flipped,
@@ -77,20 +80,25 @@ export function parseOps(text) {
   }
 
   // --- 5️⃣ Link A and B as spouses/partners/etc ---
-  const mLink = msg.match(/^link\s+([a-z\s']+)\s+(?:and|to)\s+([a-z\s']+)/i);
+  const mLink = msg.match(/^link\s+([a-z\s']+)\s+(?:and|to|with)\s+([a-z\s']+)(?:\s+as\s+(\w+))?/i);
   if (mLink) {
     const aName = titleCase(mLink[1].trim());
     const bName = titleCase(mLink[2].trim());
+    const relType = mLink[3] ? mLink[3].toLowerCase() : "spouse";
+    
+    let kind = "spouse_of";
+    if (relType.includes("partner")) kind = "partner_of";
+    
     return {
       action: "add_relationship",
-      kind: "spouse_of",
+      kind,
       a_name: aName,
       b_name: bName,
     };
   }
 
   // --- 6️⃣ Help ---
-  if (msg.match(/^help|menu|what can you do/i)) {
+  if (msg.match(/^(help|menu|what can you do|commands)/i)) {
     return { action: "help" };
   }
 
