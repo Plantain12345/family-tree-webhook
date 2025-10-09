@@ -41,11 +41,12 @@ export default async function handler(req, res) {
     const rels = relRows || [];
 
     for (const r of rels) {
-      const a = String(r.person_a_id);  // Changed from r.a
-      const b = String(r.person_b_id);  // Changed from r.b
+      const a = String(r.person_a_id);
+      const b = String(r.person_b_id);
       if (!byId.has(a) || !byId.has(b)) continue;
 
-      if (r.kind === "parent_of") {
+      // Handle the 3 allowed relationship kinds: 'parent', 'child', 'spouse'
+      if (r.kind === "parent") {
         const parent = byId.get(a);
         const child = byId.get(b);
         if (parent && child) {
@@ -53,9 +54,16 @@ export default async function handler(req, res) {
           if (parent.data.gender === "M") child.rels.father = a;
           else if (parent.data.gender === "F") child.rels.mother = a;
         }
-      } else if (
-        ["spouse_of", "partner_of", "divorced_from"].includes(r.kind)
-      ) {
+      } else if (r.kind === "child") {
+        // Reverse: B is parent of A
+        const parent = byId.get(b);
+        const child = byId.get(a);
+        if (parent && child) {
+          parent.rels.children.push(a);
+          if (parent.data.gender === "M") child.rels.father = b;
+          else if (parent.data.gender === "F") child.rels.mother = b;
+        }
+      } else if (r.kind === "spouse") {
         byId.get(a)?.rels.spouses.push(b);
         byId.get(b)?.rels.spouses.push(a);
       }
