@@ -6,6 +6,14 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 export const db = createClient(supabaseUrl, supabaseKey);
 
+// ---------- Relationship Kind Mapping ----------
+// EXACT values from your Supabase constraint: 'parent', 'child', 'spouse'
+const RELATIONSHIP_KINDS = {
+  SPOUSE: "spouse",
+  PARENT: "parent",
+  CHILD: "child"
+};
+
 // ---------- User State Management ----------
 export async function getUserState(phone) {
   const { data, error } = await db
@@ -145,24 +153,52 @@ export async function updatePersonGender(person_id, gender) {
 }
 
 // ---------- Relationship Management ----------
-// FIXED: Using correct column names from your schema
 export async function addRelationship(tree_id, kind, person_a_id, person_b_id) {
+  // Normalize the kind to match database constraint
+  const normalizedKind = normalizeRelationshipKind(kind);
+  
+  console.log("Adding relationship:", { tree_id, kind: normalizedKind, person_a_id, person_b_id });
+  
   const { data, error } = await db
     .from("relationships")
     .insert({ 
       tree_id, 
-      kind, 
-      person_a_id,  // Changed from 'a' to 'person_a_id'
-      person_b_id   // Changed from 'b' to 'person_b_id'
+      kind: normalizedKind,
+      person_a_id,
+      person_b_id
     })
     .select("*")
     .single();
 
-  if (error) throw error;
+  if (error) {
+    console.error("Relationship insert error:", error);
+    throw error;
+  }
   return data;
 }
 
 // ---------- Utilities ----------
+function normalizeRelationshipKind(kind) {
+  // Map common relationship terms to database values
+  const mapping = {
+    "spouse_of": RELATIONSHIP_KINDS.SPOUSE,
+    "spouse": RELATIONSHIP_KINDS.SPOUSE,
+    "married": RELATIONSHIP_KINDS.SPOUSE,
+    "partner_of": RELATIONSHIP_KINDS.PARTNER,
+    "partner": RELATIONSHIP_KINDS.PARTNER,
+    "parent_of": RELATIONSHIP_KINDS.PARENT,
+    "parent": RELATIONSHIP_KINDS.PARENT,
+    "child_of": RELATIONSHIP_KINDS.CHILD,
+    "child": RELATIONSHIP_KINDS.CHILD,
+    "sibling_of": RELATIONSHIP_KINDS.SIBLING,
+    "sibling": RELATIONSHIP_KINDS.SIBLING,
+    "divorced_from": RELATIONSHIP_KINDS.DIVORCED,
+    "divorced": RELATIONSHIP_KINDS.DIVORCED
+  };
+  
+  return mapping[kind.toLowerCase()] || kind.toUpperCase();
+}
+
 function normalizeGender(g) {
   if (!g) return "U";
   g = String(g).trim().toLowerCase();
