@@ -88,22 +88,22 @@ async function parseCommandMode(text, treeContext) {
           type: "string",
           enum: ["help", "create_tree", "join_tree", "add_person", "edit_person", "set_gender", "relate", "confirm", "cancel", "unknown"]
         },
-        treeName: { type: "string" },
-        code: { type: "string" },
-        firstName: { type: "string" },
+        treeName: { type: ["string", "null"] },
+        code: { type: ["string", "null"] },
+        firstName: { type: ["string", "null"] },
         lastName: { type: ["string", "null"] },
         birthday: { type: ["string", "null"] },
         deathday: { type: ["string", "null"] },
         gender: { type: ["string", "null"], enum: ["M", "F", null] },
-        kind: { type: "string", enum: ["father", "mother", "parent", "spouse", "child", "son", "daughter", "divorced", "separated", "brother", "sister"] },
-        nameA: { type: "string" },
-        nameB: { type: "string" },
-        oldName: { type: "string" },
+        kind: { type: ["string", "null"], enum: ["father", "mother", "parent", "spouse", "child", "son", "daughter", "divorced", "separated", "brother", "sister", null] },
+        nameA: { type: ["string", "null"] },
+        nameB: { type: ["string", "null"] },
+        oldName: { type: ["string", "null"] },
         newName: { type: ["string", "null"] },
         newBirthday: { type: ["string", "null"] },
         newGender: { type: ["string", "null"], enum: ["M", "F", null] }
       },
-      required: ["action"]
+      required: ["action", "treeName", "code", "firstName", "lastName", "birthday", "deathday", "gender", "kind", "nameA", "nameB", "oldName", "newName", "newBirthday", "newGender"]
     },
     strict: true
   };
