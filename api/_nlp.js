@@ -1,6 +1,6 @@
 // api/_nlp.js
 // Uses OpenAI to parse free text into structured actions for the webhook.
-// Falls back to a conservative regex parser if the API is unavailable.
+// Stays on the LLM path but includes light post-processing to handle messy inputs.
 
 import OpenAI from "openai";
 
@@ -11,18 +11,18 @@ const client = OPENAI_ENABLED ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY 
 // { action: "help" }
 // { action: "create_tree", treeName }
 // { action: "join_tree", code }
-// { action: "add_person", firstName, lastName?, gender?, birthday? }
-// { action: "set_gender", name, gender } // gender: "M" | "F"
-// { action: "relate", kind, nameA, nameB } // kind: "father"|"mother"|"parent"|"spouse"|"child"|"daughter"|"son"
+// { action: "add_person", firstName, lastName?, gender?, birthday? }   // birthday: "YYYY" or "YYYY-MM-DD"
+// { action: "set_gender", name, gender }                               // gender: "M" | "F"
+// { action: "relate", kind, nameA, nameB }                             // kind: "father"|"mother"|"parent"|"spouse"|"child"|"son"|"daughter"
 // { action: "unknown" }
 
 export async function parseOps(text) {
   const raw = (text ?? "").trim();
   if (!raw) return { action: "unknown" };
 
-  // Try LLM first if available
   if (OPENAI_ENABLED) {
     try {
+      // JSON Schema the model must follow
       const schemaDefinition = {
         name: "TreeBotCommand",
         schema: {
@@ -31,25 +31,15 @@ export async function parseOps(text) {
           properties: {
             action: {
               type: "string",
-              description: "The primary action the user wants to take.",
               enum: ["help", "create_tree", "join_tree", "add_person", "set_gender", "relate", "unknown"]
             },
-            treeName: { type: "string", description: "Name for a new family tree." },
-            code: { type: "string", description: "Join/switch code for a tree." },
+            treeName: { type: "string" },
+            code: { type: "string" },
             firstName: { type: "string" },
-            lastName: { type: "string" },
-            birthday: {
-              type: ["string", "null"],
-              description: "YYYY-MM-DD or YYYY."
-            },
-            gender: {
-              type: ["string", "null"],
-              enum: ["M", "F", null]
-            },
-            kind: {
-              type: "string",
-              enum: ["father", "mother", "parent", "spouse", "child", "son", "daughter"]
-            },
+            lastName: { type: ["string", "null"] },
+            birthday: { type: ["string", "null"] }, // "YYYY" or "YYYY-MM-DD"
+            gender: { type: ["string", "null"], enum: ["M", "F", null] },
+            kind: { type: "string", enum: ["father", "mother", "parent", "spouse", "child", "son", "daughter"] },
             nameA: { type: "string" },
             nameB: { type: "string" }
           },
@@ -58,18 +48,34 @@ export async function parseOps(text) {
         strict: true
       };
 
+      // System prompt with *concrete* mapping rules + few-shot coverage
       const sys = [
-        "You are a parser for a WhatsApp family-tree bot.",
-        "Return STRICT JSON ONLY that matches the JSON schema.",
-        "If a field is not present, omit it. Do not invent data.",
-        "Normalize names to Title Case.",
-        "For 'add_person', extract firstName, lastName, gender ('M'|'F') and birthday (YYYY-MM-DD or YYYY) when present.",
-        "For 'relate', nameA is the subject and nameB is the object, e.g., 'John is Mary's father' => nameA='John', nameB='Mary'.",
-        "For 'create_tree', return treeName.",
-        "For 'join_tree', return code (uppercase)."
+        "You are a deterministic parser for a WhatsApp family-tree bot. Output STRICT JSON only, matching the schema.",
+        "Rules:",
+        "- Never invent data. Omit fields that are not present.",
+        "- Names must be Title Case.",
+        "- For 'add_person': extract firstName, lastName (optional), birthday (YYYY or YYYY-MM-DD), gender ('M'|'F') if explicitly stated.",
+        "- For 'relate': nameA is the SUBJECT, nameB is the OBJECT. Example: 'John is Mary's father' => kind='father', nameA='John', nameB='Mary'.",
+        "- For 'join_tree': return uppercase code.",
+        "",
+        "Examples (exact JSON):",
+        '{"action":"add_person","firstName":"Grace","lastName":null,"birthday":"1952"}',
+        '{"action":"add_person","firstName":"John","lastName":"Smith","birthday":"1980"}',
+        '{"action":"relate","kind":"spouse","nameA":"John","nameB":"Mary"}',
+        '{"action":"create_tree","treeName":"The Smith Family"}',
+        '{"action":"join_tree","code":"AB12CD"}',
+        '{"action":"set_gender","name":"Mary Nankya","gender":"F"}',
+        '{"action":"help"}'
       ].join(" ");
 
-      const user = `Parse this message: "${raw}"`;
+      // User turn includes a nudge that covers "born in 1952" explicitly
+      const user = [
+        `Message: "${raw}"`,
+        "If the user writes 'Add Grace, born in 1952' then parse as:",
+        '{"action":"add_person","firstName":"Grace","lastName":null,"birthday":"1952"}',
+        "If they write 'Add Grace born 1952' or 'Add Grace (1952)', treat equivalently.",
+        "Do not include extra fields not in the schema."
+      ].join("\n");
 
       const resp = await client.responses.create({
         model: "gpt-4o-mini",
@@ -78,7 +84,7 @@ export async function parseOps(text) {
           format: {
             type: "json_schema",
             name: schemaDefinition.name,
-            schema: schemaDefinition.schema,   // <-- FIXED: must be `schema`, not `json_schema`
+            schema: schemaDefinition.schema,
             strict: schemaDefinition.strict
           }
         },
@@ -88,77 +94,90 @@ export async function parseOps(text) {
         ]
       });
 
-      // Prefer parsed output when the SDK provides it; otherwise try text.
-      let parsed = resp.output_parsed
-        ?? (resp.output_text ? JSON.parse(resp.output_text) : null);
+      // Prefer parsed; fallback to text parse if needed
+      let parsed = resp.output_parsed ?? (resp.output_text ? JSON.parse(resp.output_text) : null);
 
-      // Minimal sanity: if action missing, fall back
+      // If the model failed or gave action missing, return unknown
       if (!parsed || typeof parsed !== "object" || !parsed.action) {
-        console.warn("OpenAI parsing returned no/invalid JSON; falling back to regex.");
-        return regexFallback(raw);
+        return { action: "unknown" };
       }
+
+      // ---------- LIGHT COERCION / NORMALIZATION ----------
+      parsed = normalizeOperation(raw, parsed);
+
       return parsed;
 
     } catch (err) {
-      console.error("OpenAI parse error; using regex fallback:", err?.message || err);
-      return regexFallback(raw);
+      console.error("OpenAI parse error; using LLM-safe unknown:", err?.message || err);
+      // Stay on LLM path: return unknown so your handler can reply helpfully
+      return { action: "unknown" };
     }
   }
 
-  // No key? Use fallback.
-  return regexFallback(raw);
-}
-
-// ------------------- Conservative regex fallback -------------------
-
-function regexFallback(text) {
-  const msg = text.trim().toLowerCase();
-
-  // help/menu
-  if (/^(help|menu|commands|what can you do)/i.test(msg)) return { action: "help" };
-
-  // create tree
-  let m = msg.match(/^create\s+(?:a\s+)?tree\s+(?:called|named)\s+(.+)$/i);
-  if (m) return { action: "create_tree", treeName: titleCase(m[1]) };
-
-  // join tree (e.g., "use ABC123" or "join code ABC123")
-  m = msg.match(/^(?:join|switch|use)\s+(?:code\s+)?([A-Z0-9]{4,10})$/i);
-  if (m) return { action: "join_tree", code: m[1].toUpperCase() };
-
-  // add person (optional birth year)
-  m = msg.match(/^(?:add|create)\s+([a-z\s.'-]+?)(?:,\s*born\s+(\d{4}))?$/i);
-  if (m) {
-    const full = titleCase(m[1]);
-    const parts = full.split(/\s+/);
-    const firstName = parts.shift();
-    const lastName = parts.join(" ") || null;
-    return { action: "add_person", firstName, lastName, birthday: m[2] || null };
-  }
-
-  // set gender
-  m = msg.match(/^set\s+gender\s+of\s+([a-z\s.'-]+)\s+to\s+(male|female)$/i);
-  if (m) {
-    const g = m[2].toLowerCase().startsWith("m") ? "M" : "F";
-    return { action: "set_gender", name: titleCase(m[1]), gender: g };
-  }
-
-  // relationships (X is Y's father/mother/son/daughter/child)
-  m = msg.match(/^(.+?)\s+is\s+(.+?)'s\s+(father|mother|son|daughter|child)$/i);
-  if (m) {
-    return { action: "relate", kind: m[3].toLowerCase(), nameA: titleCase(m[1]), nameB: titleCase(m[2]) };
-  }
-
-  // marriage
-  m = msg.match(/^(.+?)\s+and\s+(.+?)\s+are\s+(?:married|spouses)$/i);
-  if (m) {
-    return { action: "relate", kind: "spouse", nameA: titleCase(m[1]), nameB: titleCase(m[2]) };
-  }
-
+  // If no key, keep behavior graceful
   return { action: "unknown" };
 }
 
+// ---- Post-processing to make the LLM output robust without full regex fallback ----
+function normalizeOperation(raw, op) {
+  const out = { ...op };
+
+  // Normalize action casing
+  if (typeof out.action === "string") {
+    out.action = out.action.toLowerCase();
+  }
+
+  // Coerce join code to uppercase
+  if (out.action === "join_tree" && out.code) {
+    out.code = String(out.code).toUpperCase().trim();
+  }
+
+  // If model returned a single 'name' somewhere, split it into firstName/lastName when needed
+  if (out.action === "add_person") {
+    // Ensure firstName/lastName present; if model produced a 'name', split it.
+    if (!out.firstName && out.name) {
+      const full = titleCase(String(out.name));
+      const parts = full.split(/\s+/);
+      out.firstName = parts.shift();
+      out.lastName = parts.length ? parts.join(" ") : null;
+      delete out.name;
+    }
+
+    // If still missing firstName but we do have lastName, swap (rare but safer than failing)
+    if (!out.firstName && out.lastName) {
+      const parts = String(out.lastName).split(/\s+/);
+      out.firstName = titleCase(parts.shift());
+      out.lastName = parts.length ? titleCase(parts.join(" ")) : null;
+    }
+
+    // Birthday coercion: accept 'born in 1952', '1952', '1980-05-20'
+    if (!out.birthday) {
+      const m = String(raw).match(/\b(born\s+(?:in\s+)?)?(\d{4})(?:-(\d{2})-(\d{2}))?\b/i);
+      if (m) {
+        out.birthday = m[3] && m[4] ? `${m[2]}-${m[3]}-${m[4]}` : m[2];
+      }
+    }
+
+    // Gender normalization: accept words and map to 'M'|'F'
+    if (out.gender) {
+      const g = String(out.gender).trim().toLowerCase();
+      out.gender = g.startsWith("m") ? "M" : g.startsWith("f") ? "F" : null;
+    }
+  }
+
+  // For relationships, be strict about direction (subject/object)
+  if (out.action === "relate") {
+    if (out.nameA) out.nameA = titleCase(out.nameA);
+    if (out.nameB) out.nameB = titleCase(out.nameB);
+    if (out.kind) out.kind = out.kind.toLowerCase();
+  }
+
+  return out;
+}
+
 function titleCase(s) {
-  return s
+  return String(s)
+    .trim()
     .split(/\s+/)
     .map((t) => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase())
     .join(" ");
