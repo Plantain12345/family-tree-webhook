@@ -29,14 +29,15 @@
     #Status { padding:12px 16px; font-size:14px; opacity:.85; }
     #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
     #CardsMode { padding:16px; }
-    .cards-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
+    .cards-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; margin-bottom:20px; }
     .card { position:relative; background:var(--panel); border:1px solid var(--panel-border); border-radius:12px; padding:14px; box-shadow:0 4px 14px rgba(0,0,0,0.25); }
     .card h3 { margin:0 0 6px; font-size:16px; line-height:1.3; }
     .card .muted { color:var(--muted); font-size:12px; }
-    .hint { padding:10px 0 0; line-height:1.5; color:#ddd; }
+    .hint { padding:10px 0 0; line-height:1.5; color:#ddd; background:var(--panel); border-radius:8px; padding:16px; margin-top:16px; }
+    .hint strong { color:#fff; display:block; margin-bottom:8px; }
     code { background:#333; padding:2px 6px; border-radius:4px; }
     #ShareWrap { position:fixed; left:16px; bottom:16px; z-index:5; display:flex; gap:10px; align-items:center; }
-    .btn { border:1px solid #4a4a4a; background:#2b2b2b; color:#ddd; padding:8px 12px; border-radius:10px; font-size:13px; cursor:pointer; }
+    .btn { border:1px solid #4a4a4a; background:#2b2b2b; color:#ddd; padding:8px 12px; border-radius:10px; font-size:13px; cursor:pointer; text-decoration:none; transition:background 0.2s; }
     .btn:hover { background:#333; }
   </style>
 </head>
@@ -55,7 +56,15 @@
 
   <div id="Status">Loading…</div>
   <div id="FamilyChart" class="f3"></div>
-  <div id="CardsMode" style="display:none"><div class="cards-grid" id="CardsGrid"></div><div class="hint" id="CardsHint"></div></div>
+  <div id="CardsMode" style="display:none">
+    <div class="cards-grid" id="CardsGrid"></div>
+    <div class="hint" id="CardsHint">
+      <strong>These individuals are not yet linked in the family tree.</strong>
+      Edit this tree in WhatsApp by typing in your commands in plain English.
+      <br><br>
+      Examples: <code>Add John born 1980</code> or <code>John is Mary's father</code>
+    </div>
+  </div>
 
   <div id="ShareWrap">
     <button class="btn" id="ShareBtn">Share this tree</button>
@@ -67,7 +76,6 @@
     const chartSel='#FamilyChart';
     const cardsGrid=document.getElementById('CardsGrid');
     const cardsHost=document.getElementById('CardsMode');
-    const cardsHint=document.getElementById('CardsHint');
     const treeNameEl=document.getElementById('TreeName');
     const treeCodeEl=document.getElementById('TreeCode');
     const shareWA=document.getElementById('ShareWA');
@@ -75,8 +83,6 @@
     const code=new URLSearchParams(location.search).get('code');
 
     const waLink=(url)=>`https://wa.me/?text=${encodeURIComponent("Open our family tree: "+url)}`;
-
-    const getBirthday=(d)=>d?.data?.birthday||'';
     const colorGender=(g)=>g==='M'?'var(--male)':g==='F'?'var(--female)':'var(--unknown)';
 
     async function fetchTree(){
@@ -100,7 +106,6 @@
       }).join('');
       cardsGrid.innerHTML=html;
       cardsHost.style.display=list.length?'block':'none';
-      cardsHint.textContent="These individuals are not yet linked in the family tree.";
     }
 
     function hasRels(persons){
@@ -111,30 +116,55 @@
     }
 
     async function renderOnce(){
-      const api=await fetchTree();
-      const persons=api.persons||[];
-      const linked=persons.filter(p=>hasRels([p]));
-      const orphans=persons.filter(p=>!hasRels([p]));
+      try {
+        const api=await fetchTree();
+        console.log('API Response:', api);
+        
+        const persons=api.persons||[];
+        console.log('Total persons:', persons.length);
+        console.log('Persons data:', JSON.stringify(persons, null, 2));
+        
+        const linked=persons.filter(p=>hasRels([p]));
+        const orphans=persons.filter(p=>!hasRels([p]));
+        
+        console.log('Linked persons:', linked.length);
+        console.log('Orphan persons:', orphans.length);
 
-      treeNameEl.textContent=`Family Tree Name: ${api.tree?.name||'—'}`;
-      treeCodeEl.textContent=api.tree?.join_code?`Code: ${api.tree.join_code}`:'';
-      const joinUrl=`${location.origin}/tree.html?code=${api.tree?.join_code||code}`;
-      shareWA.href=waLink(joinUrl);
-      shareBtn.onclick=()=>navigator.share?.({title:api.tree?.name,text:'Open our family tree',url:joinUrl})||window.open(waLink(joinUrl),'_blank');
+        treeNameEl.textContent=`Family Tree Name: ${api.tree?.name||'—'}`;
+        treeCodeEl.textContent=api.tree?.join_code?`Code: ${api.tree.join_code}`:'';
+        const joinUrl=`${location.origin}/tree.html?code=${api.tree?.join_code||code}`;
+        shareWA.href=waLink(joinUrl);
+        shareBtn.onclick=()=>navigator.share?.({title:api.tree?.name,text:'Open our family tree',url:joinUrl})||window.open(waLink(joinUrl),'_blank');
 
-      const f3=await loadLib();
-      statusEl.textContent='';
-      const chart=f3.createChart(chartSel,linked)
-        .setTransitionTime(900)
-        .setCardXSpacing(250)
-        .setCardYSpacing(150);
-      chart.setCard(f3.CardHtml).setCardDisplay([["first_name","last_name"],["birthday"]]);
-      chart.updateTree({initial:true});
-      renderCards(orphans);
+        if (linked.length === 0) {
+          statusEl.textContent='No linked people yet. Add some relationships!';
+          renderCards(orphans);
+          return;
+        }
+
+        const f3=await loadLib();
+        statusEl.textContent='';
+        
+        console.log('Creating chart with data:', JSON.stringify(linked, null, 2));
+        
+        const chart=f3.createChart(chartSel,linked)
+          .setTransitionTime(900)
+          .setCardXSpacing(250)
+          .setCardYSpacing(150);
+        chart.setCard(f3.CardHtml).setCardDisplay([["first_name","last_name"],["birthday"]]);
+        chart.updateTree({initial:true});
+        
+        console.log('Chart created successfully');
+        renderCards(orphans);
+      } catch (error) {
+        console.error('Render error:', error);
+        statusEl.textContent='Error: ' + error.message;
+        throw error;
+      }
     }
 
     async function main(){
-      if(!code){statusEl.textContent='Missing ?code.';return;}
+      if(!code){statusEl.textContent='Missing ?code parameter in URL.';return;}
       const loop=async()=>{try{await renderOnce();}catch(e){console.error(e);statusEl.textContent='Render error. Retrying…';}};
       await loop();
       setInterval(loop,5000);
