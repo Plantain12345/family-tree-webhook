@@ -111,7 +111,21 @@
     function hasRels(persons){
       return persons.some(p=>{
         const r=p.rels||{};
-        return (r.father||r.mother||(r.spouses?.length)||(r.children?.length));
+        const hasFather = r.father !== null && r.father !== undefined;
+        const hasMother = r.mother !== null && r.mother !== undefined;
+        const hasSpouses = Array.isArray(r.spouses) && r.spouses.length > 0;
+        const hasChildren = Array.isArray(r.children) && r.children.length > 0;
+        const hasAnyRel = hasFather || hasMother || hasSpouses || hasChildren;
+        
+        console.log(`Person ${p.id} has rels:`, {
+          father: r.father,
+          mother: r.mother,
+          spouses: r.spouses,
+          children: r.children,
+          hasAnyRel
+        });
+        
+        return hasAnyRel;
       });
     }
 
