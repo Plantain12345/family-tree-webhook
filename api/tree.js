@@ -80,9 +80,14 @@ export default async function handler(req, res) {
         const personA = byId.get(a);
         const personB = byId.get(b);
         if (personA && personB) {
-          // Store relationship type with the ID
-          personA.rels.spouses.push({ id: b, status: r.kind });
-          personB.rels.spouses.push({ id: a, status: r.kind });
+          // For now, just store IDs (family-chart expects string IDs)
+          // Status info is stored in relationships array for future use
+          if (!personA.rels.spouses.includes(b)) {
+            personA.rels.spouses.push(b);
+          }
+          if (!personB.rels.spouses.includes(a)) {
+            personB.rels.spouses.push(a);
+          }
         }
       }
     }
