@@ -1,7 +1,9 @@
 // api/webhook.js
+// STANDARDIZED: Clean, consistent naming throughout
+
 import {
   createTree,
-  getTreeByCode,
+  getTreeById,
   getUserState,
   setUserState,
   findPersonByName,
@@ -16,11 +18,15 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const BASE_URL = "https://family-tree-webhook.vercel.app";
 const FOLLOW_UP_PROMPT = "What else would you like to do with your family tree? I understand plain English. Or type 'menu' to view your options.";
 
-// ---------- Meta verification ----------
+// ============================================================================
+// WEBHOOK HANDLER
+// ============================================================================
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
   
+  // Meta webhook verification
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -48,165 +54,202 @@ export default async function handler(req, res) {
       return res.status(200).send("No message");
     }
 
-    const from = message.from;
-    const text = message.text?.body?.trim();
-    console.log("Incoming:", from, text);
+    const phoneNumber = message.from;
+    const messageText = message.text?.body?.trim();
+    
+    console.log("Incoming message:", phoneNumber, messageText);
 
-    const reply = await processMessage(from, text);
+    const reply = await processMessage(phoneNumber, messageText);
     if (reply) {
-      await sendWhatsAppMessage(from, reply);
+      await sendWhatsAppMessage(phoneNumber, reply);
     }
 
     return res.status(200).send("OK");
-  } catch (e) {
-    console.error("Webhook error:", e);
-    return res.status(500).json({ error: e.message });
+  } catch (error) {
+    console.error("Webhook error:", error);
+    return res.status(500).json({ error: error.message });
   }
 }
 
-// ---------- Core logic ----------
-async function processMessage(from, text) {
-  if (!text) return "Please say something";
+// ============================================================================
+// MESSAGE PROCESSING
+// ============================================================================
 
-  const ops = parseOps(text);
-  
-  // Get user's current state
-  const userState = await getUserState(from);
+async function processMessage(phoneNumber, messageText) {
+  if (!messageText) {
+    return "Please say something";
+  }
+
+  const operation = parseOps(messageText);
+  const userState = await getUserState(phoneNumber);
 
   // --- HELP/MENU ---
-  if (ops.action === "help") {
-    let helpText = "Family Tree Bot Commands\n\n";
-    helpText += "Getting Started:\n";
-    helpText += "- Create tree called [name]\n\n";
-    helpText += "Adding People:\n";
-    helpText += "- Add [name] born [year]\n";
-    helpText += "- Add [name]\n\n";
-    helpText += "Creating Relationships:\n";
-    helpText += "- [Name] is [Name]'s father/mother/son/daughter\n";
-    helpText += "- Link [Name] and [Name] as spouses\n\n";
-    helpText += "Examples:\n";
-    helpText += "- Create tree called Smith Family\n";
-    helpText += "- Add John Smith born 1980\n";
-    helpText += "- Add Mary Johnson born 1982\n";
-    helpText += "- John is Mary's husband\n";
-    helpText += "- Add baby Alice born 2010\n";
-    helpText += "- Alice is John's daughter";
-    return helpText;
+  if (operation.action === "help") {
+    return buildHelpMessage();
   }
 
   // --- CREATE TREE ---
-  if (ops.action === "create_tree") {
-    const tree = await createTree(from, ops.name);
-    await setUserState(from, tree.id, null, null);
-    
-    let reply = "Created your family tree: " + tree.name + "\n\n";
-    reply += "Join Code: " + tree.join_code + "\n\n";
-    reply += "You can start by adding a person:\n";
-    reply += "- Add John born 1980\n";
-    reply += "- Add Mary\n\n";
-    reply += "View your tree at:\n";
-    reply += BASE_URL + "/tree.html?code=" + tree.join_code + "\n\n";
-    reply += FOLLOW_UP_PROMPT;
-    return reply;
+  if (operation.action === "create_tree") {
+    const tree = await createTree(phoneNumber, operation.treeName);
+    await setUserState(phoneNumber, tree.id, null, null);
+    return buildCreateTreeMessage(tree);
   }
 
-  // For all other actions, we need an active tree
+  // --- ALL OTHER ACTIONS REQUIRE ACTIVE TREE ---
   if (!userState?.tree_id) {
     return "You don't have an active tree. Create one first by saying: Create tree called Smith Family";
   }
 
-  const tree = await getTreeByCode(null, userState.tree_id);
+  const tree = await getTreeById(userState.tree_id);
   if (!tree) {
     return "Your active tree was not found. Please create a new one.";
   }
 
   // --- ADD PERSON ---
-  if (ops.action === "add_person") {
+  if (operation.action === "add_person") {
     const person = await insertPerson(
       tree.id,
-      ops.first_name,
-      ops.last_name,
-      ops.gender,
-      ops.birthday
+      operation.firstName,
+      operation.lastName,
+      operation.gender,
+      operation.birthday
     );
     
-    await setUserState(from, tree.id, person.id, `${ops.first_name} ${ops.last_name}`.trim());
+    await setUserState(
+      phoneNumber, 
+      tree.id, 
+      person.id, 
+      `${operation.firstName} ${operation.lastName}`.trim()
+    );
     
-    let reply = "I've added " + person.data.first_name;
-    if (person.data.last_name) {
-      reply += " " + person.data.last_name;
-    }
-    if (person.data.birthday) {
-      reply += " (born " + person.data.birthday + ")";
-    }
-    reply += " to your family tree.\n\n";
-    reply += "You can now:\n";
-    reply += "- Add more people\n";
-    reply += "- Create relationships\n\n";
-    reply += FOLLOW_UP_PROMPT;
-    return reply;
+    return buildAddPersonMessage(person);
   }
 
   // --- SET GENDER ---
-  if (ops.action === "set_gender") {
-    const persons = await findPersonByName(tree.id, ops.first_name);
+  if (operation.action === "set_gender") {
+    const persons = await findPersonByName(tree.id, operation.firstName);
+    
     if (persons.length === 0) {
-      return "I couldn't find anyone named " + ops.first_name + " in your tree.";
+      return `I couldn't find anyone named ${operation.firstName} in your tree.`;
+    }
+    if (persons.length > 1) {
+      return buildMultipleMatchesMessage(operation.firstName, persons);
     }
     
     const person = persons[0];
-    await updatePersonGender(person.id, ops.gender);
+    await updatePersonGender(person.id, operation.gender);
     
-    const genderWord = ops.gender === 'M' ? 'male' : 'female';
-    return "Updated " + ops.first_name + "'s gender to " + genderWord + ".\n\n" + FOLLOW_UP_PROMPT;
+    const genderWord = operation.gender === 'M' ? 'male' : 'female';
+    return `Updated ${operation.firstName}'s gender to ${genderWord}.\n\n${FOLLOW_UP_PROMPT}`;
   }
 
   // --- ADD RELATIONSHIP ---
-  if (ops.action === "add_relationship") {
-    const personsA = await findPersonByName(tree.id, ops.a_name);
+  if (operation.action === "add_relationship") {
+    const personsA = await findPersonByName(tree.id, operation.nameA);
     if (personsA.length === 0) {
-      return "I couldn't find " + ops.a_name + " in your tree. Add them first: Add " + ops.a_name + " born [year]";
+      return `I couldn't find ${operation.nameA} in your tree. Add them first: Add ${operation.nameA} born [year]`;
     }
     if (personsA.length > 1) {
-      let reply = "I found multiple people named " + ops.a_name + ":\n";
-      personsA.forEach(p => {
-        reply += "- " + p.data.first_name + " " + (p.data.last_name || '') + " (born " + (p.data.birthday || 'unknown') + ")\n";
-      });
-      reply += "\nPlease use full names to be more specific.";
-      return reply;
+      return buildMultipleMatchesMessage(operation.nameA, personsA);
     }
 
-    const personsB = await findPersonByName(tree.id, ops.b_name);
+    const personsB = await findPersonByName(tree.id, operation.nameB);
     if (personsB.length === 0) {
-      return "I couldn't find " + ops.b_name + " in your tree. Add them first: Add " + ops.b_name + " born [year]";
+      return `I couldn't find ${operation.nameB} in your tree. Add them first: Add ${operation.nameB} born [year]`;
     }
     if (personsB.length > 1) {
-      let reply = "I found multiple people named " + ops.b_name + ":\n";
-      personsB.forEach(p => {
-        reply += "- " + p.data.first_name + " " + (p.data.last_name || '') + " (born " + (p.data.birthday || 'unknown') + ")\n";
-      });
-      reply += "\nPlease use full names to be more specific.";
-      return reply;
+      return buildMultipleMatchesMessage(operation.nameB, personsB);
     }
 
     const personA = personsA[0];
     const personB = personsB[0];
 
-    await addRelationship(tree.id, ops.kind, personA.id, personB.id);
+    await addRelationship(tree.id, operation.kind, personA.id, personB.id);
     
-    const kindDisplay = ops.kind.replace(/_/g, ' ');
-    let reply = "I've linked " + ops.a_name + " as the " + kindDisplay + " of " + ops.b_name + ".\n\n";
-    reply += "View your tree:\n";
-    reply += BASE_URL + "/tree.html?code=" + tree.join_code + "\n\n";
-    reply += FOLLOW_UP_PROMPT;
-    return reply;
+    return buildAddRelationshipMessage(operation, tree);
   }
 
   return "I didn't quite understand that. Try: Add John born 1980 or Link John and Mary as spouses. Type 'menu' for all commands.";
 }
 
-// ---------- Outgoing message ----------
-async function sendWhatsAppMessage(to, text) {
+// ============================================================================
+// MESSAGE BUILDERS
+// ============================================================================
+
+function buildHelpMessage() {
+  let message = "Family Tree Bot Commands\n\n";
+  message += "Getting Started:\n";
+  message += "- Create tree called [name]\n\n";
+  message += "Adding People:\n";
+  message += "- Add [name] born [year]\n";
+  message += "- Add [name]\n\n";
+  message += "Creating Relationships:\n";
+  message += "- [Name] and [Name] are married\n";
+  message += "- [Name] is [Name]'s father/mother/son/daughter\n";
+  message += "- Link [Name] and [Name]\n\n";
+  message += "Examples:\n";
+  message += "- Create tree called Smith Family\n";
+  message += "- Add John Smith born 1980\n";
+  message += "- Add Mary Johnson born 1982\n";
+  message += "- John and Mary are married\n";
+  message += "- Add Alice born 2010\n";
+  message += "- Alice is John's daughter";
+  return message;
+}
+
+function buildCreateTreeMessage(tree) {
+  let message = `Created your family tree: ${tree.name}\n\n`;
+  message += `Join Code: ${tree.join_code}\n\n`;
+  message += "You can start by adding a person:\n";
+  message += "- Add John born 1980\n";
+  message += "- Add Mary\n\n";
+  message += "View your tree at:\n";
+  message += `${BASE_URL}/tree.html?code=${tree.join_code}\n\n`;
+  message += FOLLOW_UP_PROMPT;
+  return message;
+}
+
+function buildAddPersonMessage(person) {
+  let message = `I've added ${person.data.first_name}`;
+  if (person.data.last_name) {
+    message += ` ${person.data.last_name}`;
+  }
+  if (person.data.birthday) {
+    message += ` (born ${person.data.birthday})`;
+  }
+  message += " to your family tree.\n\n";
+  message += "You can now:\n";
+  message += "- Add more people\n";
+  message += "- Create relationships\n\n";
+  message += FOLLOW_UP_PROMPT;
+  return message;
+}
+
+function buildAddRelationshipMessage(operation, tree) {
+  const kindDisplay = operation.kind;
+  let message = `I've linked ${operation.nameA} as the ${kindDisplay} of ${operation.nameB}.\n\n`;
+  message += "View your tree:\n";
+  message += `${BASE_URL}/tree.html?code=${tree.join_code}\n\n`;
+  message += FOLLOW_UP_PROMPT;
+  return message;
+}
+
+function buildMultipleMatchesMessage(name, persons) {
+  let message = `I found multiple people named ${name}:\n`;
+  persons.forEach(person => {
+    const fullName = `${person.data.first_name} ${person.data.last_name || ''}`.trim();
+    const birthday = person.data.birthday || 'unknown';
+    message += `- ${fullName} (born ${birthday})\n`;
+  });
+  message += "\nPlease use full names to be more specific.";
+  return message;
+}
+
+// ============================================================================
+// WHATSAPP API
+// ============================================================================
+
+async function sendWhatsAppMessage(phoneNumber, messageText) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   
@@ -224,8 +267,8 @@ async function sendWhatsAppMessage(to, text) {
 
   const payload = {
     messaging_product: "whatsapp",
-    to,
-    text: { body: text }
+    to: phoneNumber,
+    text: { body: messageText }
   };
 
   try {
