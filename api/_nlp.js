@@ -236,9 +236,11 @@ CRITICAL RULES:
 5. For 'relate': nameA is SUBJECT, nameB is OBJECT. Set other fields to null.
    - "John is Mary's father" → kind='father', nameA='John', nameB='Mary'
    - "Alice is Bob's daughter" → kind='daughter', nameA='Alice', nameB='Bob'
+   - "Zaake is John and Grace's son" → ONLY parse the FIRST parent: kind='son', nameA='Zaake', nameB='John' (user will add second parent separately)
+   - "John and Mary are married" → kind='spouse', nameA='John', nameB='Mary'
 6. For 'join_tree': return uppercase 6-character code. Set other fields to null.
 7. Dates: Extract year only (YYYY format). Accept "born in 1952", "1952", "circa 1940s", "Spring 1978".
-8. Multiple people: Extract each separately.
+8. If a statement mentions TWO parents (e.g., "X is Y and Z's child"), extract only the FIRST parent. The user can add the second parent in a follow-up message.
 
 RELATIONSHIP MAPPINGS:
 - "father", "mother", "parent" → parent relationship (A is parent of B)
@@ -257,6 +259,7 @@ RELATIONSHIP MAPPINGS:
 {"action":"add_person","treeName":null,"code":null,"firstName":"John","lastName":"Smith","birthday":"1980","deathday":null,"gender":"M","kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}
 {"action":"relate","treeName":null,"code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":"spouse","nameA":"John","nameB":"Mary","oldName":null,"newName":null,"newBirthday":null,"newGender":null}
 {"action":"relate","treeName":null,"code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":"father","nameA":"John","nameB":"Alice","oldName":null,"newName":null,"newBirthday":null,"newGender":null}
+{"action":"relate","treeName":null,"code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":"son","nameA":"Zaake","nameB":"John","oldName":null,"newName":null,"newBirthday":null,"newGender":null}
 {"action":"create_tree","treeName":"The Smith Family","code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}
 {"action":"join_tree","treeName":null,"code":"AB12CD","firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}
 {"action":"help","treeName":null,"code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}`;
