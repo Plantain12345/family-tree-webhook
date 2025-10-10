@@ -1,23 +1,32 @@
 // api/webhook.js
-// STANDARDIZED: Clean, consistent naming throughout
+// Main webhook handler with dual-mode processing and entity resolution
 
 import {
   createTree,
   getTreeById,
+  getTreeByCode,
   getUserState,
   setUserState,
   findPersonByName,
+  findSimilarPersons,
   insertPerson,
   addRelationship,
+  updatePerson,
   updatePersonGender,
+  relationshipExists,
+  savePendingAction,
+  getPendingAction,
+  clearPendingAction,
+  addMember,
+  isMember,
+  RELATIONSHIP_TYPES
 } from "./_db.js";
 
-import { parseOps } from "./_nlp.js";
+import { parseOps, getTreeContext } from "./_nlp.js";
+import * as db from "./_db.js";
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const BASE_URL = "https://family-tree-webhook.vercel.app";
-const FOLLOW_UP_PROMPT =
-  "What else would you like to do? You can add people, create relationships, or type 'menu' for options.";
+const BASE_URL = process.env.BASE_URL || "https://family-tree-webhook.vercel.app";
 
 // ============================================================================
 // WEBHOOK HANDLER
@@ -81,24 +90,57 @@ async function processMessage(phoneNumber, messageText) {
     return "Please say something!";
   }
 
-  const operation = await parseOps(messageText);
   const userState = await getUserState(phoneNumber);
+  
+  // Get tree context for better parsing
+  let treeContext = null;
+  if (userState?.tree_id) {
+    treeContext = await getTreeContext(userState.tree_id, db);
+  }
+
+  const operation = await parseOps(messageText, treeContext);
+
+  // --- HANDLE INFERENCE MODE ---
+  if (operation.mode === 'inference') {
+    return await handleInferenceMode(phoneNumber, operation);
+  }
+
+  // --- HANDLE CONFIRMATIONS ---
+  if (operation.action === 'confirm') {
+    return await handleConfirm(phoneNumber);
+  }
+
+  if (operation.action === 'cancel') {
+    await clearPendingAction(phoneNumber);
+    return "Okay, I've cancelled that action. What would you like to do instead?";
+  }
 
   // --- HELP/MENU ---
-  if (operation.action === "help") {
+  if (operation.action === 'help') {
     return buildHelpMessage();
   }
 
   // --- CREATE TREE ---
-  if (operation.action === "create_tree") {
+  if (operation.action === 'create_tree') {
     const tree = await createTree(phoneNumber, operation.treeName);
     await setUserState(phoneNumber, tree.id, null, null);
     return buildCreateTreeMessage(tree);
   }
 
+  // --- JOIN TREE ---
+  if (operation.action === 'join_tree') {
+    const tree = await getTreeByCode(operation.code);
+    if (!tree) {
+      return `I couldn't find a tree with code ${operation.code}. Please check the code and try again.`;
+    }
+    await addMember(tree.id, phoneNumber);
+    await setUserState(phoneNumber, tree.id, null, null);
+    return `Welcome! You've joined the tree "${tree.name}". You can view it here:\n${BASE_URL}/tree.html?code=${tree.join_code}`;
+  }
+
   // --- ALL OTHER ACTIONS REQUIRE AN ACTIVE TREE ---
   if (!userState?.tree_id) {
-    return "You don't have an active tree. Create one by saying: Create tree called Smith Family";
+    return "You don't have an active tree. Create one by saying:\n`Create tree called Smith Family`\n\nOr join an existing tree with:\n`Join tree AB12CD`";
   }
 
   const tree = await getTreeById(userState.tree_id);
@@ -106,28 +148,18 @@ async function processMessage(phoneNumber, messageText) {
     return "Your active tree was not found. Please create a new one.";
   }
 
-  // --- ADD PERSON ---
-  if (operation.action === "add_person") {
-    const person = await insertPerson(
-      tree.id,
-      operation.firstName,
-      operation.lastName,
-      operation.gender,
-      operation.birthday
-    );
+  // --- ADD PERSON (with entity resolution) ---
+  if (operation.action === 'add_person') {
+    return await handleAddPerson(phoneNumber, tree, operation);
+  }
 
-    await setUserState(
-      phoneNumber,
-      tree.id,
-      person.id,
-      `${operation.firstName} ${operation.lastName || ""}`.trim()
-    );
-
-    return buildAddPersonMessage(person);
+  // --- EDIT PERSON ---
+  if (operation.action === 'edit_person') {
+    return await handleEditPerson(phoneNumber, tree, operation);
   }
 
   // --- SET GENDER ---
-  if (operation.action === "set_gender") {
+  if (operation.action === 'set_gender') {
     const persons = await findPersonByName(tree.id, operation.name);
 
     if (persons.length === 0) {
@@ -140,52 +172,263 @@ async function processMessage(phoneNumber, messageText) {
     const person = persons[0];
     await updatePersonGender(person.id, operation.gender);
 
-    const genderWord = operation.gender === "M" ? "male" : "female";
-    return `Updated ${operation.name}'s gender to ${genderWord}.\n\n${FOLLOW_UP_PROMPT}`;
+    const genderWord = operation.gender === 'M' ? 'male' : 'female';
+    return `Updated ${operation.name}'s gender to ${genderWord}.\n\nWhat else would you like to do?`;
   }
 
-  // --- RELATE PEOPLE ---
-  if (operation.action === "relate") {
-    const personsA = await findPersonByName(tree.id, operation.nameA);
-    if (personsA.length === 0) {
-      return `I couldn't find ${operation.nameA}. Try adding them first: Add ${operation.nameA}`;
-    }
-    if (personsA.length > 1) {
-      return buildMultipleMatchesMessage(operation.nameA, personsA);
-    }
-
-    const personsB = await findPersonByName(tree.id, operation.nameB);
-    if (personsB.length === 0) {
-      return `I couldn't find ${operation.nameB}. Try adding them first: Add ${operation.nameB}`;
-    }
-    if (personsB.length > 1) {
-      return buildMultipleMatchesMessage(operation.nameB, personsB);
-    }
-
-    const personA = personsA[0];
-    const personB = personsB[0];
-    let dbKind = operation.kind;
-    let personAId = personA.id;
-    let personBId = personB.id;
-
-    // FIXED: Translate NLP kinds to DB kinds and handle relationship direction
-    if (["father", "mother", "parent"].includes(operation.kind)) {
-      dbKind = "parent"; // A is the parent of B
-    } else if (["son", "daughter", "child"].includes(operation.kind)) {
-      dbKind = "parent"; // B is the parent of A, so we swap
-      [personAId, personBId] = [personBId, personAId];
-    } else if (operation.kind === "spouse") {
-      dbKind = "spouse";
-    } else {
-      return `I don't know how to handle the relationship '${operation.kind}'.`;
-    }
-
-    await addRelationship(tree.id, dbKind, personAId, personBId);
-
-    return buildAddRelationshipMessage(operation, tree);
+  // --- RELATE PEOPLE (with duplicate detection) ---
+  if (operation.action === 'relate') {
+    return await handleRelate(phoneNumber, tree, operation, messageText);
   }
 
-  return "I didn't quite understand. Try 'Add John born 1980' or 'John is Mary's father'. Type 'menu' for all commands.";
+  return "I didn't quite understand that. Try:\n• `Add John born 1980`\n• `John is Mary's father`\n• `John and Mary are married`\n\nOr type `menu` for all commands.";
+}
+
+// ============================================================================
+// INFERENCE MODE HANDLER
+// ============================================================================
+
+async function handleInferenceMode(phoneNumber, operation) {
+  if (operation.confidence < 0.6) {
+    return "I'm not sure I understood that correctly. Could you rephrase it more directly?\n\nFor example: `Add John born 1980` or `John is Mary's father`";
+  }
+
+  // Save as pending action
+  await savePendingAction(phoneNumber, null, operation);
+
+  let message = `I think you mean:\n_${operation.interpretation}_\n\n`;
+  message += "This would:\n";
+
+  operation.suggestedActions.forEach((action, i) => {
+    if (action.action === 'add_person') {
+      message += `${i + 1}. Add ${action.firstName} ${action.lastName || ''}`;
+      if (action.birthday) message += ` (born ${action.birthday})`;
+      message += '\n';
+    } else if (action.action === 'relate') {
+      message += `${i + 1}. Link ${action.nameA} and ${action.nameB} as ${action.kind}\n`;
+    }
+  });
+
+  message += "\nIs this correct? Reply `yes` to confirm or `no` to cancel.";
+  return message;
+}
+
+// ============================================================================
+// CONFIRMATION HANDLER
+// ============================================================================
+
+async function handleConfirm(phoneNumber) {
+  const pending = await getPendingAction(phoneNumber);
+  
+  if (!pending) {
+    return "There's nothing to confirm. What would you like to do?";
+  }
+
+  const userState = await getUserState(phoneNumber);
+  if (!userState?.tree_id) {
+    await clearPendingAction(phoneNumber);
+    return "You need to create or join a tree first.";
+  }
+
+  const tree = await getTreeById(userState.tree_id);
+  const action = pending.action;
+
+  let results = [];
+
+  // Execute suggested actions
+  for (const suggestedAction of action.suggestedActions) {
+    try {
+      if (suggestedAction.action === 'add_person') {
+        const person = await insertPerson(
+          tree.id,
+          suggestedAction.firstName,
+          suggestedAction.lastName,
+          suggestedAction.gender,
+          suggestedAction.birthday
+        );
+        results.push(`Added ${person.data.first_name} ${person.data.last_name || ''}`);
+      } else if (suggestedAction.action === 'relate') {
+        const personsA = await findPersonByName(tree.id, suggestedAction.nameA);
+        const personsB = await findPersonByName(tree.id, suggestedAction.nameB);
+        
+        if (personsA.length > 0 && personsB.length > 0) {
+          const result = await addRelationshipSmart(tree.id, suggestedAction.kind, personsA[0].id, personsB[0].id);
+          if (!result.duplicate) {
+            results.push(`Linked ${suggestedAction.nameA} and ${suggestedAction.nameB}`);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error executing suggested action:', err);
+    }
+  }
+
+  await clearPendingAction(phoneNumber);
+
+  if (results.length === 0) {
+    return "I tried to make those changes but ran into some issues. Please try adding them one at a time.";
+  }
+
+  let message = "Done! I've:\n";
+  results.forEach(r => message += `✓ ${r}\n`);
+  message += `\nView your tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
+  return message;
+}
+
+// ============================================================================
+// ADD PERSON HANDLER (with entity resolution)
+// ============================================================================
+
+async function handleAddPerson(phoneNumber, tree, operation) {
+  // Check for similar existing persons
+  const similar = await findSimilarPersons(
+    tree.id,
+    operation.firstName,
+    operation.lastName,
+    operation.birthday
+  );
+
+  if (similar.length > 0) {
+    let message = `There's already someone similar in your tree:\n`;
+    similar.forEach(p => {
+      const fullName = `${p.data.first_name} ${p.data.last_name || ''}`.trim();
+      const birthday = p.data.birthday || 'unknown birth year';
+      message += `• ${fullName} (${birthday})\n`;
+    });
+    message += `\nWould you still like to add ${operation.firstName} ${operation.lastName || ''}`;
+    if (operation.birthday) message += ` (born ${operation.birthday})`;
+    message += `?\n\nReply 'yes' to add anyway, or 'no' to cancel.`;
+
+    // Save as pending action
+    await savePendingAction(phoneNumber, tree.id, {
+      action: 'add_person',
+      firstName: operation.firstName,
+      lastName: operation.lastName,
+      gender: operation.gender,
+      birthday: operation.birthday
+    });
+
+    return message;
+  }
+
+  // No similar persons, add directly
+  const person = await insertPerson(
+    tree.id,
+    operation.firstName,
+    operation.lastName,
+    operation.gender,
+    operation.birthday
+  );
+
+  await setUserState(
+    phoneNumber,
+    tree.id,
+    person.id,
+    `${operation.firstName} ${operation.lastName || ''}`.trim()
+  );
+
+  return buildAddPersonMessage(person, tree);
+}
+
+// ============================================================================
+// EDIT PERSON HANDLER
+// ============================================================================
+
+async function handleEditPerson(phoneNumber, tree, operation) {
+  const persons = await findPersonByName(tree.id, operation.oldName);
+
+  if (persons.length === 0) {
+    return `I couldn't find anyone named ${operation.oldName} in your tree.`;
+  }
+  if (persons.length > 1) {
+    return buildMultipleMatchesMessage(operation.oldName, persons);
+  }
+
+  const person = persons[0];
+  const updates = {};
+
+  if (operation.newName) {
+    const parts = operation.newName.split(/\s+/);
+    updates.first_name = parts[0];
+    updates.last_name = parts.length > 1 ? parts.slice(1).join(' ') : null;
+  }
+
+  if (operation.newBirthday) {
+    updates.birthday = operation.newBirthday;
+  }
+
+  if (operation.newGender) {
+    updates.gender = operation.newGender;
+  }
+
+  await updatePerson(person.id, updates);
+
+  const oldName = `${person.data.first_name} ${person.data.last_name || ''}`.trim();
+  const newName = operation.newName || oldName;
+
+  return `Updated ${oldName} → ${newName}\n\nView your tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
+}
+
+// ============================================================================
+// RELATE HANDLER (with duplicate detection)
+// ============================================================================
+
+async function handleRelate(phoneNumber, tree, operation) {
+  const personsA = await findPersonByName(tree.id, operation.nameA);
+  if (personsA.length === 0) {
+    return `I couldn't find ${operation.nameA}. Try adding them first:\n\`Add ${operation.nameA}\``;
+  }
+  if (personsA.length > 1) {
+    return buildMultipleMatchesMessage(operation.nameA, personsA);
+  }
+
+  const personsB = await findPersonByName(tree.id, operation.nameB);
+  if (personsB.length === 0) {
+    return `I couldn't find ${operation.nameB}. Try adding them first:\n\`Add ${operation.nameB}\``;
+  }
+  if (personsB.length > 1) {
+    return buildMultipleMatchesMessage(operation.nameB, personsB);
+  }
+
+  const personA = personsA[0];
+  const personB = personsB[0];
+
+  const result = await addRelationshipSmart(tree.id, operation.kind, personA.id, personB.id);
+
+  if (result.duplicate) {
+    return `That relationship already exists between ${operation.nameA} and ${operation.nameB}.`;
+  }
+
+  return buildAddRelationshipMessage(operation, tree);
+}
+
+// ============================================================================
+// SMART RELATIONSHIP ADDER (handles all mappings)
+// ============================================================================
+
+async function addRelationshipSmart(treeId, kind, personAId, personBId) {
+  let dbKind = kind;
+  let idA = personAId;
+  let idB = personBId;
+
+  // Map NLP kinds to DB kinds
+  if (['father', 'mother', 'parent'].includes(kind)) {
+    dbKind = RELATIONSHIP_TYPES.PARENT; // A is parent of B
+  } else if (['son', 'daughter', 'child'].includes(kind)) {
+    dbKind = RELATIONSHIP_TYPES.PARENT; // Swap: B is parent of A
+    [idA, idB] = [idB, idA];
+  } else if (kind === 'spouse') {
+    dbKind = RELATIONSHIP_TYPES.SPOUSE;
+  } else if (kind === 'divorced') {
+    dbKind = RELATIONSHIP_TYPES.DIVORCED;
+  } else if (kind === 'separated') {
+    dbKind = RELATIONSHIP_TYPES.SEPARATED;
+  } else if (['brother', 'sister'].includes(kind)) {
+    // Infer same parents - not directly supported yet
+    return { error: "Sibling relationships need to be set up through parents. Try: 'Alice is Bob's daughter' and 'Bob is Charlie's daughter'" };
+  }
+
+  return await addRelationship(treeId, dbKind, idA, idB);
 }
 
 // ============================================================================
@@ -195,14 +438,19 @@ async function processMessage(phoneNumber, messageText) {
 function buildHelpMessage() {
   let message = "🌿 *Family Tree Bot Commands* 🌿\n\n";
   message += "*Getting Started:*\n";
-  message += "• `Create tree called [name]`\n\n";
+  message += "• `Create tree called [name]`\n";
+  message += "• `Join tree [6-char code]`\n\n";
   message += "*Adding People:*\n";
   message += "• `Add [name] born [year]`\n";
-  message += "• `Add [name]`\n\n";
+  message += "• `Add [name]` (without birth year)\n\n";
   message += "*Creating Relationships:*\n";
   message += "• `[Name] and [Name] are married`\n";
   message += "• `[Name] is [Name]'s father`\n";
-  message += "• `[Name] is [Name]'s daughter`\n\n";
+  message += "• `[Name] is [Name]'s daughter`\n";
+  message += "• `[Name] and [Name] are divorced`\n\n";
+  message += "*Editing:*\n";
+  message += "• `Change [old name] to [new name]`\n";
+  message += "• `Set [name]'s gender to male/female`\n\n";
   message += "*Examples:*\n";
   message += "• `Create tree called The Smiths`\n";
   message += "• `Add John Smith born 1980`\n";
@@ -214,41 +462,60 @@ function buildHelpMessage() {
 }
 
 function buildCreateTreeMessage(tree) {
-  let message = `Created your family tree: *${tree.name}*\n\n`;
+  let message = `Congrats! 🎉 You've created a tree called *${tree.name}*.\n\n`;
+  message += `You can view it here:\n${BASE_URL}/tree.html?code=${tree.join_code}\n\n`;
   message += `Share this code with family to collaborate: *${tree.join_code}*\n\n`;
-  message += "Now, let's add the first person:\n`Add John born 1980`\n\n";
-  message += "View your tree anytime at:\n";
-  message += `${BASE_URL}/tree.html?code=${tree.join_code}`;
+  message += "Add your first person by giving me their name (and maybe date of birth):\n";
+  message += "`Add John Smith born 1980`";
   return message;
 }
 
-function buildAddPersonMessage(person) {
-  let name = `${person.data.first_name || ""} ${person.data.last_name || ""}`.trim();
+function buildAddPersonMessage(person, tree) {
+  let name = `${person.data.first_name || ''} ${person.data.last_name || ''}`.trim();
   let message = `I've added *${name}*`;
   if (person.data.birthday) {
     message += ` (born ${person.data.birthday})`;
   }
   message += " to your family tree.\n\n";
-  message += FOLLOW_UP_PROMPT;
+  message += "What else would you like to do? You can:\n";
+  message += "• Add more people\n";
+  message += "• Create relationships\n";
+  message += "• Type 'menu' for all commands";
   return message;
 }
 
 function buildAddRelationshipMessage(operation, tree) {
-  let message = `OK, I've linked *${operation.nameA}* and *${operation.nameB}* as requested.\n\n`;
-  message += "You can see the updated tree here:\n";
-  message += `${BASE_URL}/tree.html?code=${tree.join_code}\n\n`;
-  message += FOLLOW_UP_PROMPT;
+  let message = `OK, I've linked *${operation.nameA}* and *${operation.nameB}*`;
+  
+  const kindMap = {
+    'father': 'father and child',
+    'mother': 'mother and child',
+    'parent': 'parent and child',
+    'son': 'parent and son',
+    'daughter': 'parent and daughter',
+    'child': 'parent and child',
+    'spouse': 'spouses',
+    'divorced': 'divorced',
+    'separated': 'separated'
+  };
+  
+  if (kindMap[operation.kind]) {
+    message += ` as ${kindMap[operation.kind]}`;
+  }
+  
+  message += ".\n\n";
+  message += `View your updated tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
   return message;
 }
 
 function buildMultipleMatchesMessage(name, persons) {
-  let message = `I found a few people named *${name}*:\n`;
-  persons.forEach((p) => {
-    const fullName = `${p.data.first_name} ${p.data.last_name || ""}`.trim();
-    const birthday = p.data.birthday || "no birth year";
-    message += `• ${fullName} (${birthday})\n`;
+  let message = `I found multiple people named *${name}*:\n\n`;
+  persons.forEach((p, i) => {
+    const fullName = `${p.data.first_name} ${p.data.last_name || ''}`.trim();
+    const birthday = p.data.birthday || 'no birth year';
+    message += `${i + 1}. ${fullName} (${birthday})\n`;
   });
-  message += "\nPlease be more specific, maybe by using their full name.";
+  message += "\nPlease be more specific, maybe by using their full name or birth year.";
   return message;
 }
 
