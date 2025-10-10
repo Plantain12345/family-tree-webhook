@@ -7,6 +7,7 @@
     "start": "node api/webhook.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.43.3"
+    "@supabase/supabase-js": "^2.43.3",
+    "openai": "^4.57.0"
   }
 }
