@@ -80,7 +80,7 @@ async function processMessage(phoneNumber, messageText) {
     return "Please say something";
   }
 
-  const operation = parseOps(messageText);
+  const operation = await parseOps(messageText);
   const userState = await getUserState(phoneNumber);
 
   // --- HELP/MENU ---
