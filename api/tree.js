@@ -36,13 +36,18 @@ export default async function handler(req, res) {
     if (rErr) console.error("Relationships fetch error:", rErr);
 
     const persons = (personRows || []).map((p) => ({
-      id: p.id,
+      id: String(p.id),  // Ensure ID is string
       data: normalizePersonData(p.data),
-      rels: { father: null, mother: null, spouses: [], children: [] },
+      rels: { 
+        father: null, 
+        mother: null, 
+        spouses: [],  // Array of string IDs
+        children: []  // Array of string IDs
+      },
     }));
 
     // Build relationship links
-    const byId = new Map(persons.map((p) => [String(p.id), p]));
+    const byId = new Map(persons.map((p) => [p.id, p]));
     const rels = relRows || [];
 
     for (const r of rels) {
@@ -56,11 +61,22 @@ export default async function handler(req, res) {
         const parent = byId.get(a);
         const child = byId.get(b);
         if (parent && child) {
-          parent.rels.children.push(b);
-          if (parent.data.gender === "M") {
+          // Add to parent's children array (ensure no duplicates)
+          if (!parent.rels.children.includes(b)) {
+            parent.rels.children.push(b);
+          }
+          // Set child's father or mother (single value, not array)
+          if (parent.data.gender === "M" && !child.rels.father) {
             child.rels.father = a;
-          } else if (parent.data.gender === "F") {
+          } else if (parent.data.gender === "F" && !child.rels.mother) {
             child.rels.mother = a;
+          } else if (!parent.data.gender || parent.data.gender === "U") {
+            // If gender unknown, assign to whichever parent slot is empty
+            if (!child.rels.father) {
+              child.rels.father = a;
+            } else if (!child.rels.mother) {
+              child.rels.mother = a;
+            }
           }
         }
       } else if (r.kind === "child") {
@@ -68,20 +84,28 @@ export default async function handler(req, res) {
         const parent = byId.get(b);
         const child = byId.get(a);
         if (parent && child) {
-          parent.rels.children.push(a);
-          if (parent.data.gender === "M") {
+          // Add to parent's children array (ensure no duplicates)
+          if (!parent.rels.children.includes(a)) {
+            parent.rels.children.push(a);
+          }
+          // Set child's father or mother
+          if (parent.data.gender === "M" && !child.rels.father) {
             child.rels.father = b;
-          } else if (parent.data.gender === "F") {
+          } else if (parent.data.gender === "F" && !child.rels.mother) {
             child.rels.mother = b;
+          } else if (!parent.data.gender || parent.data.gender === "U") {
+            if (!child.rels.father) {
+              child.rels.father = b;
+            } else if (!child.rels.mother) {
+              child.rels.mother = b;
+            }
           }
         }
       } else if (["spouse", "divorced", "separated"].includes(r.kind)) {
-        // Bidirectional relationships
+        // Bidirectional relationships - ensure no duplicates
         const personA = byId.get(a);
         const personB = byId.get(b);
         if (personA && personB) {
-          // For now, just store IDs (family-chart expects string IDs)
-          // Status info is stored in relationships array for future use
           if (!personA.rels.spouses.includes(b)) {
             personA.rels.spouses.push(b);
           }
