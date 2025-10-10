@@ -229,15 +229,16 @@ function buildSystemPrompt(treeContext) {
   let prompt = `You are a deterministic parser for a WhatsApp family tree bot. Output STRICT JSON only.
 
 CRITICAL RULES:
-1. Never invent data. Omit fields that are not present.
-2. Names must be Title Case.
-3. For 'add_person': extract firstName, lastName (optional), birthday (YYYY only), gender ('M'|'F') if stated.
-4. For 'relate': nameA is SUBJECT, nameB is OBJECT.
+1. ALL fields in the schema must be returned, even if null.
+2. Set unused fields to null explicitly.
+3. Names must be Title Case.
+4. For 'add_person': extract firstName, lastName (optional), birthday (YYYY only), gender ('M'|'F') if stated. Set unused fields to null.
+5. For 'relate': nameA is SUBJECT, nameB is OBJECT. Set other fields to null.
    - "John is Mary's father" → kind='father', nameA='John', nameB='Mary'
-   - "Alice is Bob's daughter" → kind='daughter', nameA='Alice', nameB='Bob' (will be converted to parent relationship)
-5. For 'join_tree': return uppercase 6-character code.
-6. Dates: Extract year only (YYYY format). Accept "born in 1952", "1952", "circa 1940s", "Spring 1978".
-7. Multiple people: Extract each separately.
+   - "Alice is Bob's daughter" → kind='daughter', nameA='Alice', nameB='Bob'
+6. For 'join_tree': return uppercase 6-character code. Set other fields to null.
+7. Dates: Extract year only (YYYY format). Accept "born in 1952", "1952", "circa 1940s", "Spring 1978".
+8. Multiple people: Extract each separately.
 
 RELATIONSHIP MAPPINGS:
 - "father", "mother", "parent" → parent relationship (A is parent of B)
@@ -251,15 +252,14 @@ RELATIONSHIP MAPPINGS:
     prompt += `\n\nCURRENT TREE CONTEXT:\n${JSON.stringify(treeContext, null, 2)}`;
   }
 
-  prompt += `\n\nEXAMPLES:
-{"action":"add_person","firstName":"Grace","lastName":null,"birthday":"1952"}
-{"action":"add_person","firstName":"John","lastName":"Smith","birthday":"1980","gender":"M"}
-{"action":"relate","kind":"spouse","nameA":"John","nameB":"Mary"}
-{"action":"relate","kind":"father","nameA":"John","nameB":"Alice"}
-{"action":"edit_person","oldName":"John Benedict Kaggwa","newName":"John Baptist Kaggwa"}
-{"action":"create_tree","treeName":"The Smith Family"}
-{"action":"join_tree","code":"AB12CD"}
-{"action":"help"}`;
+  prompt += `\n\nEXAMPLES (all unused fields must be null):
+{"action":"add_person","treeName":null,"code":null,"firstName":"Grace","lastName":null,"birthday":"1952","deathday":null,"gender":null,"kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}
+{"action":"add_person","treeName":null,"code":null,"firstName":"John","lastName":"Smith","birthday":"1980","deathday":null,"gender":"M","kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}
+{"action":"relate","treeName":null,"code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":"spouse","nameA":"John","nameB":"Mary","oldName":null,"newName":null,"newBirthday":null,"newGender":null}
+{"action":"relate","treeName":null,"code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":"father","nameA":"John","nameB":"Alice","oldName":null,"newName":null,"newBirthday":null,"newGender":null}
+{"action":"create_tree","treeName":"The Smith Family","code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}
+{"action":"join_tree","treeName":null,"code":"AB12CD","firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}
+{"action":"help","treeName":null,"code":null,"firstName":null,"lastName":null,"birthday":null,"deathday":null,"gender":null,"kind":null,"nameA":null,"nameB":null,"oldName":null,"newName":null,"newBirthday":null,"newGender":null}`;
 
   return prompt;
 }
@@ -267,14 +267,16 @@ RELATIONSHIP MAPPINGS:
 function buildUserPrompt(text) {
   return `Message: "${text}"
 
+IMPORTANT: Return JSON with ALL 14 fields. Set unused fields to null.
+
 SPECIAL CASES:
-- "Add Grace, born in 1952" → {"action":"add_person","firstName":"Grace","lastName":null,"birthday":"1952"}
+- "Add Grace, born in 1952" → firstName="Grace", lastName=null, birthday="1952", all other fields=null
 - "Add Grace born 1952" → same as above
-- "Musa had three kids named Henry, James and Roberto, born in 1932, 1933, and 1954" → return FIRST person only: {"action":"add_person","firstName":"Henry","lastName":null,"birthday":"1932"}
+- "Musa had three kids named Henry, James and Roberto, born in 1932, 1933, and 1954" → return FIRST person only: firstName="Henry", birthday="1932", all other fields=null
 - Natural language dates: "fourteenth of January nineteen forty" → "1940"
 - Decades: "1940s", "circa 1940s", "the forties" → "1940"
 
-Parse this message and return valid JSON matching the schema.`;
+Parse this message and return valid JSON with all fields.`;
 }
 
 // ============================================================================
