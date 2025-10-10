@@ -75,7 +75,7 @@ export async function parseOps(text) {
       const resp = await client.responses.create({
         model: "gpt-4o-mini",
         temperature: 0,
-        // ⬇️ New location for JSON schema formatting:
+        // ⬇️ New location for JSON schema formatting (Responses API):
         text: { format: { type: "json_schema", json_schema: schema } },
         input: [
           { role: "system", content: sys },
@@ -83,22 +83,19 @@ export async function parseOps(text) {
         ]
       });
 
-      // Prefer parsed output when the SDK provides it; otherwise fall back to text.
-      const parsed =
-        // some SDK versions expose schema-validated output here:
+      // Prefer parsed output when the SDK provides it; otherwise fall back to text/chunks.
+      let parsed =
         resp.output_parsed
-        // or return a string we can parse:
-        ?? (resp.output_text ? JSON.parse(resp.output_text) : null)
-        // ultimate fallback: try to find the first text chunk
-        ?? (() => {
-             try {
-               const chunk = resp.output?.[0]?.content?.find?.(c => c.type === "output_text");
-               return chunk?.text ? JSON.parse(chunk.text) : null;
-             } catch { return null; }
-           })();
+        ?? (resp.output_text ? JSON.parse(resp.output_text) : null);
 
-      const content = resp.output_text ?? "{}";
-      const parsed = JSON.parse(content);
+      if (!parsed && resp.output && Array.isArray(resp.output)) {
+        try {
+          const chunk = resp.output[0]?.content?.find?.(c => c.type === "output_text");
+          if (chunk?.text) parsed = JSON.parse(chunk.text);
+        } catch {
+          // ignore JSON errors; we'll fall back to regex below
+        }
+      }
 
       // Minimal sanity: if action missing, fall back
       if (!parsed || typeof parsed !== "object" || !parsed.action) {
