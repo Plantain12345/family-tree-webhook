@@ -1,14 +1,18 @@
 // api/tree.js
+// Serves tree data to the webpage with proper relationship handling
+
 import { db } from "./_db.js";
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "GET")
+    if (req.method !== "GET") {
       return res.status(405).json({ error: "Method Not Allowed" });
+    }
 
     const code = (req.query.code || "").trim().toUpperCase();
-    if (!/^[A-Z0-9]{6}$/.test(code))
-      return res.status(400).json({ error: "Bad code" });
+    if (!/^[A-Z0-9]{6}$/.test(code)) {
+      return res.status(400).json({ error: "Invalid code format. Code must be 6 alphanumeric characters." });
+    }
 
     // Fetch tree
     const { data: tree, error: tErr } = await db
@@ -17,10 +21,11 @@ export default async function handler(req, res) {
       .eq("join_code", code)
       .single();
 
-    if (tErr || !tree)
+    if (tErr || !tree) {
       return res.status(404).json({ error: "Tree not found" });
+    }
 
-    // Fetch persons and relationships - FIXED column names
+    // Fetch persons and relationships
     const [{ data: personRows, error: pErr }, { data: relRows, error: rErr }] =
       await Promise.all([
         db.from("persons").select("id, data").eq("tree_id", tree.id),
@@ -45,14 +50,18 @@ export default async function handler(req, res) {
       const b = String(r.person_b_id);
       if (!byId.has(a) || !byId.has(b)) continue;
 
-      // Handle the 3 allowed relationship kinds: 'parent', 'child', 'spouse'
+      // Handle relationship types
       if (r.kind === "parent") {
+        // A is parent of B
         const parent = byId.get(a);
         const child = byId.get(b);
         if (parent && child) {
           parent.rels.children.push(b);
-          if (parent.data.gender === "M") child.rels.father = a;
-          else if (parent.data.gender === "F") child.rels.mother = a;
+          if (parent.data.gender === "M") {
+            child.rels.father = a;
+          } else if (parent.data.gender === "F") {
+            child.rels.mother = a;
+          }
         }
       } else if (r.kind === "child") {
         // Reverse: B is parent of A
@@ -60,12 +69,21 @@ export default async function handler(req, res) {
         const child = byId.get(a);
         if (parent && child) {
           parent.rels.children.push(a);
-          if (parent.data.gender === "M") child.rels.father = b;
-          else if (parent.data.gender === "F") child.rels.mother = b;
+          if (parent.data.gender === "M") {
+            child.rels.father = b;
+          } else if (parent.data.gender === "F") {
+            child.rels.mother = b;
+          }
         }
-      } else if (r.kind === "spouse") {
-        byId.get(a)?.rels.spouses.push(b);
-        byId.get(b)?.rels.spouses.push(a);
+      } else if (["spouse", "divorced", "separated"].includes(r.kind)) {
+        // Bidirectional relationships
+        const personA = byId.get(a);
+        const personB = byId.get(b);
+        if (personA && personB) {
+          // Store relationship type with the ID
+          personA.rels.spouses.push({ id: b, status: r.kind });
+          personB.rels.spouses.push({ id: a, status: r.kind });
+        }
       }
     }
 
@@ -73,7 +91,6 @@ export default async function handler(req, res) {
       tree,
       persons: persons,
       relationships: rels,
-      original_relationships: rels,
     });
   } catch (e) {
     console.error("API /tree fatal error:", e);
