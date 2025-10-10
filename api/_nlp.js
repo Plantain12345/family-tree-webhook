@@ -413,9 +413,9 @@ export async function getTreeContext(treeId, dbModule) {
   
   try {
     const [tree, persons, relationships] = await Promise.all([
-      db.getTreeById(treeId),
-      db.listPersons(treeId),
-      db.listRelationships(treeId)
+      dbModule.getTreeById(treeId),
+      dbModule.listPersons(treeId),
+      dbModule.listRelationships(treeId)
     ]);
 
     return {
