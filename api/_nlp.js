@@ -9,11 +9,11 @@ const client = OPENAI_ENABLED ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY 
 
 // ---- Supported actions returned by parseOps(text):
 // { action: "help" }
-// { action: "create_tree", name }
+// { action: "create_tree", treeName }
 // { action: "join_tree", code }
 // { action: "add_person", firstName, lastName?, gender?, birthday? }
-// { action: "set_gender", name, gender } // gender in: "male"|"female"
-// { action: "relate", kind, nameA, nameB } // kind in: "father"|"mother"|"parent"|"spouse"|"child"|"daughter"|"son"
+// { action: "set_gender", name, gender } // gender: "M" | "F"
+// { action: "relate", kind, nameA, nameB } // kind: "father"|"mother"|"parent"|"spouse"|"child"|"daughter"|"son"
 // { action: "unknown" }
 
 export async function parseOps(text) {
@@ -27,68 +27,46 @@ export async function parseOps(text) {
         name: "TreeBotCommand",
         schema: {
           type: "object",
+          additionalProperties: false,
           properties: {
             action: {
               type: "string",
               description: "The primary action the user wants to take.",
-              enum: [
-                "help",
-                "create_tree",
-                "add_person",
-                "set_gender",
-                "relate",
-                "unknown",
-              ],
+              enum: ["help", "create_tree", "join_tree", "add_person", "set_gender", "relate", "unknown"]
             },
-            treeName: {
-              type: "string",
-              description: "The name for a new family tree. e.g., 'The Smith Family'",
-            },
-            firstName: {
-              type: "string",
-              description: "The first name of a person.",
-            },
-            lastName: {
-              type: "string",
-              description: "The last name of a person.",
-            },
+            treeName: { type: "string", description: "Name for a new family tree." },
+            code: { type: "string", description: "Join/switch code for a tree." },
+            firstName: { type: "string" },
+            lastName: { type: "string" },
             birthday: {
-              type: "string",
-              description: "The birth date or year of a person, formatted as YYYY-MM-DD or YYYY.",
+              type: ["string", "null"],
+              description: "YYYY-MM-DD or YYYY."
             },
             gender: {
-              type: "string",
-              description: "The gender of the person.",
-              enum: ["M", "F"],
+              type: ["string", "null"],
+              enum: ["M", "F", null]
             },
             kind: {
               type: "string",
-              description: "The type of relationship between two people.",
-              enum: ["father", "mother", "parent", "spouse", "child", "son", "daughter"],
+              enum: ["father", "mother", "parent", "spouse", "child", "son", "daughter"]
             },
-            nameA: {
-              type: "string",
-              description: "The name of the first person in a relationship.",
-            },
-            nameB: {
-              type: "string",
-              description: "The name of the second person in a relationship.",
-            },
+            nameA: { type: "string" },
+            nameB: { type: "string" }
           },
-          required: ["action"],
+          required: ["action"]
         },
-        strict: true,
+        strict: true
       };
 
       const sys = [
         "You are a parser for a WhatsApp family-tree bot.",
         "Return STRICT JSON ONLY that matches the JSON schema.",
-        "Analyze the user's message to extract entities for the family tree.",
         "If a field is not present, omit it. Do not invent data.",
-        "For 'add_person', extract first_name, last_name, gender, and birthday if available.",
-        "For 'relate', `nameA` is the subject and `nameB` is the object. E.g., for 'John is Mary's father', nameA is 'John' and nameB is 'Mary'.",
         "Normalize names to Title Case.",
-        "If the user says 'John and Mary are married', the action is 'relate', kind is 'spouse', nameA is 'John', nameB is 'Mary'."
+        "For 'add_person', extract firstName, lastName, gender ('M'|'F') and birthday (YYYY-MM-DD or YYYY) when present.",
+        "For 'relate', nameA is the subject and nameB is the object, e.g., 'John is Mary's father' => nameA='John', nameB='Mary'.",
+        "For 'create_tree', return treeName.",
+        "For 'join_tree', return code (uppercase)."
       ].join(" ");
 
       const user = `Parse this message: "${raw}"`;
@@ -96,24 +74,27 @@ export async function parseOps(text) {
       const resp = await client.responses.create({
         model: "gpt-4o-mini",
         temperature: 0,
-        // ⬇️ FIXED: Added 'name' and passed 'schema.schema' to the 'json_schema' property.
         text: {
           format: {
             type: "json_schema",
             name: schemaDefinition.name,
-            json_schema: schemaDefinition.schema,
-          },
+            schema: schemaDefinition.schema,   // <-- FIXED: must be `schema`, not `json_schema`
+            strict: schemaDefinition.strict
+          }
         },
         input: [
           { role: "system", content: sys },
-          { role: "user", content: user },
-        ],
+          { role: "user", content: user }
+        ]
       });
-      
-      const parsed = resp.output_parsed ?? (resp.output_text ? JSON.parse(resp.output_text) : null);
 
+      // Prefer parsed output when the SDK provides it; otherwise try text.
+      let parsed = resp.output_parsed
+        ?? (resp.output_text ? JSON.parse(resp.output_text) : null);
+
+      // Minimal sanity: if action missing, fall back
       if (!parsed || typeof parsed !== "object" || !parsed.action) {
-        console.warn("OpenAI parsing failed or returned invalid structure, falling back to regex.");
+        console.warn("OpenAI parsing returned no/invalid JSON; falling back to regex.");
         return regexFallback(raw);
       }
       return parsed;
@@ -128,46 +109,49 @@ export async function parseOps(text) {
   return regexFallback(raw);
 }
 
-// A simple regex fallback for when the OpenAI API is not available or fails.
+// ------------------- Conservative regex fallback -------------------
+
 function regexFallback(text) {
   const msg = text.trim().toLowerCase();
 
-  if (/^(help|menu|commands)/i.test(msg)) return { action: "help" };
+  // help/menu
+  if (/^(help|menu|commands|what can you do)/i.test(msg)) return { action: "help" };
 
-  let m = msg.match(/^create tree called (.+)$/i);
+  // create tree
+  let m = msg.match(/^create\s+(?:a\s+)?tree\s+(?:called|named)\s+(.+)$/i);
   if (m) return { action: "create_tree", treeName: titleCase(m[1]) };
 
-  m = msg.match(/^add ([a-z\s.'-]+?)(?: born (\d{4}))?$/i);
+  // join tree (e.g., "use ABC123" or "join code ABC123")
+  m = msg.match(/^(?:join|switch|use)\s+(?:code\s+)?([A-Z0-9]{4,10})$/i);
+  if (m) return { action: "join_tree", code: m[1].toUpperCase() };
+
+  // add person (optional birth year)
+  m = msg.match(/^(?:add|create)\s+([a-z\s.'-]+?)(?:,\s*born\s+(\d{4}))?$/i);
   if (m) {
-    const names = titleCase(m[1]).split(" ");
-    const firstName = names.shift();
-    const lastName = names.join(" ");
-    return {
-      action: "add_person",
-      firstName: firstName,
-      lastName: lastName || null,
-      birthday: m[2] || null,
-    };
+    const full = titleCase(m[1]);
+    const parts = full.split(/\s+/);
+    const firstName = parts.shift();
+    const lastName = parts.join(" ") || null;
+    return { action: "add_person", firstName, lastName, birthday: m[2] || null };
   }
 
+  // set gender
+  m = msg.match(/^set\s+gender\s+of\s+([a-z\s.'-]+)\s+to\s+(male|female)$/i);
+  if (m) {
+    const g = m[2].toLowerCase().startsWith("m") ? "M" : "F";
+    return { action: "set_gender", name: titleCase(m[1]), gender: g };
+  }
+
+  // relationships (X is Y's father/mother/son/daughter/child)
   m = msg.match(/^(.+?)\s+is\s+(.+?)'s\s+(father|mother|son|daughter|child)$/i);
   if (m) {
-    return {
-      action: "relate",
-      kind: m[3].toLowerCase(),
-      nameA: titleCase(m[1]),
-      nameB: titleCase(m[2]),
-    };
+    return { action: "relate", kind: m[3].toLowerCase(), nameA: titleCase(m[1]), nameB: titleCase(m[2]) };
   }
 
+  // marriage
   m = msg.match(/^(.+?)\s+and\s+(.+?)\s+are\s+(?:married|spouses)$/i);
   if (m) {
-    return {
-      action: "relate",
-      kind: "spouse",
-      nameA: titleCase(m[1]),
-      nameB: titleCase(m[2]),
-    };
+    return { action: "relate", kind: "spouse", nameA: titleCase(m[1]), nameB: titleCase(m[2]) };
   }
 
   return { action: "unknown" };
