@@ -108,25 +108,23 @@
       cardsHost.style.display=list.length?'block':'none';
     }
 
-    function hasRels(persons){
-      return persons.some(p=>{
-        const r=p.rels||{};
-        const hasFather = r.father !== null && r.father !== undefined;
-        const hasMother = r.mother !== null && r.mother !== undefined;
-        const hasSpouses = Array.isArray(r.spouses) && r.spouses.length > 0;
-        const hasChildren = Array.isArray(r.children) && r.children.length > 0;
-        const hasAnyRel = hasFather || hasMother || hasSpouses || hasChildren;
-        
-        console.log(`Person ${p.id} has rels:`, {
-          father: r.father,
-          mother: r.mother,
-          spouses: r.spouses,
-          children: r.children,
-          hasAnyRel
-        });
-        
-        return hasAnyRel;
+    function hasRels(person){
+      const r = person.rels || {};
+      const hasFather = r.father !== null && r.father !== undefined;
+      const hasMother = r.mother !== null && r.mother !== undefined;
+      const hasSpouses = Array.isArray(r.spouses) && r.spouses.length > 0;
+      const hasChildren = Array.isArray(r.children) && r.children.length > 0;
+      const hasAnyRel = hasFather || hasMother || hasSpouses || hasChildren;
+      
+      console.log(`Person ${person.id} (${person.data?.first_name}) has rels:`, {
+        father: r.father,
+        mother: r.mother,
+        spouses: r.spouses,
+        children: r.children,
+        hasAnyRel
       });
+      
+      return hasAnyRel;
     }
 
     async function renderOnce(){
@@ -138,8 +136,8 @@
         console.log('Total persons:', persons.length);
         console.log('Persons data:', JSON.stringify(persons, null, 2));
         
-        const linked=persons.filter(p=>hasRels([p]));
-        const orphans=persons.filter(p=>!hasRels([p]));
+        const linked=persons.filter(p=>hasRels(p));  // Pass person directly, not [p]
+        const orphans=persons.filter(p=>!hasRels(p)); // Pass person directly, not [p]
         
         console.log('Linked persons:', linked.length);
         console.log('Orphan persons:', orphans.length);
