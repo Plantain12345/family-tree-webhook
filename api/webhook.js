@@ -1,6 +1,7 @@
 // api/webhook.js
-// WhatsApp Flow-based webhook handler
+// WhatsApp Flow-based webhook handler with encryption
 
+import crypto from 'crypto';
 import {
   createTree,
   getTreeById,
@@ -17,6 +18,67 @@ import {
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const BASE_URL = process.env.BASE_URL || "https://family-tree-webhook.vercel.app";
+const PRIVATE_KEY = process.env.FLOW_RSA_PRIVATE_KEY; // Your private key from Meta
+const PASSPHRASE = process.env.FLOW_PASSPHRASE; // Passphrase for private key
+
+// ============================================================================
+// ENCRYPTION HELPERS
+// ============================================================================
+
+function decryptRequest(encryptedFlowData, encryptedAesKey, initialVector) {
+  // Decrypt the AES key using RSA private key
+  const decryptedAesKey = crypto.privateDecrypt(
+    {
+      key: PRIVATE_KEY,
+      passphrase: PASSPHRASE,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: 'sha256',
+    },
+    Buffer.from(encryptedAesKey, 'base64')
+  );
+
+  // Decrypt the flow data using AES
+  const flowDataBuffer = Buffer.from(encryptedFlowData, 'base64');
+  const initialVectorBuffer = Buffer.from(initialVector, 'base64');
+  
+  const decipher = crypto.createDecipheriv(
+    'aes-128-gcm',
+    decryptedAesKey,
+    initialVectorBuffer
+  );
+
+  const TAG_LENGTH = 16;
+  const encrypted = flowDataBuffer.subarray(0, flowDataBuffer.length - TAG_LENGTH);
+  const tag = flowDataBuffer.subarray(flowDataBuffer.length - TAG_LENGTH);
+  
+  decipher.setAuthTag(tag);
+
+  const decryptedData = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]);
+
+  return JSON.parse(decryptedData.toString('utf-8'));
+}
+
+function encryptResponse(response, aesKey, initialVector) {
+  // Encrypt response using AES
+  const cipher = crypto.createCipheriv(
+    'aes-128-gcm',
+    Buffer.from(aesKey, 'base64'),
+    Buffer.from(initialVector, 'base64')
+  );
+
+  const encrypted = Buffer.concat([
+    cipher.update(JSON.stringify(response), 'utf-8'),
+    cipher.final(),
+  ]);
+
+  const tag = cipher.getAuthTag();
+  const encryptedData = Buffer.concat([encrypted, tag]);
+
+  return encryptedData.toString('base64');
+}
 
 // ============================================================================
 // WEBHOOK HANDLER
@@ -44,8 +106,8 @@ export default async function handler(req, res) {
   if (req.method === "POST") {
     const body = req.body;
     
-    // WhatsApp Flow Data Exchange Endpoint
-    if (body.action) {
+    // WhatsApp Flow Data Exchange Endpoint (encrypted)
+    if (body.encrypted_flow_data) {
       return handleFlowDataExchange(req, res);
     }
     
@@ -88,42 +150,57 @@ export default async function handler(req, res) {
 }
 
 // ============================================================================
-// FLOW DATA EXCHANGE HANDLER (for Flow endpoints)
+// FLOW DATA EXCHANGE HANDLER (encrypted)
 // ============================================================================
 
 async function handleFlowDataExchange(req, res) {
-  const { action, screen, data, flow_token } = req.body;
-  
   try {
+    const { encrypted_flow_data, encrypted_aes_key, initial_vector } = req.body;
+
+    // Decrypt the request
+    const decryptedRequest = decryptRequest(
+      encrypted_flow_data,
+      encrypted_aes_key,
+      initial_vector
+    );
+
+    console.log('Decrypted request:', decryptedRequest);
+
+    const { action, screen, data, flow_token, version } = decryptedRequest;
+    
     let responseData = {};
     
-    // Health check
+    // Health check / ping
     if (action === "ping") {
       responseData = {
-        version: "3.0",
+        version: version || "3.0",
         data: {
           status: "active"
         }
       };
     }
     
-    // Handle screen data requests
+    // Handle INIT action (when flow is first opened)
+    else if (action === "INIT") {
+      responseData = {
+        version: version || "3.0",
+        screen: "ADD_MEMBER",
+        data: {}
+      };
+    }
+    
+    // Handle data_exchange (form submission or navigation)
     else if (action === "data_exchange") {
-      // Decode flow_token if needed (contains user context)
       const context = flow_token ? JSON.parse(Buffer.from(flow_token, 'base64').toString()) : {};
       
       switch (screen) {
         case "ADD_MEMBER":
-          responseData = await handleAddMemberScreen(data, context);
-          break;
-          
-        case "ADD_RELATIONSHIP":
-          responseData = await handleAddRelationshipScreen(data, context);
+          responseData = await handleAddMemberScreen(data, context, version);
           break;
           
         default:
           responseData = {
-            version: "3.0",
+            version: version || "3.0",
             data: {
               error: "Unknown screen"
             }
@@ -131,27 +208,46 @@ async function handleFlowDataExchange(req, res) {
       }
     }
     
-    // Encode response data as Base64
-    const encodedData = Buffer.from(JSON.stringify(responseData.data)).toString('base64');
+    // Encrypt the response
+    const encryptedResponse = encryptResponse(
+      responseData,
+      encrypted_aes_key,
+      initial_vector
+    );
     
-    return res.status(200).json({
-      version: "3.0",
-      data: encodedData
-    });
+    return res.status(200).send(encryptedResponse);
     
   } catch (error) {
     console.error("Flow data exchange error:", error);
     
-    const errorData = {
-      error: error.message || "Internal server error"
-    };
+    // For errors during health check, send unencrypted error
+    if (!req.body.encrypted_aes_key) {
+      return res.status(500).json({
+        error: error.message
+      });
+    }
     
-    const encodedError = Buffer.from(JSON.stringify(errorData)).toString('base64');
-    
-    return res.status(200).json({
-      version: "3.0",
-      data: encodedError
-    });
+    // For errors after decryption, send encrypted error
+    try {
+      const errorData = {
+        version: "3.0",
+        data: {
+          error: error.message || "Internal server error"
+        }
+      };
+      
+      const encryptedError = encryptResponse(
+        errorData,
+        req.body.encrypted_aes_key,
+        req.body.initial_vector
+      );
+      
+      return res.status(200).send(encryptedError);
+    } catch (encryptError) {
+      return res.status(500).json({
+        error: "Encryption error"
+      });
+    }
   }
 }
 
@@ -159,67 +255,64 @@ async function handleFlowDataExchange(req, res) {
 // FLOW SCREEN HANDLERS
 // ============================================================================
 
-async function handleAddMemberScreen(data, context) {
+async function handleAddMemberScreen(data, context, version) {
   // When user submits the "Add Family Member" form
-  const { first_name, last_name, gender, year_of_birth } = data;
+  const { first_name, last_name, gender, birth_year, death_year } = data;
   
   // Get tree from context
   const treeId = context.tree_id;
   if (!treeId) {
     return {
-      version: "3.0",
+      version: version || "3.0",
+      screen: "ADD_MEMBER",
       data: {
-        error: "No tree selected"
+        error: "No tree selected. Please start from WhatsApp menu."
       }
     };
   }
   
-  // Insert person into database
-  const newPerson = await insertPerson(
-    treeId, 
-    first_name, 
-    last_name || null, 
-    gender || null, 
-    year_of_birth || null
-  );
-  
-  const fullName = `${first_name} ${last_name || ''}`.trim();
-  
-  return {
-    version: "3.0",
-    data: {
-      success: true,
-      person_id: newPerson.id,
-      person_name: fullName,
-      message: `${fullName} has been added!`
-    }
-  };
-}
-
-async function handleAddRelationshipScreen(data, context) {
-  // When user submits the "Add Relationship" form
-  const { person_a_name, relationship_type, person_b_name } = data;
-  
-  const treeId = context.tree_id;
-  if (!treeId) {
+  try {
+    // Map gender from dropdown ID to database type
+    const genderType = gender === 'male' ? GENDER_TYPES.MALE :
+                       gender === 'female' ? GENDER_TYPES.FEMALE : null;
+    
+    // Insert person into database
+    const newPerson = await insertPerson(
+      treeId, 
+      first_name, 
+      last_name || null, 
+      genderType, 
+      birth_year || null,
+      death_year || null
+    );
+    
+    const fullName = `${first_name} ${last_name || ''}`.trim();
+    
+    // Success response - this will close the flow
     return {
-      version: "3.0",
+      version: version || "3.0",
+      screen: "SUCCESS",
       data: {
-        error: "No tree selected"
+        extension_message_response: {
+          params: {
+            flow_token: context.flow_token,
+            some_param_name: "some_param_value"
+          }
+        }
+      }
+    };
+    
+  } catch (error) {
+    console.error('Error adding member:', error);
+    
+    return {
+      version: version || "3.0",
+      screen: "ADD_MEMBER",
+      data: {
+        error: `Failed to add member: ${error.message}`
       }
     };
   }
-  
-  // Note: You'll need to implement person lookup by name
-  // For now, returning success
-  
-  return {
-    version: "3.0",
-    data: {
-      success: true,
-      message: `Relationship added: ${person_a_name} is ${relationship_type} of ${person_b_name}`
-    }
-  };
 }
 
 // ============================================================================
@@ -240,37 +333,47 @@ async function handleFlowResponse(phoneNumber, nfmReply) {
     return sendWhatsAppMessage(phoneNumber, "⚠️ Please create or join a tree first!");
   }
   
-  // Handle based on flow name
-  if (name === "add_family_member") {
-    const { first_name, last_name, gender, year_of_birth } = responseData;
+  // Extract member data from the payload
+  const memberData = responseData.member || responseData;
+  const { first_name, last_name, gender, birth_year, death_year } = memberData;
+  
+  try {
+    // Map gender from dropdown ID to database type
+    const genderType = gender === 'male' ? GENDER_TYPES.MALE :
+                       gender === 'female' ? GENDER_TYPES.FEMALE : null;
     
-    // Map gender string to GENDER_TYPES
-    const genderType = gender?.toLowerCase() === 'male' ? GENDER_TYPES.MALE :
-                       gender?.toLowerCase() === 'female' ? GENDER_TYPES.FEMALE : null;
-    
+    // Insert person into database
     const newPerson = await insertPerson(
       tree.id,
       first_name,
       last_name || null,
       genderType,
-      year_of_birth || null
+      birth_year || null,
+      death_year || null
     );
     
     const fullName = `${first_name} ${last_name || ''}`.trim();
     await setUserState(phoneNumber, tree.id, newPerson.id, fullName);
     
+    const genderText = gender === 'male' ? 'Male' : 
+                       gender === 'female' ? 'Female' : 
+                       'Prefer not to say';
+    
+    let message = `✅ *${fullName}* has been added to *${tree.name}*!\n\n`;
+    message += `👤 Gender: ${genderText}\n`;
+    if (birth_year) message += `🎂 Born: ${birth_year}\n`;
+    if (death_year) message += `🕊️ Died: ${death_year}\n`;
+    message += `\nReply with *MENU* to add more family members.`;
+    
+    return sendWhatsAppMessage(phoneNumber, message);
+    
+  } catch (error) {
+    console.error('Error saving member:', error);
     return sendWhatsAppMessage(
       phoneNumber, 
-      `✅ *${fullName}* has been added to *${tree.name}*!\n\nBorn: ${year_of_birth || 'Unknown'}\nGender: ${gender || 'Not specified'}`
+      `❌ Sorry, I couldn't add ${first_name}. Error: ${error.message}\n\nPlease try again.`
     );
   }
-  
-  if (name === "add_relationship") {
-    // Handle relationship flow response
-    return sendWhatsAppMessage(phoneNumber, "✅ Relationship added successfully!");
-  }
-  
-  return sendWhatsAppMessage(phoneNumber, "Flow completed!");
 }
 
 // ============================================================================
@@ -310,7 +413,7 @@ async function handleMessage(phoneNumber, text) {
         await setUserState(phoneNumber, joinedTree.id, null, null);
         return sendWhatsAppMessage(
           phoneNumber, 
-          `✅ Successfully joined family tree *${joinedTree.name}*!`
+          `✅ Successfully joined family tree *${joinedTree.name}*!\n\nReply with *MENU* to see options.`
         );
       } else {
         return sendWhatsAppMessage(
@@ -329,7 +432,7 @@ async function handleMessage(phoneNumber, text) {
       const shareUrl = `${BASE_URL}/tree.html?code=${newTree.join_code}`;
       return sendWhatsAppMessage(
         phoneNumber,
-        `🎉 Family tree *${treeName}* created!\n\n*Join Code:* ${newTree.join_code}\n\nView tree: ${shareUrl}\n\nReply with *MENU* to see options.`
+        `🎉 Family tree *${treeName}* created!\n\n*Join Code:* ${newTree.join_code}\n\nView tree: ${shareUrl}\n\nReply with *MENU* to add family members.`
       );
     }
 
@@ -354,14 +457,14 @@ async function handleMessage(phoneNumber, text) {
   if (normalizedText === "share" || normalizedText === "share code") {
     return sendWhatsAppMessage(
       phoneNumber,
-      `Share this code with family:\n\n*${tree.join_code}*`
+      `📤 Share this code with family:\n\n*${tree.join_code}*\n\nThey can join by sending this code to me!`
     );
   }
 
   if (normalizedText === "info") {
     return sendWhatsAppMessage(
       phoneNumber,
-      `*${tree.name}*\n\n👥 Members: ${tree.person_count || 0}\n📋 Code: ${tree.join_code}`
+      `*${tree.name}*\n\n👥 Members: ${tree.person_count || 0}\n📋 Code: ${tree.join_code}\n\nReply *MENU* to add more people.`
     );
   }
 
@@ -380,10 +483,10 @@ async function sendMainMenu(phoneNumber, tree) {
   
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const flowId = process.env.WHATSAPP_FLOW_ID; // Your Flow ID from Meta
+  const flowId = process.env.WHATSAPP_FLOW_ID;
 
-  if (!token || !phoneNumberId) {
-    return sendWhatsAppMessage(phoneNumber, "API credentials missing.");
+  if (!token || !phoneNumberId || !flowId) {
+    return sendWhatsAppMessage(phoneNumber, "⚠️ API credentials missing. Please contact admin.");
   }
 
   const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
@@ -396,54 +499,20 @@ async function sendMainMenu(phoneNumber, tree) {
   
   const payload = {
     messaging_product: "whatsapp",
+    recipient_type: "individual",
     to: phoneNumber,
     type: "interactive",
     interactive: {
-      type: "button",
-      body: {
-        text: `*${tree.name}* Menu\n\n👥 ${tree.person_count || 0} family members\n\nWhat would you like to do?`
-      },
-      action: {
-        buttons: [
-          {
-            type: "reply",
-            reply: {
-              id: "view_tree",
-              title: "🌳 View Tree"
-            }
-          },
-          {
-            type: "reply",
-            reply: {
-              id: "share_code",
-              title: "📤 Share Code"
-            }
-          },
-          {
-            type: "reply",
-            reply: {
-              id: "add_member_flow",
-              title: "➕ Add Member"
-            }
-          }
-        ]
-      }
-    }
-  };
-  
-  // If you want to use Flow button instead of regular button:
-  if (flowId) {
-    payload.interactive = {
       type: "flow",
       header: {
         type: "text",
-        text: `${tree.name} Menu`
+        text: `${tree.name} 🌳`
       },
       body: {
-        text: `👥 ${tree.person_count || 0} family members\n\nAdd a new family member using the form below:`
+        text: `👥 *${tree.person_count || 0} family members*\n\nAdd a new person to your family tree using the form below:`
       },
       footer: {
-        text: "Powered by Family Tree Bot"
+        text: "Tap the button to continue"
       },
       action: {
         name: "flow",
@@ -451,15 +520,16 @@ async function sendMainMenu(phoneNumber, tree) {
           flow_message_version: "3",
           flow_token: flowToken,
           flow_id: flowId,
-          flow_cta: "Add Family Member",
+          flow_cta: "➕ Add Family Member",
           flow_action: "navigate",
           flow_action_payload: {
-            screen: "ADD_MEMBER"
+            screen: "ADD_MEMBER",
+            data: {}
           }
         }
       }
-    };
-  }
+    }
+  };
 
   try {
     const response = await fetch(url, {
@@ -474,9 +544,19 @@ async function sendMainMenu(phoneNumber, tree) {
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`WhatsApp API error:`, errorText);
+      
+      // Fallback to simple menu
+      return sendWhatsAppMessage(
+        phoneNumber,
+        `*${tree.name}* Menu\n\n👥 ${tree.person_count || 0} members\n\nCommands:\n• *VIEW* - See your tree\n• *SHARE* - Get invite code\n• *INFO* - Tree details\n• *HELP* - Get help`
+      );
     }
   } catch (error) {
-    console.error("Failed to send menu:", error);
+    console.error("Failed to send flow menu:", error);
+    return sendWhatsAppMessage(
+      phoneNumber,
+      `*${tree.name}* Menu\n\n👥 ${tree.person_count || 0} members\n\nCommands:\n• *VIEW* - See your tree\n• *SHARE* - Get invite code\n• *INFO* - Tree details`
+    );
   }
 }
 
@@ -516,12 +596,12 @@ Type *START* to see the welcome message again.`;
 You're working on: *${tree.name}*
 
 *Commands:*
-• *MENU* - Show main menu with options
+• *MENU* - Open form to add family members
 • *VIEW* - Get link to view your tree
 • *SHARE* - Get invite code for family
 • *INFO* - See tree details
 
-Use the buttons in the menu to add family members and relationships!`;
+Use the *MENU* button to open the form and add family members!`;
 }
 
 // ============================================================================
