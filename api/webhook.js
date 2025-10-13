@@ -1,5 +1,5 @@
 // api/webhook.js
-// Main webhook handler with dual-mode processing, entity resolution, and Flows support
+// Main webhook handler with dual-mode processing and entity resolution
 
 import {
   createTree,
@@ -24,148 +24,9 @@ import {
 
 import { parseOps, getTreeContext } from "./_nlp.js";
 import * as db from "./_db.js";
-import crypto from 'crypto';
 
-// --- Environment Variables ---
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const BASE_URL = process.env.BASE_URL || "https://family-tree-webhook.vercel.app";
-// The private key MUST be the exact pair for the public key submitted to Meta.
-const FLOWS_RSA_PRIVATE_KEY = process.env.FLOWS_RSA_PRIVATE_KEY;
-const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
-const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
-
-// ============================================================================
-// RSA DECRYPTION UTILITY
-// ============================================================================
-
-/**
- * Decrypts the Base64-encoded flow token using the stored RSA private key.
- * This function is the critical step that is currently failing (key mismatch).
- * @param {string} encryptedBase64 - The encrypted flow_token from the flow_completion event.
- * @returns {string | null} The decrypted plaintext token.
- */
-function decryptFlowToken(encryptedBase64) {
-  if (!FLOWS_RSA_PRIVATE_KEY) {
-    console.error("FLOWS_RSA_PRIVATE_KEY is missing from environment variables.");
-    return null;
-  }
-  
-  try {
-    const encryptedBuffer = Buffer.from(encryptedBase64, 'base64');
-    const decryptedBuffer = crypto.privateDecrypt(
-      {
-        key: FLOWS_RSA_PRIVATE_KEY,
-        // PKCS1 padding is standard for the flow token.
-        padding: crypto.constants.RSA_PKCS1_PADDING,
-      },
-      encryptedBuffer
-    );
-    return decryptedBuffer.toString('utf8');
-  } catch (error) {
-    console.error("RSA Decryption failed (Key Mismatch likely):", error.message);
-    // Important to return null on failure so we can send a custom error message
-    return null;
-  }
-}
-
-// ============================================================================
-// FLOW COMPLETION HANDLER
-// ============================================================================
-
-/**
- * Handles the flow_completion event after a user submits the form.
- * @param {string} phoneNumber - User's WhatsApp number.
- * @param {string} profileName - User's profile name.
- * @param {object} flowCompletionData - The interactive.flow_completion payload.
- */
-async function handleFlowCompletion(phoneNumber, profileName, flowCompletionData) {
-  // We only need the flow_token here. The encrypted_flow_data requires Meta's public key (not implemented here)
-  const { flow_token: encryptedFlowToken } = flowCompletionData;
-
-  console.log(`Received flow_completion from ${profileName}. Encrypted Token: ${encryptedFlowToken}`);
-
-  // 1. Decrypt the flow_token
-  const decryptedFlowToken = decryptFlowToken(encryptedFlowToken);
-
-  if (!decryptedFlowToken) {
-    // This is the error message sent if your private key doesn't match the public key submitted to Meta.
-    await sendWhatsAppMessage(phoneNumber, "Sorry, I couldn't securely process your family tree request. The security token failed validation.");
-    return;
-  }
-
-  console.log(`Decrypted Flow Token: ${decryptedFlowToken}`);
-  
-  // 2. FETCH FINAL DATA from Meta using the decrypted token
-  let flowData = null;
-  try {
-    const finalData = await fetchFlowData(decryptedFlowToken);
-    flowData = JSON.parse(finalData);
-  } catch (e) {
-    console.error("Failed to fetch or parse final flow data:", e);
-    await sendWhatsAppMessage(phoneNumber, "I was able to process your security token, but failed to retrieve the submitted form data. Please try again.");
-    return;
-  }
-  
-  // 3. PROCESS DATA and update the database
-  const userState = await getUserState(phoneNumber);
-  if (!userState?.tree_id) {
-    await sendWhatsAppMessage(phoneNumber, "I received your family member data, but you haven't selected an active tree yet. Please say 'Join tree [code]' or 'Create tree [name]' first.");
-    return;
-  }
-
-  const treeId = userState.tree_id;
-  const tree = await getTreeById(treeId);
-  
-  // Example data processing logic based on expected flow output (modify as needed)
-  if (flowData.firstName && flowData.birthYear) {
-      const person = await insertPerson(
-        treeId, 
-        flowData.firstName, 
-        flowData.lastName, 
-        flowData.gender, 
-        flowData.birthYear
-      );
-
-      // Respond with success message
-      const name = `${person.data.first_name || ''} ${person.data.last_name || ''}`.trim();
-      let message = `Successfully added *${name}* to the tree *${tree.name}* via the flow!`;
-      message += `\n\nView your tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-      await sendWhatsAppMessage(phoneNumber, message);
-  } else {
-      await sendWhatsAppMessage(phoneNumber, "I received your data, but it seems incomplete. Please try filling out the flow again.");
-  }
-}
-
-/**
- * Calls the Meta API to get the final submitted data using the decrypted flow token.
- * @param {string} decryptedFlowToken - The decrypted token.
- * @returns {Promise<string>} The decrypted_flow_data.data string.
- */
-async function fetchFlowData(decryptedFlowToken) {
-    const token = WHATSAPP_ACCESS_TOKEN;
-    if (!token) throw new Error("Missing WhatsApp Access Token.");
-
-    // This is the official Meta endpoint to retrieve the submitted form data
-    const url = `https://graph.facebook.com/v19.0/decrypted_flow_data?flow_token=${decryptedFlowToken}`;
-
-    const response = await fetch(url, {
-        method: "GET",
-        headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-        },
-    });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Meta API Flow Data Error: ${response.statusText}`, errorText);
-        throw new Error(`Failed to fetch flow data: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    // The actual form data is nested inside a JSON string within the response
-    return result.decrypted_flow_data.data;
-}
 
 // ============================================================================
 // WEBHOOK HANDLER
@@ -189,535 +50,511 @@ export default async function handler(req, res) {
     }
   }
 
-  if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
-  }
-
-  try {
+  // Handle POST requests from WhatsApp
+  if (req.method === "POST") {
     const body = req.body;
-    const entry = body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const message = changes?.value?.messages?.[0];
+    
+    // Check if the event is a valid message or status from the WhatsApp Business Account
+    if (body.object === "whatsapp_business_account") {
+      for (const entry of body.entry) {
+        for (const change of entry.changes) {
+          if (change.value.messages) {
+            // --- MESSAGE RECEIVED ---
+            const message = change.value.messages[0];
+            const from = message.from; // Sender phone number
+            // Consolidated text extraction for various message types
+            const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || ' ';
+            
+            console.log(`Received message from ${from}: ${text}`);
 
-    // Early return for status updates, read receipts, etc.
-    if (!message) {
-      return res.status(200).send("No message/status update processed");
-    }
-
-    const phoneNumber = message.from;
-    const profileName = changes?.value?.contacts?.[0]?.profile?.name || "User";
-
-    // Check for Flow Completion Message
-    if (message.type === 'interactive' && message.interactive?.type === 'flow_completion') {
-      await handleFlowCompletion(phoneNumber, profileName, message.interactive.flow_completion);
-      return res.status(200).send("EVENT_RECEIVED - Flow Completed");
-    }
-
-    // Handle text messages
-    if (message.type === "text") {
-      const messageText = message.text?.body?.trim();
-      console.log("Incoming message:", phoneNumber, messageText);
-
-      const reply = await processMessage(phoneNumber, messageText);
-      if (reply) {
-        await sendWhatsAppMessage(phoneNumber, reply);
-      }
-    }
-
-    return res.status(200).send("OK");
-  } catch (error) {
-    console.error("Webhook error:", error);
-    return res.status(500).json({ error: error.message });
-  }
-}
-
-// ============================================================================
-// MESSAGE PROCESSING (Includes all the previously written chat logic)
-// ============================================================================
-
-async function processMessage(phoneNumber, messageText) {
-  if (!messageText) {
-    return "Please say something!";
-  }
-
-  const userState = await getUserState(phoneNumber);
-  
-  // Get tree context for better parsing
-  let treeContext = null;
-  if (userState?.tree_id) {
-    treeContext = await getTreeContext(userState.tree_id, db);
-  }
-
-  const operation = await parseOps(messageText, treeContext);
-
-  // --- HANDLE INFERENCE MODE ---
-  if (operation.mode === 'inference') {
-    return await handleInferenceMode(phoneNumber, operation);
-  }
-
-  // --- HANDLE CONFIRMATIONS ---
-  if (operation.action === 'confirm') {
-    return await handleConfirm(phoneNumber);
-  }
-
-  if (operation.action === 'cancel') {
-    await clearPendingAction(phoneNumber);
-    return "Okay, I've cancelled that action. What would you like to do instead?";
-  }
-
-  // --- HELP/MENU ---
-  if (operation.action === 'help') {
-    return buildHelpMessage();
-  }
-
-  // --- CREATE TREE ---
-  if (operation.action === 'create_tree') {
-    const tree = await createTree(phoneNumber, operation.treeName);
-    await setUserState(phoneNumber, tree.id, null, null);
-    return buildCreateTreeMessage(tree);
-  }
-
-  // --- JOIN TREE ---
-  if (operation.action === 'join_tree') {
-    const tree = await getTreeByCode(operation.code);
-    if (!tree) {
-      return `I couldn't find a tree with code ${operation.code}. Please check the code and try again.`;
-    }
-    await addMember(tree.id, phoneNumber);
-    await setUserState(phoneNumber, tree.id, null, null);
-    return `Welcome! You've joined the tree "${tree.name}". You can view it here:\n${BASE_URL}/tree.html?code=${tree.join_code}`;
-  }
-
-  // --- ALL OTHER ACTIONS REQUIRE AN ACTIVE TREE ---
-  if (!userState?.tree_id) {
-    return "You don't have an active tree. Create one by saying:\n`Create tree called Smith Family`\n\nOr join an existing tree with:\n`Join tree AB12CD`";
-  }
-
-  const tree = await getTreeById(userState.tree_id);
-  if (!tree) {
-    return "Your active tree was not found. Please create a new one.";
-  }
-
-  // --- ADD PERSON (with entity resolution) ---
-  if (operation.action === 'add_person') {
-    return await handleAddPerson(phoneNumber, tree, operation);
-  }
-
-  // --- EDIT PERSON ---
-  if (operation.action === 'edit_person') {
-    return await handleEditPerson(phoneNumber, tree, operation);
-  }
-
-  // --- SET GENDER ---
-  if (operation.action === 'set_gender') {
-    const persons = await findPersonByName(tree.id, operation.name);
-
-    if (persons.length === 0) {
-      return `I couldn't find anyone named ${operation.name} in your tree.`;
-    }
-    if (persons.length > 1) {
-      return buildMultipleMatchesMessage(operation.name, persons);
-    }
-
-    const person = persons[0];
-    await updatePersonGender(person.id, operation.gender);
-
-    const genderWord = operation.gender === 'M' ? 'male' : 'female';
-    return `Updated ${operation.name}'s gender to ${genderWord}.\n\nWhat else would you like to do?`;
-  }
-
-  // --- RELATE PEOPLE (with duplicate detection) ---
-  if (operation.action === 'relate') {
-    return await handleRelate(phoneNumber, tree, operation, messageText);
-  }
-
-  return "I didn't quite understand that. Try:\n• `Add John born 1980`\n• `John is Mary's father`\n• `John and Mary are married`\n\nOr type `menu` for all commands.";
-}
-
-// ============================================================================
-// INFERENCE MODE HANDLER
-// ============================================================================
-
-async function handleInferenceMode(phoneNumber, operation) {
-  if (operation.confidence < 0.6) {
-    return "I'm not sure I understood that correctly. Could you rephrase it more directly?\n\nFor example: `Add John born 1980` or `John is Mary's father`";
-  }
-
-  await savePendingAction(phoneNumber, null, operation);
-
-  let message = `I think you mean:\n_${operation.interpretation}_\n\n`;
-  message += "This would:\n";
-
-  operation.suggestedActions.forEach((action, i) => {
-    if (action.action === 'add_person') {
-      message += `${i + 1}. Add ${action.firstName} ${action.lastName || ''}`;
-      if (action.birthday) message += ` (born ${action.birthday})`;
-      message += '\n';
-    } else if (action.action === 'relate') {
-      message += `${i + 1}. Link ${action.nameA} and ${action.nameB} as ${action.kind}\n`;
-    }
-  });
-
-  message += "\nIs this correct? Reply `yes` to confirm or `no` to cancel.";
-  return message;
-}
-
-// ============================================================================
-// CONFIRMATION HANDLER
-// ============================================================================
-
-async function handleConfirm(phoneNumber) {
-  const pending = await getPendingAction(phoneNumber);
-  
-  if (!pending) {
-    return "There's nothing to confirm. What would you like to do?";
-  }
-
-  const userState = await getUserState(phoneNumber);
-  if (!userState?.tree_id) {
-    await clearPendingAction(phoneNumber);
-    return "You need to create or join a tree first.";
-  }
-
-  const tree = await getTreeById(userState.tree_id);
-  const action = pending.action;
-
-  let results = [];
-
-  for (const suggestedAction of action.suggestedActions) {
-    try {
-      if (suggestedAction.action === 'add_person') {
-        const person = await insertPerson(
-          tree.id,
-          suggestedAction.firstName,
-          suggestedAction.lastName,
-          suggestedAction.gender,
-          suggestedAction.birthday
-        );
-        results.push(`Added ${person.data.first_name} ${person.data.last_name || ''}`);
-      } else if (suggestedAction.action === 'relate') {
-        const personsA = await findPersonByName(tree.id, suggestedAction.nameA);
-        const personsB = await findPersonByName(tree.id, suggestedAction.nameB);
-        
-        if (personsA.length > 0 && personsB.length > 0) {
-          const result = await addRelationshipSmart(tree.id, suggestedAction.kind, personsA[0].id, personsB[0].id);
-          if (!result.duplicate) {
-            results.push(`Linked ${suggestedAction.nameA} and ${suggestedAction.nameB}`);
+            await handleMessage(from, text);
+          
+            return res.status(200).send("MESSAGE_RECEIVED");
+          } else if (change.value.statuses) {
+            // --- STATUS UPDATE RECEIVED (DELIVERED/READ/FAILED) ---
+            // Log and explicitly acknowledge status updates to prevent retries
+            console.log(`Received status update for message ID: ${change.value.statuses[0].id} - Status: ${change.value.statuses[0].status}`);
+            
+            return res.status(200).send("STATUS_UPDATE_RECEIVED");
           }
         }
       }
-    } catch (err) {
-      console.error('Error executing suggested action:', err);
+    }
+    
+    // --- GENERIC ACKNOWLEDGEMENT ---
+    // Acknowledge all other valid webhook calls (e.g., account updates, unknown event types) 
+    // with a simple "OK" to prevent the descriptive log message from being sent back.
+    console.log("Webhook event received but not a message or status. Acknowledging with 200.");
+    return res.status(200).send("OK"); 
+  }
+  
+  // Method not POST or GET
+  return res.status(404).send("Not found");
+}
+
+// ============================================================================
+// MESSAGE HANDLER
+// ============================================================================
+
+async function handleMessage(phoneNumber, text) {
+  // 1. Get user state
+  const state = await getUserState(phoneNumber);
+  let tree = null;
+  let treeContext = null;
+
+  if (state?.tree_id) {
+    tree = await getTreeById(state.tree_id);
+    if (tree) {
+      treeContext = await getTreeContext(tree.id, db);
+    } else {
+      // Tree state is stale, clear it
+      await setUserState(phoneNumber, null, null, null);
     }
   }
 
+  const normalizedText = text.trim();
+
+  // 2. Handle commands that don't need a tree
+  if (normalizedText.toLowerCase() === "menu") {
+    return sendWhatsAppMessage(phoneNumber, generateMenu(!!tree));
+  }
+
+  if (normalizedText.toLowerCase() === "start") {
+    return sendWhatsAppMessage(phoneNumber, generateWelcomeMessage());
+  }
+
+  if (normalizedText.toLowerCase() === "help") {
+    return sendWhatsAppMessage(phoneNumber, generateHelpMessage(!!tree));
+  }
+  
+  // 3. Command mode: Join or Create
+  if (!tree) {
+    const joinCodeMatch = normalizedText.toUpperCase().match(/^[A-Z0-9]{6}$/);
+    if (joinCodeMatch) {
+      const joinCode = joinCodeMatch[0];
+      const joinedTree = await getTreeByCode(joinCode);
+      if (joinedTree) {
+        await addMember(joinedTree.id, phoneNumber);
+        await setUserState(phoneNumber, joinedTree.id, null, null);
+        return sendWhatsAppMessage(phoneNumber, `Successfully joined family tree *${joinedTree.name}*! You can now add people and relationships.`);
+      } else {
+        return sendWhatsAppMessage(phoneNumber, `I couldn't find a family tree with the code *${joinCode}*. Please check the code and try again.`);
+      }
+    }
+
+    const createMatch = normalizedText.match(/^(create|new)\s+(.+)/i);
+    if (createMatch) {
+      const treeName = createMatch[2].trim();
+      const newTree = await createTree(phoneNumber, treeName);
+      await setUserState(phoneNumber, newTree.id, null, null);
+      const shareUrl = `${BASE_URL}/tree.html?code=${newTree.join_code}`;
+      return sendWhatsAppMessage(phoneNumber, generateTreeCreatedMessage(newTree.name, newTree.join_code, shareUrl));
+    }
+
+    return sendWhatsAppMessage(phoneNumber, generateWelcomeMessage());
+  }
+  
+  // 4. Check if member of the current tree
+  if (!(await isMember(tree.id, phoneNumber))) {
+    // Should not happen if state is good, but good for safety
+    await setUserState(phoneNumber, null, null, null);
+    return sendWhatsAppMessage(phoneNumber, `It looks like you are no longer a member of the *${tree.name}* tree. Type *MENU* to see options.`);
+  }
+
+  // 5. Handle Pending Actions (Confirmation mode)
+  const pendingAction = await getPendingAction(phoneNumber);
+  if (pendingAction) {
+    const confirmationMatch = normalizedText.toLowerCase().match(/^(yes|y|no|n)$/);
+
+    if (confirmationMatch) {
+      await clearPendingAction(phoneNumber);
+      const response = confirmationMatch[1];
+      
+      if (response === 'yes' || response === 'y') {
+        return handlePendingConfirmation(phoneNumber, tree, pendingAction);
+      } else {
+        return sendWhatsAppMessage(phoneNumber, "Action cancelled. What would you like to do next?");
+      }
+    } else {
+      return sendWhatsAppMessage(phoneNumber, "I'm currently waiting for a confirmation. Please reply with *YES* or *NO*.");
+    }
+  }
+
+  // 6. NLP Processing
+  try {
+    const nlpResult = await parseOps(normalizedText, treeContext);
+
+    switch (nlpResult.action) {
+      case 'create_person':
+        return await handleCreatePerson(phoneNumber, tree, nlpResult.params);
+      case 'add_relationship':
+        return await handleAddRelationship(phoneNumber, tree, nlpResult.params);
+      case 'confirm_person':
+        return await handlePersonConfirmation(phoneNumber, tree, nlpResult.params);
+      case 'update_person':
+        return await handleUpdatePerson(phoneNumber, tree, nlpResult.params);
+      case 'list_tree':
+        return await handleListTree(phoneNumber, tree);
+      case 'view_tree_link':
+        return await handleViewTreeLink(phoneNumber, tree);
+      case 'share_code':
+        return await handleShareCode(phoneNumber, tree);
+      case 'unknown':
+      default:
+        // Try to treat unknown message as a person name search
+        const personMatch = normalizedText.match(/^([a-z\s]+)$/i);
+        if (personMatch) {
+          const persons = await findPersonByName(tree.id, personMatch[1]);
+          if (persons.length === 1) {
+            return sendWhatsAppMessage(phoneNumber, generatePersonInfo(persons[0]));
+          } else if (persons.length > 1) {
+            return sendWhatsAppMessage(phoneNumber, generatePersonList(persons, personMatch[1]));
+          }
+        }
+        return sendWhatsAppMessage(phoneNumber, generateDefaultResponse(tree.name));
+    }
+
+  } catch (error) {
+    console.error("NLP or Command processing error:", error);
+    return sendWhatsAppMessage(phoneNumber, `Oops! I ran into an error: ${error.message}. Please try again or type *HELP*.`);
+  }
+}
+
+// ============================================================================
+// PENDING ACTION HANDLERS
+// ============================================================================
+
+async function handlePendingConfirmation(phoneNumber, tree, pendingAction) {
+  const { action, params } = pendingAction.action;
+
+  try {
+    switch (action) {
+      case 'create_person':
+        return await handleCreatePerson(phoneNumber, tree, params, true);
+      case 'add_relationship':
+        return await handleAddRelationship(phoneNumber, tree, params, true);
+      default:
+        return sendWhatsAppMessage(phoneNumber, "Unknown pending action. Please try your request again.");
+    }
+  } catch (error) {
+    console.error("Pending action execution error:", error);
+    return sendWhatsAppMessage(phoneNumber, `I ran into an error while trying to complete the action: ${error.message}.`);
+  }
+}
+
+// ============================================================================
+// ACTION IMPLEMENTATIONS
+// ============================================================================
+
+async function handleCreatePerson(phoneNumber, tree, params, confirmed = false) {
+  const { first_name, last_name, gender, birthday } = params;
+  const fullName = `${first_name} ${last_name || ''}`.trim();
+
+  // 1. Search for similar people if not confirmed
+  if (!confirmed) {
+    const similar = await findSimilarPersons(tree.id, first_name, last_name, birthday);
+    if (similar.length > 0) {
+      // Save pending action and ask for confirmation
+      await savePendingAction(phoneNumber, tree.id, { action: 'create_person', params });
+      return sendWhatsAppMessage(phoneNumber, generatePersonConflictMessage(fullName, similar));
+    }
+  }
+  
+  // 2. Insert the person
+  const newPerson = await insertPerson(tree.id, first_name, last_name, gender, birthday);
+  await setUserState(phoneNumber, tree.id, newPerson.id, fullName); // Update state to last person created
+
+  // 3. Respond
+  return sendWhatsAppMessage(phoneNumber, `✅ Person *${fullName}* (Born ${newPerson.data.birthday || 'Year Unknown'}) has been added to *${tree.name}*.`);
+}
+
+async function handleAddRelationship(phoneNumber, tree, params, confirmed = false) {
+  const { person_a, relationship, person_b } = params;
+  const kind = RELATIONSHIP_TYPES[relationship.toUpperCase()];
+
+  // 1. Resolve Person A
+  const personAs = await findPersonByName(tree.id, person_a);
+  if (personAs.length !== 1) {
+    await savePendingAction(phoneNumber, tree.id, { action: 'confirm_person', params: { ...params, person_key: 'person_a', persons: personAs } });
+    return sendWhatsAppMessage(phoneNumber, generatePersonList(personAs, person_a, "person_a"));
+  }
+  const personAId = personAs[0].id;
+  
+  // 2. Resolve Person B
+  const personBs = await findPersonByName(tree.id, person_b);
+  if (personBs.length !== 1) {
+    await savePendingAction(phoneNumber, tree.id, { action: 'confirm_person', params: { ...params, person_key: 'person_b', persons: personBs } });
+    return sendWhatsAppMessage(phoneNumber, generatePersonList(personBs, person_b, "person_b"));
+  }
+  const personBId = personBs[0].id;
+
+  // 3. Prevent duplicate/invalid
+  if (!confirmed) {
+    const exists = await relationshipExists(tree.id, kind, personAId, personBId);
+    if (exists) {
+      // If it's a symmetric relationship (spouse), no need to ask for confirmation again.
+      if ([RELATIONSHIP_TYPES.SPOUSE, RELATIONSHIP_TYPES.DIVORCED, RELATIONSHIP_TYPES.SEPARATED].includes(kind)) {
+         return sendWhatsAppMessage(phoneNumber, `*${personAs[0].data.first_name}* is already linked as the ${kind} of *${personBs[0].data.first_name}*. No change made.`);
+      }
+      
+      // For parent/child, ask for confirmation to override or confirm.
+      await savePendingAction(phoneNumber, tree.id, { action: 'add_relationship', params });
+      return sendWhatsAppMessage(phoneNumber, `Warning: *${personAs[0].data.first_name}* is already linked as the ${kind} of *${personBs[0].data.first_name}*. Reply *YES* to add this relationship again or *NO* to cancel.`);
+    }
+  }
+
+  // 4. Add the relationship
+  const relResult = await addRelationship(tree.id, kind, personAId, personBId);
+
+  // 5. Respond
+  const aName = personAs[0].data.first_name;
+  const bName = personBs[0].data.first_name;
+
+  if (relResult?.duplicate) {
+     return sendWhatsAppMessage(phoneNumber, `*${aName}* is already linked as the ${kind} of *${bName}*. No change made.`);
+  }
+
+  const successMessage = `✅ Relationship added: *${aName}* is the ${kind} of *${bName}* in *${tree.name}*.`;
+  
+  // Add reverse relationship if symmetric (spouse, divorced, separated)
+  if ([RELATIONSHIP_TYPES.SPOUSE, RELATIONSHIP_TYPES.DIVORCED, RELATIONSHIP_TYPES.SEPARATED].includes(kind)) {
+    // Check if reverse is needed (it may already exist if confirmed=true)
+    const reverseExists = await relationshipExists(tree.id, kind, personBId, personAId);
+    if (!reverseExists) {
+        await addRelationship(tree.id, kind, personBId, personAId);
+    }
+  }
+  
+  // For parent/child, auto-add child/parent relationship too
+  if (kind === RELATIONSHIP_TYPES.PARENT) {
+    await addRelationship(tree.id, RELATIONSHIP_TYPES.CHILD, personBId, personAId);
+  } else if (kind === RELATIONSHIP_TYPES.CHILD) {
+    await addRelationship(tree.id, RELATIONSHIP_TYPES.PARENT, personBId, personAId);
+  }
+
+  return sendWhatsAppMessage(phoneNumber, successMessage);
+}
+
+async function handlePersonConfirmation(phoneNumber, tree, params) {
+  const { person_key, persons, person_a, relationship, person_b } = params;
+
+  // The confirmation message should have presented the list with numbers.
+  const indexMatch = params.message.match(/^(\d+)$/);
+  if (!indexMatch) {
+    await savePendingAction(phoneNumber, tree.id, { action: 'confirm_person', params }); // Re-save
+    return sendWhatsAppMessage(phoneNumber, "Please reply with the *number* of the person you want to select, or *CANCEL*.");
+  }
+
+  const selectedIndex = parseInt(indexMatch[1]) - 1;
+  const selectedPerson = persons[selectedIndex];
+
+  if (!selectedPerson) {
+    await savePendingAction(phoneNumber, tree.id, { action: 'confirm_person', params }); // Re-save
+    return sendWhatsAppMessage(phoneNumber, "Invalid number. Please reply with the *number* of the person you want to select, or *CANCEL*.");
+  }
+
+  // Update the original relationship parameters with the confirmed person ID/Name
+  const updatedParams = { ...params };
+
+  if (person_key === 'person_a') {
+    updatedParams.person_a = selectedPerson.data.first_name; // Use full name if needed later
+    updatedParams.person_a_id = selectedPerson.id;
+  } else if (person_key === 'person_b') {
+    updatedParams.person_b = selectedPerson.data.first_name; // Use full name if needed later
+    updatedParams.person_b_id = selectedPerson.id;
+  }
+
+  // Clear the confirmation action and re-run the main relationship handler
   await clearPendingAction(phoneNumber);
-
-  if (results.length === 0) {
-    return "I tried to make those changes but ran into some issues. Please try adding them one at a time.";
+  
+  // Check if both persons are now resolved
+  if (updatedParams.person_a_id && updatedParams.person_b_id) {
+    // Both resolved, proceed to add relationship
+    return await handleAddRelationship(phoneNumber, tree, updatedParams);
+  } else {
+    // One is resolved, now re-run to resolve the other
+    // For this example, we'll simplify and re-run the main handler which will re-resolve all
+    return await handleAddRelationship(phoneNumber, tree, updatedParams);
   }
-
-  let message = "Done! I've:\n";
-  results.forEach(r => message += `✓ ${r}\n`);
-  message += `\nView your tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-  return message;
 }
 
-// ============================================================================
-// ADD PERSON HANDLER (with entity resolution)
-// ============================================================================
-
-async function handleAddPerson(phoneNumber, tree, operation) {
-  const similar = await findSimilarPersons(
-    tree.id,
-    operation.firstName,
-    operation.lastName,
-    operation.birthday
-  );
-
-  if (similar.length > 0) {
-    let message = `There's already someone similar in your tree:\n`;
-    similar.forEach(p => {
-      const fullName = `${p.data.first_name} ${p.data.last_name || ''}`.trim();
-      const birthday = p.data.birthday || 'unknown birth year';
-      message += `• ${fullName} (${birthday})\n`;
-    });
-    message += `\nWould you still like to add ${operation.firstName} ${operation.lastName || ''}`;
-    if (operation.birthday) message += ` (born ${operation.birthday})`;
-    message += `?\n\nReply 'yes' to add anyway, or 'no' to cancel.`;
-
-    await savePendingAction(phoneNumber, tree.id, {
-      action: 'add_person',
-      firstName: operation.firstName,
-      lastName: operation.lastName,
-      gender: operation.gender,
-      birthday: operation.birthday
-    });
-
-    return message;
+async function handleUpdatePerson(phoneNumber, tree, params) {
+  const { person_name, updates } = params;
+  
+  // 1. Resolve Person
+  const persons = await findPersonByName(tree.id, person_name);
+  if (persons.length !== 1) {
+    await savePendingAction(phoneNumber, tree.id, { action: 'confirm_person', params: { person_key: 'person_to_update', persons: persons, updates } });
+    return sendWhatsAppMessage(phoneNumber, generatePersonList(persons, person_name, "update"));
   }
-
-  const person = await insertPerson(
-    tree.id,
-    operation.firstName,
-    operation.lastName,
-    operation.gender,
-    operation.birthday
-  );
-
-  await setUserState(
-    phoneNumber,
-    tree.id,
-    person.id,
-    `${operation.firstName} ${operation.lastName || ''}`.trim()
-  );
-
-  return buildAddPersonMessage(person, tree);
-}
-
-// ============================================================================
-// EDIT PERSON HANDLER
-// ============================================================================
-
-async function handleEditPerson(phoneNumber, tree, operation) {
-  const persons = await findPersonByName(tree.id, operation.oldName);
-
-  if (persons.length === 0) {
-    return `I couldn't find anyone named ${operation.oldName} in your tree.`;
-  }
-  if (persons.length > 1) {
-    return buildMultipleMatchesMessage(operation.oldName, persons);
-  }
-
   const person = persons[0];
-  const updates = {};
 
-  if (operation.newName) {
-    const parts = operation.newName.split(/\s+/);
-    updates.first_name = parts[0];
-    updates.last_name = parts.length > 1 ? parts.slice(1).join(' ') : null;
-  }
-
-  if (operation.newBirthday) {
-    updates.birthday = operation.newBirthday;
-  }
-
-  if (operation.newGender) {
-    updates.gender = operation.newGender;
-  }
-
-  await updatePerson(person.id, updates);
-
-  const oldName = `${person.data.first_name} ${person.data.last_name || ''}`.trim();
-  const newName = operation.newName || oldName;
-
-  return `Updated ${oldName} → ${newName}\n\nView your tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-}
-
-// ============================================================================
-// RELATE HANDLER (with duplicate detection and multi-parent support)
-// ============================================================================
-
-async function handleRelate(phoneNumber, tree, operation, originalText) {
-  // Check if this is a "X is Y and Z's child" pattern
-  const multiParentPattern = /(.+?)\s+is\s+(.+?)\s+and\s+(.+?)(?:'s|s')\s+(son|daughter|child)/i;
-  const match = originalText.match(multiParentPattern);
+  // 2. Perform Update
+  const updatedPerson = await updatePerson(person.id, updates);
+  const updatedName = `${updatedPerson.data.first_name} ${updatedPerson.data.last_name || ''}`.trim();
   
-  if (match) {
-    const childName = match[1].trim();
-    const parent1Name = match[2].trim();
-    const parent2Name = match[3].trim();
-    const childType = match[4].toLowerCase();
-    
-    const childPersons = await findPersonByName(tree.id, childName);
-    const parent1Persons = await findPersonByName(tree.id, parent1Name);
-    const parent2Persons = await findPersonByName(tree.id, parent2Name);
-    
-    if (childPersons.length === 0) {
-      return `I couldn't find ${childName}. Try adding them first:\n\`Add ${childName}\``;
-    }
-    if (parent1Persons.length === 0) {
-      return `I couldn't find ${parent1Name}. Try adding them first:\n\`Add ${parent1Name}\``;
-    }
-    if (parent2Persons.length === 0) {
-      return `I couldn't find ${parent2Name}. Try adding them first:\n\`Add ${parent2Name}\``;
-    }
-    
-    if (childPersons.length > 1) return buildMultipleMatchesMessage(childName, childPersons);
-    if (parent1Persons.length > 1) return buildMultipleMatchesMessage(parent1Name, parent1Persons);
-    if (parent2Persons.length > 1) return buildMultipleMatchesMessage(parent2Name, parent2Persons);
-    
-    const child = childPersons[0];
-    const parent1 = parent1Persons[0];
-    const parent2 = parent2Persons[0];
-    
-    const result1 = await addRelationshipSmart(tree.id, childType, child.id, parent1.id);
-    const result2 = await addRelationshipSmart(tree.id, childType, child.id, parent2.id);
-    
-    let message = `OK, I've linked:\n`;
-    if (!result1.duplicate) message += `✓ ${parent1Name} as ${childName}'s parent\n`;
-    if (!result2.duplicate) message += `✓ ${parent2Name} as ${childName}'s parent\n`;
-    
-    if (result1.duplicate && result2.duplicate) {
-      return `Both of those relationships already exist.`;
-    }
-    
-    message += `\nView your updated tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-    return message;
-  }
+  // 3. Respond
+  const updateKeys = Object.keys(updates).map(k => k.replace('_', ' ')).join(', ');
+  return sendWhatsAppMessage(phoneNumber, `✅ *${updatedName}*'s *${updateKeys}* has been updated in *${tree.name}*.`);
+}
+
+async function handleListTree(phoneNumber, tree) {
+  // Simple view of the last updated person and count
+  const count = tree.person_count;
+  const lastPerson = tree.last_person_name || 'No people added yet.';
+  const link = `${BASE_URL}/tree.html?code=${tree.join_code}`;
   
-  // Single relationship
-  const personsA = await findPersonByName(tree.id, operation.nameA);
-  if (personsA.length === 0) {
-    return `I couldn't find ${operation.nameA}. Try adding them first:\n\`Add ${operation.nameA}\``;
-  }
-  if (personsA.length > 1) {
-    return buildMultipleMatchesMessage(operation.nameA, personsA);
-  }
-
-  const personsB = await findPersonByName(tree.id, operation.nameB);
-  if (personsB.length === 0) {
-    return `I couldn't find ${operation.nameB}. Try adding them first:\n\`Add ${operation.nameB}\``;
-  }
-  if (personsB.length > 1) {
-    return buildMultipleMatchesMessage(operation.nameB, personsB);
-  }
-
-  const personA = personsA[0];
-  const personB = personsB[0];
-
-  const result = await addRelationshipSmart(tree.id, operation.kind, personA.id, personB.id);
-
-  if (result.duplicate) {
-    return `That relationship already exists between ${operation.nameA} and ${operation.nameB}.`;
-  }
-
-  return buildAddRelationshipMessage(operation, tree);
+  let message = `*${tree.name}* (${tree.join_code}) has ${count} people.\n`;
+  message += `\nLast person added/updated: ${lastPerson}`;
+  message += `\n\nTo view the tree, click the link: ${link}`;
+  message += `\n\nType *HELP* for more commands.`;
+  
+  return sendWhatsAppMessage(phoneNumber, message);
 }
 
-// ============================================================================
-// SMART RELATIONSHIP ADDER
-// ============================================================================
-
-async function addRelationshipSmart(treeId, kind, personAId, personBId) {
-  let dbKind = kind;
-  let idA = personAId;
-  let idB = personBId;
-
-  if (['father', 'mother', 'parent'].includes(kind)) {
-    dbKind = RELATIONSHIP_TYPES.PARENT;
-  } else if (['son', 'daughter', 'child'].includes(kind)) {
-    dbKind = RELATIONSHIP_TYPES.PARENT;
-    [idA, idB] = [idB, idA]; // Flip: child is A, parent is B in DB
-  } else if (kind === 'spouse') {
-    dbKind = RELATIONSHIP_TYPES.SPOUSE;
-  } else if (kind === 'divorced') {
-    dbKind = RELATIONSHIP_TYPES.DIVORCED;
-  } else if (kind === 'separated') {
-    dbKind = RELATIONSHIP_TYPES.SEPARATED;
-  } else if (['brother', 'sister'].includes(kind)) {
-    return { error: "Sibling relationships need to be set up through parents. Try: 'Alice is Bob's daughter' and 'Bob is Charlie's daughter'" };
-  }
-
-  // A is the primary person (child/spouse), B is the related person (parent/spouse)
-  return await addRelationship(treeId, dbKind, idA, idB);
+async function handleViewTreeLink(phoneNumber, tree) {
+  const link = `${BASE_URL}/tree.html?code=${tree.join_code}`;
+  return sendWhatsAppMessage(phoneNumber, `Open your family tree *${tree.name}* here:\n${link}`);
 }
 
+async function handleShareCode(phoneNumber, tree) {
+  const code = tree.join_code;
+  const link = `${BASE_URL}/tree.html?code=${code}`;
+  const message = generateTreeCreatedMessage(tree.name, code, link);
+  return sendWhatsAppMessage(phoneNumber, message);
+}
+
+
 // ============================================================================
-// MESSAGE BUILDERS
+// RESPONSE GENERATORS
 // ============================================================================
 
-function buildHelpMessage() {
-  let message = "🌿 *Family Tree Bot Commands* 🌿\n\n";
-  message += "*Getting Started:*\n";
-  message += "• `Create tree called [name]`\n";
-  message += "• `Join tree [6-char code]`\n\n";
-  message += "*Adding People:*\n";
-  message += "• `Add [name] born [year]`\n";
-  message += "• `Add [name]` (without birth year)\n\n";
-  message += "*Creating Relationships:*\n";
-  message += "• `[Name] and [Name] are married`\n";
-  message += "• `[Name] is [Name]'s father`\n";
-  message += "• `[Name] is [Name]'s daughter`\n";
-  message += "• `[Name] and [Name] are divorced`\n\n";
-  message += "*Editing:*\n";
-  message += "• `Change [old name] to [new name]`\n";
-  message += "• `Set [name]'s gender to male/female`\n\n";
-  message += "*Examples:*\n";
-  message += "• `Create tree called The Smiths`\n";
-  message += "• `Add John Smith born 1980`\n";
-  message += "• `Add Mary Johnson born 1982`\n";
-  message += "• `John and Mary are married`\n";
-  message += "• `Add Alice born 2010`\n";
-  message += "• `Alice is John's daughter`";
+function generateWelcomeMessage() {
+  return `👋 Welcome to the Family Tree Bot!
+\nTo *create* a new tree, reply with:
+> *Create* [your family name]
+\nTo *join* an existing tree, reply with the 6-digit join code:
+> *[Code]* (e.g., A1B2C3)
+\nType *HELP* for more details at any time.`;
+}
+
+function generateMenu(hasTree) {
+  let menu = "*Family Tree Menu*\n\n";
+  if (hasTree) {
+    menu += "🌳 *Current Tree:*\n";
+    menu += "1. *View Link* - Get the web link to see the graph.\n";
+    menu += "2. *Share Code* - Get the code to invite others.\n";
+    menu += "3. *Help* - See commands for adding people/relationships.\n";
+    menu += "4. *List Tree* - Get a quick summary.\n";
+  } else {
+    menu += "5. *Create* [name] - Start a new tree (e.g., Create Smith Family).\n";
+    menu += "6. *[Code]* - Join an existing tree (e.g., A1B2C3).\n";
+  }
+  return menu;
+}
+
+function generateHelpMessage(hasTree) {
+  let help = "*Family Tree Bot Help*\n\n";
+
+  if (hasTree) {
+    help += `You are currently working on the tree *${hasTree}*.`;
+    help += "\n\n*1. Add a Person:*\n";
+    help += "> *Add John Doe 1990 Male*\n";
+    help += "*(Last Name and Birth Year are optional)*\n";
+    
+    help += "\n*2. Add a Relationship:*\n";
+    help += "> *John is Mary's father*\n";
+    help += "> *Mike and Grace are spouses*\n";
+    help += "*(Supported relationships: parent, child, spouse, divorced, separated)*\n";
+    
+    help += "\n*3. Update a Person:*\n";
+    help += "> *Change John's gender to Male*\n";
+    
+    help += "\n*4. Find a Person:*\n";
+    help += "> *John*\n";
+    
+    help += "\n*5. Menu:*\n";
+    help += "> *Menu* - See options for sharing the tree link and code.\n";
+
+  } else {
+    help += "\n*Getting Started:*\n";
+    help += "To create a new tree, use: *Create [Name]*\n";
+    help += "To join an existing tree, just send the 6-digit code.\n";
+  }
+
+  return help;
+}
+
+function generateTreeCreatedMessage(treeName, joinCode, shareUrl) {
+  return `🎉 Family tree *${treeName}* has been created!
+\n*Join Code:* ${joinCode}
+\nSend this code to family members so they can join and contribute.
+\nView your tree here: ${shareUrl}
+\n\nStart adding people now (e.g., *Add John Doe 1990 Male*) or type *HELP*.`;
+}
+
+function generateDefaultResponse(treeName) {
+  return `I'm sorry, I didn't understand that command. You are working on *${treeName}*. 
+\nType *HELP* for commands (like *Add*, *Change*, or relationship formats).
+\nType *MENU* to get the link/code.`;
+}
+
+function generatePersonInfo(person) {
+  const name = `${person.data.first_name} ${person.data.last_name || ''}`.trim();
+  const gender = person.data.gender === db.GENDER_TYPES.MALE ? 'Male' : person.data.gender === db.GENDER_TYPES.FEMALE ? 'Female' : 'Unknown';
+  const birthday = person.data.birthday || 'Year Unknown';
+  
+  let message = `*${name}* (${gender})\n`;
+  message += `Born: ${birthday}\n`;
+  
+  // NOTE: This can be expanded to show relationships later, but for now, keep it simple.
+  
   return message;
 }
 
-function buildCreateTreeMessage(tree) {
-  let message = `Congrats! 🎉 You've created a tree called *${tree.name}*.\n\n`;
-  message += `You can view it here:\n${BASE_URL}/tree.html?code=${tree.join_code}\n\n`;
-  message += `Share this code with family to collaborate: *${tree.join_code}*\n\n`;
-  message += "Add your first person by giving me their name (and maybe date of birth):\n";
-  message += "`Add John Smith born 1980`";
+function generatePersonConflictMessage(fullName, similarPersons) {
+  let message = `I found people similar to *${fullName}* in your tree:*\n\n`;
+  
+  similarPersons.forEach((p, i) => {
+    const pName = `${p.data.first_name} ${p.data.last_name || ''}`.trim();
+    const pYear = p.data.birthday || 'Unknown Year';
+    message += `${i + 1}. ${pName} (${pYear})\n`;
+  });
+  
+  message += "\nIf one of these is the person you meant, please correct your spelling. If you want to add this *new* person anyway, reply with *YES* or *NO* to cancel.";
   return message;
 }
 
-function buildAddPersonMessage(person, tree) {
-  let name = `${person.data.first_name || ''} ${person.data.last_name || ''}`.trim();
-  let message = `I've added *${name}*`;
-  if (person.data.birthday) {
-    message += ` (born ${person.data.birthday})`;
-  }
-  message += " to your family tree.\n\n";
-  message += "What else would you like to do? You can:\n";
-  message += "• Add more people\n";
-  message += "• Create relationships\n";
-  message += "• Type 'menu' for all commands";
-  return message;
-}
-
-function buildAddRelationshipMessage(operation, tree) {
-  let message = `OK, I've linked *${operation.nameA}* and *${operation.nameB}*`;
-  
-  const kindMap = {
-    'father': 'father and child',
-    'mother': 'mother and child',
-    'parent': 'parent and child',
-    'son': 'parent and son',
-    'daughter': 'parent and daughter',
-    'child': 'parent and child',
-    'spouse': 'spouses',
-    'divorced': 'divorced',
-    'separated': 'separated'
-  };
-  
-  if (kindMap[operation.kind]) {
-    message += ` as ${kindMap[operation.kind]}`;
+function generatePersonList(persons, searchName, personKey) {
+  // If only one person, this function shouldn't be called, but handle it anyway
+  if (persons.length === 1) {
+    return `Did you mean *${persons[0].data.first_name}*?`;
   }
   
-  message += ".\n\n";
-  message += `View your updated tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
-  return message;
-}
-
-function buildMultipleMatchesMessage(name, persons) {
-  let message = `I found multiple people named *${name}*:\n\n`;
+  let message = `I found multiple people for *${searchName}*:\n\n`;
   persons.forEach((p, i) => {
     const fullName = `${p.data.first_name} ${p.data.last_name || ''}`.trim();
     const birthday = p.data.birthday || 'no birth year';
     message += `${i + 1}. ${fullName} (${birthday})\n`;
   });
-  message += "\nPlease be more specific, maybe by using their full name or birth year.";
+  
+  if (personKey === 'person_a' || personKey === 'person_b') {
+    message += "\n*Please reply with the number of the person you mean.*";
+  } else if (personKey === 'update') {
+    message += "\n*Please reply with the number of the person you want to update.*";
+  } else {
+    message += "\n*Please be more specific, maybe by using their full name or birth year.*";
+  }
+  
   return message;
 }
 
-// ============================================================================
-// WHATSAPP API
+// ============================================================================\n// WHATSAPP API
 // ============================================================================
 
 async function sendWhatsAppMessage(phoneNumber, messageText) {
-  const token = WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
   if (!token || !phoneNumberId) {
     console.error("Missing WhatsApp API credentials from environment variables.");
@@ -746,6 +583,6 @@ async function sendWhatsAppMessage(phoneNumber, messageText) {
       console.error(`WhatsApp API error: ${response.statusText}`, errorText);
     }
   } catch (error) {
-    console.error("Failed to send WhatsApp message:", error);
+    console.error("Failed to send message to WhatsApp API:", error);
   }
 }
