@@ -26,14 +26,24 @@ import { parseOps, getTreeContext } from "./_nlp.js";
 import * as db from "./_db.js";
 import crypto from 'crypto';
 
+// --- Environment Variables ---
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const BASE_URL = process.env.BASE_URL || "https://family-tree-webhook.vercel.app";
+// The private key MUST be the exact pair for the public key submitted to Meta.
 const FLOWS_RSA_PRIVATE_KEY = process.env.FLOWS_RSA_PRIVATE_KEY;
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
 // ============================================================================
 // RSA DECRYPTION UTILITY
 // ============================================================================
 
+/**
+ * Decrypts the Base64-encoded flow token using the stored RSA private key.
+ * This function is the critical step that is currently failing (key mismatch).
+ * @param {string} encryptedBase64 - The encrypted flow_token from the flow_completion event.
+ * @returns {string | null} The decrypted plaintext token.
+ */
 function decryptFlowToken(encryptedBase64) {
   if (!FLOWS_RSA_PRIVATE_KEY) {
     console.error("FLOWS_RSA_PRIVATE_KEY is missing from environment variables.");
@@ -45,15 +55,116 @@ function decryptFlowToken(encryptedBase64) {
     const decryptedBuffer = crypto.privateDecrypt(
       {
         key: FLOWS_RSA_PRIVATE_KEY,
+        // PKCS1 padding is standard for the flow token.
         padding: crypto.constants.RSA_PKCS1_PADDING,
       },
       encryptedBuffer
     );
     return decryptedBuffer.toString('utf8');
   } catch (error) {
-    console.error("RSA Decryption failed:", error.message);
+    console.error("RSA Decryption failed (Key Mismatch likely):", error.message);
+    // Important to return null on failure so we can send a custom error message
     return null;
   }
+}
+
+// ============================================================================
+// FLOW COMPLETION HANDLER
+// ============================================================================
+
+/**
+ * Handles the flow_completion event after a user submits the form.
+ * @param {string} phoneNumber - User's WhatsApp number.
+ * @param {string} profileName - User's profile name.
+ * @param {object} flowCompletionData - The interactive.flow_completion payload.
+ */
+async function handleFlowCompletion(phoneNumber, profileName, flowCompletionData) {
+  // We only need the flow_token here. The encrypted_flow_data requires Meta's public key (not implemented here)
+  const { flow_token: encryptedFlowToken } = flowCompletionData;
+
+  console.log(`Received flow_completion from ${profileName}. Encrypted Token: ${encryptedFlowToken}`);
+
+  // 1. Decrypt the flow_token
+  const decryptedFlowToken = decryptFlowToken(encryptedFlowToken);
+
+  if (!decryptedFlowToken) {
+    // This is the error message sent if your private key doesn't match the public key submitted to Meta.
+    await sendWhatsAppMessage(phoneNumber, "Sorry, I couldn't securely process your family tree request. The security token failed validation.");
+    return;
+  }
+
+  console.log(`Decrypted Flow Token: ${decryptedFlowToken}`);
+  
+  // 2. FETCH FINAL DATA from Meta using the decrypted token
+  let flowData = null;
+  try {
+    const finalData = await fetchFlowData(decryptedFlowToken);
+    flowData = JSON.parse(finalData);
+  } catch (e) {
+    console.error("Failed to fetch or parse final flow data:", e);
+    await sendWhatsAppMessage(phoneNumber, "I was able to process your security token, but failed to retrieve the submitted form data. Please try again.");
+    return;
+  }
+  
+  // 3. PROCESS DATA and update the database
+  const userState = await getUserState(phoneNumber);
+  if (!userState?.tree_id) {
+    await sendWhatsAppMessage(phoneNumber, "I received your family member data, but you haven't selected an active tree yet. Please say 'Join tree [code]' or 'Create tree [name]' first.");
+    return;
+  }
+
+  const treeId = userState.tree_id;
+  const tree = await getTreeById(treeId);
+  
+  // Example data processing logic based on expected flow output (modify as needed)
+  if (flowData.firstName && flowData.birthYear) {
+      const person = await insertPerson(
+        treeId, 
+        flowData.firstName, 
+        flowData.lastName, 
+        flowData.gender, 
+        flowData.birthYear
+      );
+
+      // Respond with success message
+      const name = `${person.data.first_name || ''} ${person.data.last_name || ''}`.trim();
+      let message = `Successfully added *${name}* to the tree *${tree.name}* via the flow!`;
+      message += `\n\nView your tree: ${BASE_URL}/tree.html?code=${tree.join_code}`;
+      await sendWhatsAppMessage(phoneNumber, message);
+  } else {
+      await sendWhatsAppMessage(phoneNumber, "I received your data, but it seems incomplete. Please try filling out the flow again.");
+  }
+}
+
+/**
+ * Calls the Meta API to get the final submitted data using the decrypted flow token.
+ * @param {string} decryptedFlowToken - The decrypted token.
+ * @returns {Promise<string>} The decrypted_flow_data.data string.
+ */
+async function fetchFlowData(decryptedFlowToken) {
+    const token = WHATSAPP_ACCESS_TOKEN;
+    if (!token) throw new Error("Missing WhatsApp Access Token.");
+
+    // This is the official Meta endpoint to retrieve the submitted form data
+    const url = `https://graph.facebook.com/v19.0/decrypted_flow_data?flow_token=${decryptedFlowToken}`;
+
+    const response = await fetch(url, {
+        method: "GET",
+        headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+        },
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Meta API Flow Data Error: ${response.statusText}`, errorText);
+        throw new Error(`Failed to fetch flow data: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    // The actual form data is nested inside a JSON string within the response
+    return result.decrypted_flow_data.data;
 }
 
 // ============================================================================
@@ -88,8 +199,9 @@ export default async function handler(req, res) {
     const changes = entry?.changes?.[0];
     const message = changes?.value?.messages?.[0];
 
+    // Early return for status updates, read receipts, etc.
     if (!message) {
-      return res.status(200).send("No message");
+      return res.status(200).send("No message/status update processed");
     }
 
     const phoneNumber = message.from;
@@ -98,7 +210,7 @@ export default async function handler(req, res) {
     // Check for Flow Completion Message
     if (message.type === 'interactive' && message.interactive?.type === 'flow_completion') {
       await handleFlowCompletion(phoneNumber, profileName, message.interactive.flow_completion);
-      return res.status(200).send("EVENT_RECEIVED");
+      return res.status(200).send("EVENT_RECEIVED - Flow Completed");
     }
 
     // Handle text messages
@@ -120,36 +232,7 @@ export default async function handler(req, res) {
 }
 
 // ============================================================================
-// FLOW COMPLETION HANDLER
-// ============================================================================
-
-async function handleFlowCompletion(phoneNumber, profileName, flowCompletionData) {
-  const { flow_token: encryptedFlowToken, encrypted_flow_data } = flowCompletionData;
-
-  console.log(`Received flow_completion from ${profileName}. Encrypted Token: ${encryptedFlowToken}`);
-
-  // Decrypt the flow_token
-  const decryptedFlowToken = decryptFlowToken(encryptedFlowToken);
-
-  if (!decryptedFlowToken) {
-    await sendWhatsAppMessage(phoneNumber, "Sorry, I couldn't securely process your request. Please try again.");
-    return;
-  }
-
-  console.log(`Decrypted Flow Token: ${decryptedFlowToken}`);
-
-  // TODO: Call Meta API to get final submitted data using decryptedFlowToken
-  // For now, confirm receipt
-  await sendWhatsAppMessage(phoneNumber, `Thank you for completing the flow! Your unique ID is: ${decryptedFlowToken}`);
-
-  // TODO: Parse flow data and add to database
-  // Example:
-  // const flowData = await fetchFlowData(decryptedFlowToken);
-  // await insertPerson(treeId, flowData.firstName, flowData.lastName, ...);
-}
-
-// ============================================================================
-// MESSAGE PROCESSING
+// MESSAGE PROCESSING (Includes all the previously written chat logic)
 // ============================================================================
 
 async function processMessage(phoneNumber, messageText) {
@@ -525,7 +608,7 @@ async function addRelationshipSmart(treeId, kind, personAId, personBId) {
     dbKind = RELATIONSHIP_TYPES.PARENT;
   } else if (['son', 'daughter', 'child'].includes(kind)) {
     dbKind = RELATIONSHIP_TYPES.PARENT;
-    [idA, idB] = [idB, idA];
+    [idA, idB] = [idB, idA]; // Flip: child is A, parent is B in DB
   } else if (kind === 'spouse') {
     dbKind = RELATIONSHIP_TYPES.SPOUSE;
   } else if (kind === 'divorced') {
@@ -536,6 +619,7 @@ async function addRelationshipSmart(treeId, kind, personAId, personBId) {
     return { error: "Sibling relationships need to be set up through parents. Try: 'Alice is Bob's daughter' and 'Bob is Charlie's daughter'" };
   }
 
+  // A is the primary person (child/spouse), B is the related person (parent/spouse)
   return await addRelationship(treeId, dbKind, idA, idB);
 }
 
@@ -632,8 +716,8 @@ function buildMultipleMatchesMessage(name, persons) {
 // ============================================================================
 
 async function sendWhatsAppMessage(phoneNumber, messageText) {
-  const token = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = WHATSAPP_PHONE_NUMBER_ID;
 
   if (!token || !phoneNumberId) {
     console.error("Missing WhatsApp API credentials from environment variables.");
