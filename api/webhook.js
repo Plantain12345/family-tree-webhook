@@ -1,6 +1,9 @@
 // api/webhook.js
 // WhatsApp Flow webhook with RSA-OAEP(SHA-256) + AES-128-GCM (OpenSSL 3 / PKCS#8)
+// IMPORTANT: For data_api_version "3.0", encrypt responses with the SAME AES key but an INVERTED IV (bitwise NOT).
+// References: Meta Flows endpoint guidance summarized by community posts (invert IV), e.g. n8n workflow + Elixir forum quotes.
 
+// Node 18+ on Vercel
 import crypto from "crypto";
 import {
   createTree,
@@ -9,10 +12,8 @@ import {
   getUserState,
   setUserState,
   insertPerson,
-  addRelationship,
   addMember,
   isMember,
-  RELATIONSHIP_TYPES,
   GENDER_TYPES,
 } from "./_db.js";
 
@@ -36,13 +37,20 @@ function getPrivateKeyObject() {
   });
 }
 
+/** Bitwise invert IV bytes for response encryption (Flows v3 requirement). */
+function invertIv(ivBuf) {
+  const out = Buffer.alloc(ivBuf.length);
+  for (let i = 0; i < ivBuf.length; i++) out[i] = ivBuf[i] ^ 0xff;
+  return out;
+}
+
 /**
  * Decrypts Meta's request. Returns { payload, aesKey, iv }.
  */
 function decryptRequest(encryptedFlowData, encryptedAesKey, initialVector) {
   const keyObject = getPrivateKeyObject();
 
-  // 1) RSA-OAEP(SHA-256) => recover AES session key
+  // 1) RSA-OAEP(SHA-256) => recover AES session key (16 bytes)
   const aesKey = crypto.privateDecrypt(
     {
       key: keyObject,
@@ -78,27 +86,32 @@ function decryptRequest(encryptedFlowData, encryptedAesKey, initialVector) {
 }
 
 /**
- * Encrypts response JSON with AES-128-GCM using the decrypted aesKey + iv
- * Returns base64(ciphertext || tag)
+ * Encrypt JSON response with AES-128-GCM using decrypted aesKey + **INVERTED** iv.
+ * Returns base64(ciphertext || tag).
  */
-function encryptResponseJson(responseObj, aesKey, iv) {
-  const cipher = crypto.createCipheriv("aes-128-gcm", aesKey, iv);
+function encryptResponseJson(responseObj, aesKey, requestIv) {
+  const respIv = invertIv(requestIv);
+  const cipher = crypto.createCipheriv("aes-128-gcm", aesKey, respIv);
   const body = Buffer.from(JSON.stringify(responseObj), "utf8");
   const ciphertext = Buffer.concat([cipher.update(body), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return Buffer.concat([ciphertext, tag]).toString("base64");
+  return {
+    base64: Buffer.concat([ciphertext, tag]).toString("base64"),
+    respIv, // return for self-check
+  };
 }
 
 /**
- * Optional: self-verify the encrypted blob can be decrypted locally
+ * Self-verify the encrypted blob (using inverted IV) can be decrypted locally.
  */
-function trySelfDecrypt(base64Blob, aesKey, iv) {
+function trySelfDecrypt(base64Blob, aesKey, requestIv) {
   try {
+    const respIv = invertIv(requestIv);
     const blob = Buffer.from(base64Blob, "base64");
     const TAG_LEN = 16;
     const ct = blob.subarray(0, blob.length - TAG_LEN);
     const tag = blob.subarray(blob.length - TAG_LEN);
-    const dec = crypto.createDecipheriv("aes-128-gcm", aesKey, iv);
+    const dec = crypto.createDecipheriv("aes-128-gcm", aesKey, respIv);
     dec.setAuthTag(tag);
     const plain = Buffer.concat([dec.update(ct), dec.final()]);
     return plain.toString("utf8");
@@ -114,7 +127,7 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST");
 
-  // GET: webhook verification
+  // GET: webhook verification (opening in a browser without hub params will show "Verification failed" — that's OK)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -191,11 +204,11 @@ async function handleFlowDataExchange(req, res) {
     if (action === "ping") {
       // Health check
       responseData = { version: version || "3.0", data: { status: "active" } };
-      const enc = encryptResponseJson(responseData, aesKey, iv);
-      const echo = trySelfDecrypt(enc, aesKey, iv);
+      const { base64 } = encryptResponseJson(responseData, aesKey, iv);
+      const echo = trySelfDecrypt(base64, aesKey, iv);
       if (!echo) return res.status(500).json({ error: "Local self-decrypt failed" });
       res.setHeader("Content-Type", "text/plain");
-      return res.status(200).send(enc);
+      return res.status(200).send(base64);
     }
 
     if (action === "INIT") {
@@ -213,16 +226,15 @@ async function handleFlowDataExchange(req, res) {
       responseData = { version: version || "3.0", data: { error: "Unknown action" } };
     }
 
-    const enc = encryptResponseJson(responseData, aesKey, iv);
-    const echo = trySelfDecrypt(enc, aesKey, iv);
+    const { base64 } = encryptResponseJson(responseData, aesKey, iv);
+    const echo = trySelfDecrypt(base64, aesKey, iv);
     if (!echo) return res.status(500).json({ error: "Local self-decrypt failed" });
 
     res.setHeader("Content-Type", "text/plain");
-    return res.status(200).send(enc);
+    return res.status(200).send(base64);
   } catch (error) {
     console.error("Flow data exchange error:", error.message);
-    console.error("Full error object:", error); // Log the full error object
-    // Can't encrypt without the decrypted AES key; return 500 so Meta retries/logs
+    console.error("Full error object:", error);
     return res.status(500).json({
       error: `Failed to process encrypted request: ${error.message}`,
     });
@@ -351,7 +363,7 @@ async function handleMessage(phoneNumber, text) {
       const joinedTree = await getTreeByCode(joinCode);
       if (joinedTree) {
         await addMember(joinedTree.id, phoneNumber);
-        await setUserState(phoneNumber, joinedTree.id, null, null);
+        await setUserState(joinedTree.id, phoneNumber, null, null);
         return sendWhatsAppMessage(
           phoneNumber,
           `✅ Successfully joined family tree *${joinedTree.name}*!\n\nReply with *MENU* to see options.`
