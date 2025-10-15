@@ -61,9 +61,6 @@ function decryptRequest(encryptedFlowData, encryptedAesKey, initialVector) {
   }
 
   // 2) AES-128-GCM → decrypt the payload
-  const iv = Buffer.from(initialVector, 'base64');
-  if (iv.length !== 12) throw new Error(`IV must be 12 bytes; got ${iv.length}`);
-
   const blob = Buffer.from(encryptedFlowData, 'base64');
   const TAG_LEN = 16;
   const ciphertext = blob.subarray(0, blob.length - TAG_LEN);
