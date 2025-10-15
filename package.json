@@ -1,14 +1,15 @@
 {
   "name": "family-tree-webhook",
-  "version": "3.0.0",
+  "version": "2.0.0",
   "type": "module",
-  "description": "WhatsApp Flows webhook for collaborative family trees (no NLP, flows only)",
+  "description": "WhatsApp chatbot for collaborative family tree building",
   "scripts": {
     "dev": "vercel dev",
     "start": "node api/webhook.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0"
+    "@supabase/supabase-js": "^2.43.3",
+    "openai": "^4.57.0"
   },
   "engines": {
     "node": ">=18.0.0"
