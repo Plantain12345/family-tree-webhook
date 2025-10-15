@@ -220,7 +220,8 @@ async function handleFlowDataExchange(req, res) {
     res.setHeader("Content-Type", "text/plain");
     return res.status(200).send(enc);
   } catch (error) {
-    console.error("Flow data exchange error:", error);
+    console.error("Flow data exchange error:", error.message);
+    console.error("Full error object:", error); // Log the full error object
     // Can't encrypt without the decrypted AES key; return 500 so Meta retries/logs
     return res.status(500).json({
       error: `Failed to process encrypted request: ${error.message}`,
