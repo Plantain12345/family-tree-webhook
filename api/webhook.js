@@ -1,565 +1,260 @@
 // api/webhook.js
-// WhatsApp Flow webhook with RSA-OAEP(SHA-256) + AES-128-GCM (OpenSSL 3 / PKCS#8)
-// IMPORTANT: For data_api_version "3.0", encrypt responses with the SAME AES key but an INVERTED IV (bitwise NOT).
-// References: Meta Flows endpoint guidance summarized by community posts (invert IV), e.g. n8n workflow + Elixir forum quotes.
+// WhatsApp Flows webhook – Flows-only (no NLP, no typed menu)
+// RSA-OAEP(SHA-256) + AES-128-GCM for Flow data_api_version 3.0
 
-// Node 18+ on Vercel
 import crypto from "crypto";
 import {
-  createTree,
-  getTreeById,
   getTreeByCode,
   getUserState,
   setUserState,
   insertPerson,
   addMember,
   isMember,
-  GENDER_TYPES,
+  GENDER_TYPES
 } from "./_db.js";
 
+// --- config ---
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const BASE_URL = process.env.BASE_URL || "https://family-tree-webhook.vercel.app";
+const WABA_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
-// ========================== CRYPTO HELPERS ===============================
-
+// --- utilities ---
 function getPrivateKeyObject() {
   let pem = process.env.FLOW_PRIVATE_KEY;
-  if (!pem) {
-    throw new Error(
-      "FLOW_PRIVATE_KEY is not set. Paste a PKCS#8 PEM (-----BEGIN PRIVATE KEY----- ...)."
-    );
-  }
+  if (!pem) throw new Error("FLOW_PRIVATE_KEY is not set (PKCS#8 PEM)");
   if (pem.includes("\\n")) pem = pem.replace(/\\n/g, "\n");
   return crypto.createPrivateKey({
     key: pem,
     format: "pem",
-    passphrase: process.env.FLOW_PASSPHRASE || undefined,
+    passphrase: process.env.FLOW_PASSPHRASE || undefined
   });
 }
 
-/** Bitwise invert IV bytes for response encryption (Flows v3 requirement). */
-function invertIv(ivBuf) {
-  const out = Buffer.alloc(ivBuf.length);
-  for (let i = 0; i < ivBuf.length; i++) out[i] = ivBuf[i] ^ 0xff;
-  return out;
-}
-
-/**
- * Decrypts Meta's request. Returns { payload, aesKey, iv }.
- */
+// decrypt payload from Meta
 function decryptRequest(encryptedFlowData, encryptedAesKey, initialVector) {
   const keyObject = getPrivateKeyObject();
 
-  // 1) RSA-OAEP(SHA-256) => recover AES session key (16 bytes)
   const aesKey = crypto.privateDecrypt(
     {
       key: keyObject,
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: "sha256",
+      oaepHash: "sha256"
     },
     Buffer.from(encryptedAesKey, "base64")
   );
 
-  if (aesKey.length !== 16) {
-    throw new Error(
-      `Decrypted AES key invalid length ${aesKey.length}; expected 16 for aes-128-gcm`
-    );
-  }
+  const iv = Buffer.from(initialVector, "base64");
+  const cipherText = Buffer.from(encryptedFlowData, "base64");
 
-  // 2) AES-128-GCM => decrypt payload
-  const iv = Buffer.from(initialVector, "base64"); // Meta may send 12 or 16
-  if (iv.length !== 12 && iv.length !== 16) {
-    console.warn(`Unexpected IV length ${iv.length}; proceeding`);
-  }
-
-  const blob = Buffer.from(encryptedFlowData, "base64");
-  const TAG_LEN = 16;
-  const ciphertext = blob.subarray(0, blob.length - TAG_LEN);
-  const tag = blob.subarray(blob.length - TAG_LEN);
+  const authTag = cipherText.subarray(cipherText.length - 16);
+  const ciphertextBody = cipherText.subarray(0, cipherText.length - 16);
 
   const decipher = crypto.createDecipheriv("aes-128-gcm", aesKey, iv);
-  decipher.setAuthTag(tag);
-  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  const payload = JSON.parse(plaintext.toString("utf8"));
+  decipher.setAuthTag(authTag);
 
-  return { payload, aesKey, iv };
+  const json = Buffer.concat([decipher.update(ciphertextBody), decipher.final()]).toString("utf8");
+  return { payload: JSON.parse(json), aesKey, iv };
 }
 
-/**
- * Encrypt JSON response with AES-128-GCM using decrypted aesKey + **INVERTED** iv.
- * Returns base64(ciphertext || tag).
- */
-function encryptResponseJson(responseObj, aesKey, requestIv) {
-  const respIv = invertIv(requestIv);
-  const cipher = crypto.createCipheriv("aes-128-gcm", aesKey, respIv);
-  const body = Buffer.from(JSON.stringify(responseObj), "utf8");
-  const ciphertext = Buffer.concat([cipher.update(body), cipher.final()]);
+// encrypt response for Meta
+function maybeInvertIv(iv) {
+  const useInvert = String(process.env.FLOW_INVERT_IV || "").toLowerCase() === "true";
+  if (!useInvert) return iv;
+  const out = Buffer.alloc(iv.length);
+  for (let i = 0; i < iv.length; i++) out[i] = ~iv[i];
+  return out;
+}
+
+function encryptResponseJson(obj, aesKey, requestIv) {
+  const iv = maybeInvertIv(requestIv);
+  const plain = Buffer.from(JSON.stringify(obj), "utf8");
+  const cipher = crypto.createCipheriv("aes-128-gcm", aesKey, iv);
+  const enc = Buffer.concat([cipher.update(plain), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return {
-    base64: Buffer.concat([ciphertext, tag]).toString("base64"),
-    respIv, // return for self-check
-  };
+  return Buffer.concat([enc, tag]).toString("base64");
 }
 
-/**
- * Self-verify the encrypted blob (using inverted IV) can be decrypted locally.
- */
-function trySelfDecrypt(base64Blob, aesKey, requestIv) {
-  try {
-    const respIv = invertIv(requestIv);
-    const blob = Buffer.from(base64Blob, "base64");
-    const TAG_LEN = 16;
-    const ct = blob.subarray(0, blob.length - TAG_LEN);
-    const tag = blob.subarray(blob.length - TAG_LEN);
-    const dec = crypto.createDecipheriv("aes-128-gcm", aesKey, respIv);
-    dec.setAuthTag(tag);
-    const plain = Buffer.concat([dec.update(ct), dec.final()]);
-    return plain.toString("utf8");
-  } catch (e) {
-    console.error("Self-decrypt failed:", e.message);
-    return null;
-  }
-}
-
-// =========================== WEBHOOK =====================================
-
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST");
-
-  // GET: webhook verification (opening in a browser without hub params will show "Verification failed" — that's OK)
-  if (req.method === "GET") {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      console.log("Webhook verified successfully.");
-      return res.status(200).send(challenge);
-    }
-    return res.status(403).send("Verification failed");
-  }
-
-  if (req.method === "POST") {
-    const body = req.body;
-
-    // Flow Data Exchange (encrypted)
-    if (body.encrypted_flow_data && body.encrypted_aes_key && body.initial_vector) {
-      return handleFlowDataExchange(req, res);
-    }
-
-    // Regular WABA messages
-    if (body.object === "whatsapp_business_account") {
-      for (const entry of body.entry) {
-        for (const change of entry.changes) {
-          if (change.value.messages) {
-            const message = change.value.messages[0];
-            const from = message.from;
-
-            if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
-              await handleFlowResponse(from, message.interactive.nfm_reply);
-              return res.status(200).send("FLOW_RESPONSE_RECEIVED");
-            }
-
-            const text =
-              message.text?.body ||
-              message.button?.text ||
-              message.interactive?.button_reply?.title ||
-              message.interactive?.list_reply?.title ||
-              "";
-
-            console.log(`Received message from ${from}: ${text}`);
-            await handleMessage(from, text);
-            return res.status(200).send("MESSAGE_RECEIVED");
-          } else if (change.value.statuses) {
-            console.log(`Status update: ${change.value.statuses[0].status}`);
-            return res.status(200).send("STATUS_UPDATE_RECEIVED");
-          }
-        }
-      }
-    }
-
-    return res.status(200).send("OK");
-  }
-
-  return res.status(404).send("Not found");
-}
-
-// ===================== FLOW DATA EXCHANGE HANDLER =========================
-
-async function handleFlowDataExchange(req, res) {
-  try {
-    console.log("Flow request body keys:", Object.keys(req.body));
-
-    const { payload, aesKey, iv } = decryptRequest(
-      req.body.encrypted_flow_data,
-      req.body.encrypted_aes_key,
-      req.body.initial_vector
-    );
-
-    const { action, screen, data, flow_token, version } = payload;
-    console.log("Flow action:", action, "IV len:", iv.length, "AES len:", aesKey.length);
-
-    let responseData;
-
-    if (action === "ping") {
-      // Health check
-      responseData = { version: version || "3.0", data: { status: "active" } };
-      const { base64 } = encryptResponseJson(responseData, aesKey, iv);
-      const echo = trySelfDecrypt(base64, aesKey, iv);
-      if (!echo) return res.status(500).json({ error: "Local self-decrypt failed" });
-      res.setHeader("Content-Type", "text/plain");
-      return res.status(200).send(base64);
-    }
-
-    if (action === "INIT") {
-      responseData = { version: version || "3.0", screen: "ADD_MEMBER", data: {} };
-    } else if (action === "data_exchange") {
-      const context = flow_token ? JSON.parse(Buffer.from(flow_token, "base64").toString()) : {};
-      switch (screen) {
-        case "ADD_MEMBER":
-          responseData = await handleAddMemberScreen(data, context, version);
-          break;
-        default:
-          responseData = { version: version || "3.0", data: { error: "Unknown screen" } };
-      }
-    } else {
-      responseData = { version: version || "3.0", data: { error: "Unknown action" } };
-    }
-
-    const { base64 } = encryptResponseJson(responseData, aesKey, iv);
-    const echo = trySelfDecrypt(base64, aesKey, iv);
-    if (!echo) return res.status(500).json({ error: "Local self-decrypt failed" });
-
-    res.setHeader("Content-Type", "text/plain");
-    return res.status(200).send(base64);
-  } catch (error) {
-    console.error("Flow data exchange error:", error.message);
-    console.error("Full error object:", error);
-    return res.status(500).json({
-      error: `Failed to process encrypted request: ${error.message}`,
-    });
-  }
-}
-
-// ========================= FLOW SCREEN HANDLERS ===========================
-
-async function handleAddMemberScreen(data, context, version) {
-  const { first_name, last_name, gender, birth_year, death_year } = data;
-  const treeId = context.tree_id;
-
-  if (!treeId) {
-    return {
-      version: version || "3.0",
-      screen: "ADD_MEMBER",
-      data: { error: "No tree selected. Please start from WhatsApp menu." },
-    };
-  }
-
-  try {
-    const genderType =
-      gender === "male" ? GENDER_TYPES.MALE : gender === "female" ? GENDER_TYPES.FEMALE : null;
-
-    await insertPerson(
-      treeId,
-      first_name,
-      last_name || null,
-      genderType,
-      birth_year || null,
-      death_year || null
-    );
-
-    return {
-      version: version || "3.0",
-      screen: "SUCCESS",
-      data: {
-        extension_message_response: { params: { ok: true } },
-      },
-    };
-  } catch (error) {
-    console.error("Error adding member:", error);
-    return {
-      version: version || "3.0",
-      screen: "ADD_MEMBER",
-      data: { error: `Failed to add member: ${error.message}` },
-    };
-  }
-}
-
-// ===================== FLOW COMPLETION MESSAGE ============================
-
-async function handleFlowResponse(phoneNumber, nfmReply) {
-  const { name, response_json } = nfmReply;
-  const responseData = JSON.parse(response_json);
-  console.log(`Flow completed: ${name}`, responseData);
-
-  const state = await getUserState(phoneNumber);
-  const tree = state?.tree_id ? await getTreeById(state.tree_id) : null;
-
-  if (!tree) {
-    return sendWhatsAppMessage(phoneNumber, "⚠️ Please create or join a tree first!");
-  }
-
-  const memberData = responseData.member || responseData;
-  const { first_name, last_name, gender, birth_year, death_year } = memberData;
-
-  try {
-    const genderType =
-      gender === "male" ? GENDER_TYPES.MALE : gender === "female" ? GENDER_TYPES.FEMALE : null;
-
-    const newPerson = await insertPerson(
-      tree.id,
-      first_name,
-      last_name || null,
-      genderType,
-      birth_year || null,
-      death_year || null
-    );
-
-    await setUserState(phoneNumber, tree.id, newPerson.id, `${first_name} ${last_name || ""}`.trim());
-
-    const genderText =
-      gender === "male" ? "Male" : gender === "female" ? "Female" : "Prefer not to say";
-
-    let message = `✅ *${first_name}${last_name ? " " + last_name : ""}* has been added to *${tree.name}*!\n\n`;
-    message += `👤 Gender: ${genderText}\n`;
-    if (birth_year) message += `🎂 Born: ${birth_year}\n`;
-    if (death_year) message += `🕊️ Died: ${death_year}\n`;
-    message += `\nReply with *MENU* to add more family members.`;
-
-    return sendWhatsAppMessage(phoneNumber, message);
-  } catch (error) {
-    console.error("Error saving member:", error);
-    return sendWhatsAppMessage(
-      phoneNumber,
-      `❌ Sorry, I couldn't add ${first_name}. Error: ${error.message}\n\nPlease try again.`
-    );
-  }
-}
-
-// =========================== TEXT COMMANDS ================================
-
-async function handleMessage(phoneNumber, text) {
-  const state = await getUserState(phoneNumber);
-  let tree = null;
-
-  if (state?.tree_id) {
-    tree = await getTreeById(state.tree_id);
-    if (!tree) await setUserState(phoneNumber, null, null, null);
-  }
-
-  const normalizedText = (text || "").trim().toLowerCase();
-
-  if (normalizedText === "menu" || normalizedText === "start") {
-    return sendMainMenu(phoneNumber, tree);
-  }
-  if (normalizedText === "help") {
-    return sendWhatsAppMessage(phoneNumber, generateHelpMessage(tree));
-  }
-
-  if (!tree) {
-    const joinCodeMatch = (text || "").toUpperCase().match(/^[A-Z0-9]{6}$/);
-    if (joinCodeMatch) {
-      const joinCode = joinCodeMatch[0];
-      const joinedTree = await getTreeByCode(joinCode);
-      if (joinedTree) {
-        await addMember(joinedTree.id, phoneNumber);
-        await setUserState(joinedTree.id, phoneNumber, null, null);
-        return sendWhatsAppMessage(
-          phoneNumber,
-          `✅ Successfully joined family tree *${joinedTree.name}*!\n\nReply with *MENU* to see options.`
-        );
-      }
-      return sendWhatsAppMessage(
-        phoneNumber,
-        `❌ I couldn't find a tree with code *${joinCode}*. Please check and try again.`
-      );
-    }
-
-    const createMatch = (text || "").match(/^(create|new)\s+(.+)/i);
-    if (createMatch) {
-      const treeName = createMatch[2].trim();
-      const newTree = await createTree(phoneNumber, treeName);
-      await setUserState(phoneNumber, newTree.id, null, null);
-      const shareUrl = `${BASE_URL}/tree.html?code=${newTree.join_code}`;
-      return sendWhatsAppMessage(
-        phoneNumber,
-        `🎉 Family tree *${treeName}* created!\n\n*Join Code:* ${newTree.join_code}\n\nView tree: ${shareUrl}\n\nReply with *MENU* to add family members.`
-      );
-    }
-
-    return sendWhatsAppMessage(phoneNumber, generateWelcomeMessage());
-  }
-
-  if (!(await isMember(tree.id, phoneNumber))) {
-    await setUserState(phoneNumber, null, null, null);
-    return sendWhatsAppMessage(
-      phoneNumber,
-      `You are no longer a member of *${tree.name}*. Type *MENU* to see options.`
-    );
-  }
-
-  if (normalizedText === "view" || normalizedText === "view tree") {
-    const link = `${BASE_URL}/tree.html?code=${tree.join_code}`;
-    return sendWhatsAppMessage(phoneNumber, `🌳 View your tree: ${link}`);
-  }
-
-  if (normalizedText === "share" || normalizedText === "share code") {
-    return sendWhatsAppMessage(
-      phoneNumber,
-      `📤 Share this code with family:\n\n*${tree.join_code}*\n\nThey can join by sending this code to me!`
-    );
-  }
-
-  if (normalizedText === "info") {
-    return sendWhatsAppMessage(
-      phoneNumber,
-      `*${tree.name}*\n\n👥 Members: ${tree.person_count || 0}\n📋 Code: ${tree.join_code}\n\nReply *MENU* to add more people.`
-    );
-  }
-
-  return sendMainMenu(phoneNumber, tree);
-}
-
-// ============================== MENUS =====================================
-
-async function sendMainMenu(phoneNumber, tree) {
-  if (!tree) return sendWhatsAppMessage(phoneNumber, generateWelcomeMessage());
-
-  const token = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const flowId = process.env.WHATSAPP_FLOW_ID;
-
-  if (!token || !phoneNumberId || !flowId) {
-    return sendWhatsAppMessage(phoneNumber, "⚠️ API credentials missing. Please contact admin.");
-  }
-
-  const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
-
-  const flowToken = Buffer.from(
-    JSON.stringify({
-      tree_id: tree.id,
-      phone_number: phoneNumber,
-    })
-  ).toString("base64");
-
-  const payload = {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: phoneNumber,
-    type: "interactive",
-    interactive: {
-      type: "flow",
-      header: { type: "text", text: `${tree.name} 🌳` },
-      body: {
-        text: `👥 *${tree.person_count || 0} family members*\n\nAdd a new person to your family tree using the form below:`,
-      },
-      footer: { text: "Tap the button to continue" },
-      action: {
-        name: "flow",
-        parameters: {
-          flow_message_version: "3",
-          flow_token: flowToken,
-          flow_id: flowId,
-          flow_cta: "➕ Add Family Member",
-          flow_action: "navigate",
-          flow_action_payload: { screen: "ADD_MEMBER", data: {} },
-        },
-      },
+// send a simple WhatsApp text message
+async function sendText(to, body) {
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WABA_TOKEN}`,
+      "Content-Type": "application/json"
     },
-  };
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body }
+    })
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    console.error("sendText failed:", res.status, t);
+  }
+}
 
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+// --- Flow logic (ONLY) ---
+// We support three flows (IDs on Meta side):
+// 1) ADD_MEMBER
+// 2) EDIT_REMOVE (will be used by your Edit/Remove flow screens)
+// 3) LINK_UNLINK (used by your relationship flow screens)
+//
+// This webhook implements ADD_MEMBER fully.
+// EDIT_REMOVE and LINK_UNLINK stubs are ready (no-ops until those screens submit).
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`WhatsApp API error:`, errorText);
-      return sendWhatsAppMessage(
-        phoneNumber,
-        `*${tree.name}* Menu\n\n👥 ${tree.person_count || 0} members\n\nCommands:\n• *VIEW* - See your tree\n• *SHARE* - Get invite code\n• *INFO* - Tree details\n• *HELP* - Get help`
-      );
+function buildAckResponse(version = "3.0", screenId = "ADD_MEMBER") {
+  // Return an extension_message_response so client can close the sheet.
+  return {
+    version,
+    screen: screenId,
+    data: {
+      extension_message_response: { params: { ok: true } }
     }
-  } catch (error) {
-    console.error("Failed to send flow menu:", error);
-    return sendWhatsAppMessage(
-      phoneNumber,
-      `*${tree.name}* Menu\n\n👥 ${tree.person_count || 0} members\n\nCommands:\n• *VIEW* - See your tree\n• *SHARE* - Get invite code\n• *INFO* - Tree details`
-    );
+  };
+}
+
+async function handleAddMemberDataExchange(flowRequest) {
+  // We do server-side validation here but DO NOT write to DB yet.
+  // Actual write happens on nfm_reply to avoid double inserts.
+  const { version, current_screen, data } = flowRequest;
+  const form = data?.form || data || {};
+  const first = String(form.first_name || "").trim();
+  const last = String(form.last_name || "").trim();
+  const gender = String(form.gender || "").trim();
+  const birth = String(form.birth_year || "").trim();
+  const death = String(form.death_year || "").trim();
+
+  if (!first || !last || !gender) {
+    return {
+      version,
+      screen: current_screen || "ADD_MEMBER",
+      data: {
+        errors: [
+          { field: "first_name", message: !first ? "First name is required" : undefined },
+          { field: "last_name", message: !last ? "Last name is required" : undefined },
+          { field: "gender", message: !gender ? "Gender is required" : undefined }
+        ].filter(Boolean)
+      }
+    };
   }
-}
-
-function generateWelcomeMessage() {
-  return `👋 *Welcome to Family Tree Bot!*
-
-To get started:
-
-📝 *Create* a new tree:
-   Reply: *Create [family name]*
-   Example: *Create Smith Family*
-
-🔗 *Join* an existing tree:
-   Reply with the 6-digit code
-   Example: *A1B2C3*
-
-Type *HELP* anytime for assistance.`;
-}
-
-function generateHelpMessage(tree) {
-  if (!tree) {
-    return `*Family Tree Bot Help*
-
-*Getting Started:*
-• *Create [name]* - Start a new family tree
-• *[CODE]* - Join existing tree with 6-digit code
-
-Type *START* to see the welcome message again.`;
+  if (birth && !/^\d{4}$/.test(birth)) {
+    return {
+      version,
+      screen: current_screen || "ADD_MEMBER",
+      data: { errors: [{ field: "birth_year", message: "Year must be YYYY" }] }
+    };
   }
-
-  return `*Family Tree Bot Help*
-
-You're working on: *${tree.name}*
-
-*Commands:*
-• *MENU* - Open form to add family members
-• *VIEW* - Get link to view your tree
-• *SHARE* - Get invite code for family
-• *INFO* - See tree details
-
-Use the *MENU* button to open the form and add family members!`;
+  if (death && !/^\d{4}$/.test(death)) {
+    return {
+      version,
+      screen: current_screen || "ADD_MEMBER",
+      data: { errors: [{ field: "death_year", message: "Year must be YYYY" }] }
+    };
+  }
+  return buildAckResponse(version, current_screen || "ADD_MEMBER");
 }
 
-// ========================== SIMPLE TEXT SENDER ============================
+// nfm_reply contains the submitted data – do the actual insert here
+async function handleAddMemberNfmReply(msg) {
+  // Who submitted?
+  const phone = msg.from;
+  // Payload with the form fields
+  const payload = msg?.interactive?.nfm_reply?.response_json;
+  if (!payload) return;
 
-async function sendWhatsAppMessage(phoneNumber, messageText) {
-  const token = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!token || !phoneNumberId) {
-    console.error("Missing WhatsApp API credentials.");
+  // Your flow JSON sent these keys inside payload.member
+  const m = payload.member || payload; // tolerate both shapes
+  const first = String(m.first_name || "").trim();
+  const last = String(m.last_name || "").trim();
+  const gender = String(m.gender || "").trim();
+  const birth = m.birth_year || null;
+  const death = m.death_year || null;
+
+  const state = await getUserState(phone);
+  const treeId = state?.tree_id;
+  if (!treeId) {
+    await sendText(phone, "Please join a tree first, then try again.");
     return;
   }
 
-  const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
-  const payload = {
-    messaging_product: "whatsapp",
-    to: phoneNumber,
-    text: { body: messageText },
-  };
+  const person = await insertPerson(treeId, first, last, gender || GENDER_TYPES.UNKNOWN, birth, death);
+  await setUserState(phone, treeId, person.id, `${person.data.first_name} ${person.data.last_name}`.trim());
 
+  await sendText(phone, `✅ Added ${person.data.first_name} ${person.data.last_name}. Use the Link flow to connect them to family.`);
+}
+
+// placeholders for future flows you’ll add
+async function handleEditRemoveNfmReply(_msg) { /* implement when screens exist */ }
+async function handleLinkUnlinkNfmReply(_msg) { /* implement when screens exist */ }
+
+// --- Vercel handler ---
+export default async function handler(req, res) {
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`WhatsApp API error: ${response.statusText}`, errorText);
+    if (req.method === "GET") {
+      // Webhook verification
+      const mode = req.query["hub.mode"];
+      const token = req.query["hub.verify_token"];
+      const challenge = req.query["hub.challenge"];
+      if (mode === "subscribe" && token === VERIFY_TOKEN) {
+        return res.status(200).send(challenge);
+      }
+      return res.status(403).send("Forbidden");
     }
-  } catch (error) {
-    console.error("Failed to send message:", error);
+
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const body = req.body || {};
+
+    // 1) Flow data_exchange (encrypted)
+    if (body.encrypted_flow_data) {
+      const { payload, aesKey, iv } = decryptRequest(
+        body.encrypted_flow_data,
+        body.encrypted_aes_key,
+        body.initial_vector
+      );
+
+      // payload.data.action == "data_exchange"
+      // payload.data.current_screen is your screen id
+      const flowId = payload.data?.flow_token || ""; // optional
+      const current = payload.data?.current_screen || "ADD_MEMBER";
+
+      let responseObj;
+      if (current === "ADD_MEMBER") {
+        responseObj = await handleAddMemberDataExchange(payload.data);
+      } else {
+        // default ack
+        responseObj = buildAckResponse(payload.data?.version || "3.0", current);
+      }
+
+      const b64 = encryptResponseJson(responseObj, aesKey, iv);
+      return res.status(200).json({ encrypted_flow_data: b64 });
+    }
+
+    // 2) Normal webhook notifications (messages, incl. interactive nfm_reply)
+    const entry = body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const messages = changes?.value?.messages || [];
+
+    for (const msg of messages) {
+      if (msg.type === "interactive" && msg.interactive?.type === "nfm_reply") {
+        // Route by the flow title you configured in Meta (or by button id)
+        const title = msg.interactive?.nfm_reply?.name || ""; // "Add a Family Member" etc.
+        if (/add/i.test(title)) await handleAddMemberNfmReply(msg);
+        else if (/edit|remove/i.test(title)) await handleEditRemoveNfmReply(msg);
+        else if (/link|unlink/i.test(title)) await handleLinkUnlinkNfmReply(msg);
+      }
+
+      // NOTE: No free-text command handling; this is flows-only.
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("webhook error:", err);
+    return res.status(200).json({ ok: true }); // respond 200 so Meta doesn't retry aggressively
   }
 }
