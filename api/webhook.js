@@ -1,7 +1,7 @@
 // api/webhook.js
-// WhatsApp Flow-based webhook handler with correct RSA-OAEP + AES-128-GCM handling
+// WhatsApp Flow webhook with RSA-OAEP(SHA-256) + AES-128-GCM (OpenSSL 3 / PKCS#8)
 
-import crypto from 'crypto';
+import crypto from "crypto";
 import {
   createTree,
   getTreeById,
@@ -13,98 +13,112 @@ import {
   addMember,
   isMember,
   RELATIONSHIP_TYPES,
-  GENDER_TYPES
+  GENDER_TYPES,
 } from "./_db.js";
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const BASE_URL = process.env.BASE_URL || "https://family-tree-webhook.vercel.app";
 
-// ============================================================================
-// ENCRYPTION HELPERS (PKCS#8 + OpenSSL 3 compatible)
-// ============================================================================
+// ========================== CRYPTO HELPERS ===============================
 
 function getPrivateKeyObject() {
   let pem = process.env.FLOW_PRIVATE_KEY;
   if (!pem) {
-    throw new Error("FLOW_PRIVATE_KEY is not set. Paste your PKCS#8 key (-----BEGIN PRIVATE KEY-----) into this env var.");
+    throw new Error(
+      "FLOW_PRIVATE_KEY is not set. Paste a PKCS#8 PEM (-----BEGIN PRIVATE KEY----- ...)."
+    );
   }
-
-  // Normalize escaped newlines if pasted as a single line with \n
-  if (pem.includes('\\n')) pem = pem.replace(/\\n/g, '\n');
-
+  if (pem.includes("\\n")) pem = pem.replace(/\\n/g, "\n");
   return crypto.createPrivateKey({
     key: pem,
-    format: 'pem',
+    format: "pem",
     passphrase: process.env.FLOW_PASSPHRASE || undefined,
   });
 }
 
 /**
- * Decrypt Meta's encrypted Flow payload
- * Returns { payload, aesKey, iv }
+ * Decrypts Meta's request. Returns { payload, aesKey, iv }.
  */
 function decryptRequest(encryptedFlowData, encryptedAesKey, initialVector) {
   const keyObject = getPrivateKeyObject();
 
-  // 1) RSA-OAEP(SHA-256) → recover the 16-byte AES key
+  // 1) RSA-OAEP(SHA-256) => recover AES session key
   const aesKey = crypto.privateDecrypt(
     {
       key: keyObject,
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: 'sha256',
+      oaepHash: "sha256",
     },
-    Buffer.from(encryptedAesKey, 'base64')
+    Buffer.from(encryptedAesKey, "base64")
   );
 
   if (aesKey.length !== 16) {
-    throw new Error(`Decrypted AES key invalid length ${aesKey.length}; expected 16 for aes-128-gcm`);
+    throw new Error(
+      `Decrypted AES key invalid length ${aesKey.length}; expected 16 for aes-128-gcm`
+    );
   }
 
-  // 2) AES-128-GCM → decrypt the payload
-  const iv = Buffer.from(initialVector, 'base64');
+  // 2) AES-128-GCM => decrypt payload
+  const iv = Buffer.from(initialVector, "base64"); // Meta may send 12 or 16
   if (iv.length !== 12 && iv.length !== 16) {
-  console.warn(`Unexpected IV length ${iv.length}; proceeding`);
-}
+    console.warn(`Unexpected IV length ${iv.length}; proceeding`);
+  }
 
-  const blob = Buffer.from(encryptedFlowData, 'base64');
+  const blob = Buffer.from(encryptedFlowData, "base64");
   const TAG_LEN = 16;
   const ciphertext = blob.subarray(0, blob.length - TAG_LEN);
   const tag = blob.subarray(blob.length - TAG_LEN);
 
-  const decipher = crypto.createDecipheriv('aes-128-gcm', aesKey, iv);
+  const decipher = crypto.createDecipheriv("aes-128-gcm", aesKey, iv);
   decipher.setAuthTag(tag);
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  const payload = JSON.parse(plaintext.toString('utf8'));
+  const payload = JSON.parse(plaintext.toString("utf8"));
 
   return { payload, aesKey, iv };
 }
 
 /**
- * Encrypt JSON response with AES-128-GCM using decrypted aesKey + iv
+ * Encrypts response JSON with AES-128-GCM using the decrypted aesKey + iv
  * Returns base64(ciphertext || tag)
  */
 function encryptResponseJson(responseObj, aesKey, iv) {
-  const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, iv);
-  const body = Buffer.from(JSON.stringify(responseObj), 'utf8');
+  const cipher = crypto.createCipheriv("aes-128-gcm", aesKey, iv);
+  const body = Buffer.from(JSON.stringify(responseObj), "utf8");
   const ciphertext = Buffer.concat([cipher.update(body), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return Buffer.concat([ciphertext, tag]).toString('base64');
+  return Buffer.concat([ciphertext, tag]).toString("base64");
 }
 
-// ============================================================================
-// WEBHOOK HANDLER
-// ============================================================================
+/**
+ * Optional: self-verify the encrypted blob can be decrypted locally
+ */
+function trySelfDecrypt(base64Blob, aesKey, iv) {
+  try {
+    const blob = Buffer.from(base64Blob, "base64");
+    const TAG_LEN = 16;
+    const ct = blob.subarray(0, blob.length - TAG_LEN);
+    const tag = blob.subarray(blob.length - TAG_LEN);
+    const dec = crypto.createDecipheriv("aes-128-gcm", aesKey, iv);
+    dec.setAuthTag(tag);
+    const plain = Buffer.concat([dec.update(ct), dec.final()]);
+    return plain.toString("utf8");
+  } catch (e) {
+    console.error("Self-decrypt failed:", e.message);
+    return null;
+  }
+}
+
+// =========================== WEBHOOK =====================================
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST");
 
-  // Meta webhook verification
+  // GET: webhook verification
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];
-
     if (mode === "subscribe" && token === VERIFY_TOKEN) {
       console.log("Webhook verified successfully.");
       return res.status(200).send(challenge);
@@ -115,12 +129,12 @@ export default async function handler(req, res) {
   if (req.method === "POST") {
     const body = req.body;
 
-    // Flow Data Exchange (always encrypted for v3)
+    // Flow Data Exchange (encrypted)
     if (body.encrypted_flow_data && body.encrypted_aes_key && body.initial_vector) {
       return handleFlowDataExchange(req, res);
     }
 
-    // WhatsApp Business Account messages
+    // Regular WABA messages
     if (body.object === "whatsapp_business_account") {
       for (const entry of body.entry) {
         for (const change of entry.changes) {
@@ -133,16 +147,16 @@ export default async function handler(req, res) {
               return res.status(200).send("FLOW_RESPONSE_RECEIVED");
             }
 
-            const text = message.text?.body
-              || message.button?.text
-              || message.interactive?.button_reply?.title
-              || message.interactive?.list_reply?.title
-              || '';
+            const text =
+              message.text?.body ||
+              message.button?.text ||
+              message.interactive?.button_reply?.title ||
+              message.interactive?.list_reply?.title ||
+              "";
 
             console.log(`Received message from ${from}: ${text}`);
             await handleMessage(from, text);
             return res.status(200).send("MESSAGE_RECEIVED");
-
           } else if (change.value.statuses) {
             console.log(`Status update: ${change.value.statuses[0].status}`);
             return res.status(200).send("STATUS_UPDATE_RECEIVED");
@@ -157,13 +171,11 @@ export default async function handler(req, res) {
   return res.status(404).send("Not found");
 }
 
-// ============================================================================
-// FLOW DATA EXCHANGE HANDLER
-// ============================================================================
+// ===================== FLOW DATA EXCHANGE HANDLER =========================
 
 async function handleFlowDataExchange(req, res) {
   try {
-    console.log('Flow request body keys:', Object.keys(req.body));
+    console.log("Flow request body keys:", Object.keys(req.body));
 
     const { payload, aesKey, iv } = decryptRequest(
       req.body.encrypted_flow_data,
@@ -172,18 +184,24 @@ async function handleFlowDataExchange(req, res) {
     );
 
     const { action, screen, data, flow_token, version } = payload;
+    console.log("Flow action:", action, "IV len:", iv.length, "AES len:", aesKey.length);
+
     let responseData;
 
     if (action === "ping") {
+      // Health check
       responseData = { version: version || "3.0", data: { status: "active" } };
       const enc = encryptResponseJson(responseData, aesKey, iv);
+      const echo = trySelfDecrypt(enc, aesKey, iv);
+      if (!echo) return res.status(500).json({ error: "Local self-decrypt failed" });
+      res.setHeader("Content-Type", "text/plain");
       return res.status(200).send(enc);
     }
 
     if (action === "INIT") {
       responseData = { version: version || "3.0", screen: "ADD_MEMBER", data: {} };
     } else if (action === "data_exchange") {
-      const context = flow_token ? JSON.parse(Buffer.from(flow_token, 'base64').toString()) : {};
+      const context = flow_token ? JSON.parse(Buffer.from(flow_token, "base64").toString()) : {};
       switch (screen) {
         case "ADD_MEMBER":
           responseData = await handleAddMemberScreen(data, context, version);
@@ -196,35 +214,39 @@ async function handleFlowDataExchange(req, res) {
     }
 
     const enc = encryptResponseJson(responseData, aesKey, iv);
-    return res.status(200).send(enc);
+    const echo = trySelfDecrypt(enc, aesKey, iv);
+    if (!echo) return res.status(500).json({ error: "Local self-decrypt failed" });
 
+    res.setHeader("Content-Type", "text/plain");
+    return res.status(200).send(enc);
   } catch (error) {
     console.error("Flow data exchange error:", error);
-    // We can't encrypt without the decrypted AES key; return 500 for Meta to retry/log
-    return res.status(500).json({ error: `Failed to process encrypted request: ${error.message}` });
+    // Can't encrypt without the decrypted AES key; return 500 so Meta retries/logs
+    return res.status(500).json({
+      error: `Failed to process encrypted request: ${error.message}`,
+    });
   }
 }
 
-// ============================================================================
-// FLOW SCREEN HANDLERS
-// ============================================================================
+// ========================= FLOW SCREEN HANDLERS ===========================
 
 async function handleAddMemberScreen(data, context, version) {
   const { first_name, last_name, gender, birth_year, death_year } = data;
-
   const treeId = context.tree_id;
+
   if (!treeId) {
     return {
       version: version || "3.0",
       screen: "ADD_MEMBER",
-      data: { error: "No tree selected. Please start from WhatsApp menu." }
+      data: { error: "No tree selected. Please start from WhatsApp menu." },
     };
-    }
-  try {
-    const genderType = gender === 'male' ? GENDER_TYPES.MALE :
-                       gender === 'female' ? GENDER_TYPES.FEMALE : null;
+  }
 
-    const newPerson = await insertPerson(
+  try {
+    const genderType =
+      gender === "male" ? GENDER_TYPES.MALE : gender === "female" ? GENDER_TYPES.FEMALE : null;
+
+    await insertPerson(
       treeId,
       first_name,
       last_name || null,
@@ -237,25 +259,20 @@ async function handleAddMemberScreen(data, context, version) {
       version: version || "3.0",
       screen: "SUCCESS",
       data: {
-        extension_message_response: {
-          params: { ok: true }
-        }
-      }
+        extension_message_response: { params: { ok: true } },
+      },
     };
-
   } catch (error) {
-    console.error('Error adding member:', error);
+    console.error("Error adding member:", error);
     return {
       version: version || "3.0",
       screen: "ADD_MEMBER",
-      data: { error: `Failed to add member: ${error.message}` }
+      data: { error: `Failed to add member: ${error.message}` },
     };
   }
 }
 
-// ============================================================================
-// FLOW RESPONSE HANDLER (post-flow message)
-// ============================================================================
+// ===================== FLOW COMPLETION MESSAGE ============================
 
 async function handleFlowResponse(phoneNumber, nfmReply) {
   const { name, response_json } = nfmReply;
@@ -273,8 +290,8 @@ async function handleFlowResponse(phoneNumber, nfmReply) {
   const { first_name, last_name, gender, birth_year, death_year } = memberData;
 
   try {
-    const genderType = gender === 'male' ? GENDER_TYPES.MALE :
-                       gender === 'female' ? GENDER_TYPES.FEMALE : null;
+    const genderType =
+      gender === "male" ? GENDER_TYPES.MALE : gender === "female" ? GENDER_TYPES.FEMALE : null;
 
     const newPerson = await insertPerson(
       tree.id,
@@ -285,19 +302,20 @@ async function handleFlowResponse(phoneNumber, nfmReply) {
       death_year || null
     );
 
-    await setUserState(phoneNumber, tree.id, newPerson.id, `${first_name} ${last_name || ''}`.trim());
+    await setUserState(phoneNumber, tree.id, newPerson.id, `${first_name} ${last_name || ""}`.trim());
 
-    const genderText = gender === 'male' ? 'Male' : gender === 'female' ? 'Female' : 'Prefer not to say';
-    let message = `✅ *${first_name}${last_name ? ' ' + last_name : ''}* has been added to *${tree.name}*!\n\n`;
+    const genderText =
+      gender === "male" ? "Male" : gender === "female" ? "Female" : "Prefer not to say";
+
+    let message = `✅ *${first_name}${last_name ? " " + last_name : ""}* has been added to *${tree.name}*!\n\n`;
     message += `👤 Gender: ${genderText}\n`;
     if (birth_year) message += `🎂 Born: ${birth_year}\n`;
     if (death_year) message += `🕊️ Died: ${death_year}\n`;
     message += `\nReply with *MENU* to add more family members.`;
 
     return sendWhatsAppMessage(phoneNumber, message);
-
   } catch (error) {
-    console.error('Error saving member:', error);
+    console.error("Error saving member:", error);
     return sendWhatsAppMessage(
       phoneNumber,
       `❌ Sorry, I couldn't add ${first_name}. Error: ${error.message}\n\nPlease try again.`
@@ -305,9 +323,7 @@ async function handleFlowResponse(phoneNumber, nfmReply) {
   }
 }
 
-// ============================================================================
-// MESSAGE HANDLER (buttons + text commands)
-// ============================================================================
+// =========================== TEXT COMMANDS ================================
 
 async function handleMessage(phoneNumber, text) {
   const state = await getUserState(phoneNumber);
@@ -318,7 +334,7 @@ async function handleMessage(phoneNumber, text) {
     if (!tree) await setUserState(phoneNumber, null, null, null);
   }
 
-  const normalizedText = (text || '').trim().toLowerCase();
+  const normalizedText = (text || "").trim().toLowerCase();
 
   if (normalizedText === "menu" || normalizedText === "start") {
     return sendMainMenu(phoneNumber, tree);
@@ -328,7 +344,7 @@ async function handleMessage(phoneNumber, text) {
   }
 
   if (!tree) {
-    const joinCodeMatch = (text || '').toUpperCase().match(/^[A-Z0-9]{6}$/);
+    const joinCodeMatch = (text || "").toUpperCase().match(/^[A-Z0-9]{6}$/);
     if (joinCodeMatch) {
       const joinCode = joinCodeMatch[0];
       const joinedTree = await getTreeByCode(joinCode);
@@ -340,10 +356,13 @@ async function handleMessage(phoneNumber, text) {
           `✅ Successfully joined family tree *${joinedTree.name}*!\n\nReply with *MENU* to see options.`
         );
       }
-      return sendWhatsAppMessage(phoneNumber, `❌ I couldn't find a tree with code *${joinCode}*. Please check and try again.`);
+      return sendWhatsAppMessage(
+        phoneNumber,
+        `❌ I couldn't find a tree with code *${joinCode}*. Please check and try again.`
+      );
     }
 
-    const createMatch = (text || '').match(/^(create|new)\s+(.+)/i);
+    const createMatch = (text || "").match(/^(create|new)\s+(.+)/i);
     if (createMatch) {
       const treeName = createMatch[2].trim();
       const newTree = await createTree(phoneNumber, treeName);
@@ -360,7 +379,10 @@ async function handleMessage(phoneNumber, text) {
 
   if (!(await isMember(tree.id, phoneNumber))) {
     await setUserState(phoneNumber, null, null, null);
-    return sendWhatsAppMessage(phoneNumber, `You are no longer a member of *${tree.name}*. Type *MENU* to see options.`);
+    return sendWhatsAppMessage(
+      phoneNumber,
+      `You are no longer a member of *${tree.name}*. Type *MENU* to see options.`
+    );
   }
 
   if (normalizedText === "view" || normalizedText === "view tree") {
@@ -385,9 +407,7 @@ async function handleMessage(phoneNumber, text) {
   return sendMainMenu(phoneNumber, tree);
 }
 
-// ============================================================================
-// MENU + HELP
-// ============================================================================
+// ============================== MENUS =====================================
 
 async function sendMainMenu(phoneNumber, tree) {
   if (!tree) return sendWhatsAppMessage(phoneNumber, generateWelcomeMessage());
@@ -402,10 +422,12 @@ async function sendMainMenu(phoneNumber, tree) {
 
   const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
 
-  const flowToken = Buffer.from(JSON.stringify({
-    tree_id: tree.id,
-    phone_number: phoneNumber
-  })).toString('base64');
+  const flowToken = Buffer.from(
+    JSON.stringify({
+      tree_id: tree.id,
+      phone_number: phoneNumber,
+    })
+  ).toString("base64");
 
   const payload = {
     messaging_product: "whatsapp",
@@ -415,7 +437,9 @@ async function sendMainMenu(phoneNumber, tree) {
     interactive: {
       type: "flow",
       header: { type: "text", text: `${tree.name} 🌳` },
-      body: { text: `👥 *${tree.person_count || 0} family members*\n\nAdd a new person to your family tree using the form below:` },
+      body: {
+        text: `👥 *${tree.person_count || 0} family members*\n\nAdd a new person to your family tree using the form below:`,
+      },
       footer: { text: "Tap the button to continue" },
       action: {
         name: "flow",
@@ -425,10 +449,10 @@ async function sendMainMenu(phoneNumber, tree) {
           flow_id: flowId,
           flow_cta: "➕ Add Family Member",
           flow_action: "navigate",
-          flow_action_payload: { screen: "ADD_MEMBER", data: {} }
-        }
-      }
-    }
+          flow_action_payload: { screen: "ADD_MEMBER", data: {} },
+        },
+      },
+    },
   };
 
   try {
@@ -495,9 +519,7 @@ You're working on: *${tree.name}*
 Use the *MENU* button to open the form and add family members!`;
 }
 
-// ============================================================================
-// WHATSAPP API (simple text messages)
-// ============================================================================
+// ========================== SIMPLE TEXT SENDER ============================
 
 async function sendWhatsAppMessage(phoneNumber, messageText) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -508,7 +530,11 @@ async function sendWhatsAppMessage(phoneNumber, messageText) {
   }
 
   const url = `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`;
-  const payload = { messaging_product: "whatsapp", to: phoneNumber, text: { body: messageText } };
+  const payload = {
+    messaging_product: "whatsapp",
+    to: phoneNumber,
+    text: { body: messageText },
+  };
 
   try {
     const response = await fetch(url, {
