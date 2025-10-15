@@ -25,59 +25,102 @@ const PASSPHRASE = process.env.FLOW_PASSPHRASE; // Passphrase for private key
 // ENCRYPTION HELPERS
 // ============================================================================
 
+function getPrivateKey() {
+  let privateKey = process.env.FLOW_RSA_PRIVATE_KEY;
+  
+  if (!privateKey) {
+    throw new Error('FLOW_RSA_PRIVATE_KEY environment variable is not set');
+  }
+  
+  // Replace literal \n with actual newlines if needed
+  privateKey = privateKey.replace(/\\n/g, '\n');
+  
+  // Ensure proper formatting
+  if (!privateKey.includes('\n')) {
+    // If key is on one line, add line breaks
+    privateKey = privateKey
+      .replace('-----BEGIN RSA PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----\n')
+      .replace('-----END RSA PRIVATE KEY-----', '\n-----END RSA PRIVATE KEY-----');
+  }
+  
+  return privateKey;
+}
+
 function decryptRequest(encryptedFlowData, encryptedAesKey, initialVector) {
-  // Decrypt the AES key using RSA private key
-  const decryptedAesKey = crypto.privateDecrypt(
-    {
-      key: PRIVATE_KEY,
-      passphrase: PASSPHRASE,
+  const privateKey = getPrivateKey();
+  const passphrase = process.env.FLOW_PASSPHRASE;
+
+  try {
+    // Prepare decryption config
+    const decryptConfig = {
+      key: privateKey,
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
       oaepHash: 'sha256',
-    },
-    Buffer.from(encryptedAesKey, 'base64')
-  );
+    };
+    
+    // Only add passphrase if it exists
+    if (passphrase) {
+      decryptConfig.passphrase = passphrase;
+    }
 
-  // Decrypt the flow data using AES
-  const flowDataBuffer = Buffer.from(encryptedFlowData, 'base64');
-  const initialVectorBuffer = Buffer.from(initialVector, 'base64');
-  
-  const decipher = crypto.createDecipheriv(
-    'aes-128-gcm',
-    decryptedAesKey,
-    initialVectorBuffer
-  );
+    // Decrypt the AES key using RSA private key
+    const decryptedAesKey = crypto.privateDecrypt(
+      decryptConfig,
+      Buffer.from(encryptedAesKey, 'base64')
+    );
 
-  const TAG_LENGTH = 16;
-  const encrypted = flowDataBuffer.subarray(0, flowDataBuffer.length - TAG_LENGTH);
-  const tag = flowDataBuffer.subarray(flowDataBuffer.length - TAG_LENGTH);
-  
-  decipher.setAuthTag(tag);
+    // Decrypt the flow data using AES
+    const flowDataBuffer = Buffer.from(encryptedFlowData, 'base64');
+    const initialVectorBuffer = Buffer.from(initialVector, 'base64');
+    
+    const decipher = crypto.createDecipheriv(
+      'aes-128-gcm',
+      decryptedAesKey,
+      initialVectorBuffer
+    );
 
-  const decryptedData = Buffer.concat([
-    decipher.update(encrypted),
-    decipher.final(),
-  ]);
+    const TAG_LENGTH = 16;
+    const encrypted = flowDataBuffer.subarray(0, flowDataBuffer.length - TAG_LENGTH);
+    const tag = flowDataBuffer.subarray(flowDataBuffer.length - TAG_LENGTH);
+    
+    decipher.setAuthTag(tag);
 
-  return JSON.parse(decryptedData.toString('utf-8'));
+    const decryptedData = Buffer.concat([
+      decipher.update(encrypted),
+      decipher.final(),
+    ]);
+
+    return JSON.parse(decryptedData.toString('utf-8'));
+  } catch (error) {
+    console.error('Decryption error:', error.message);
+    console.error('Private key exists:', !!privateKey);
+    console.error('Private key length:', privateKey?.length);
+    throw error;
+  }
 }
 
 function encryptResponse(response, aesKey, initialVector) {
-  // Encrypt response using AES
-  const cipher = crypto.createCipheriv(
-    'aes-128-gcm',
-    Buffer.from(aesKey, 'base64'),
-    Buffer.from(initialVector, 'base64')
-  );
+  try {
+    // Encrypt response using AES
+    const cipher = crypto.createCipheriv(
+      'aes-128-gcm',
+      Buffer.from(aesKey, 'base64'),
+      Buffer.from(initialVector, 'base64')
+    );
 
-  const encrypted = Buffer.concat([
-    cipher.update(JSON.stringify(response), 'utf-8'),
-    cipher.final(),
-  ]);
+    const encrypted = Buffer.concat([
+      cipher.update(JSON.stringify(response), 'utf-8'),
+      cipher.final(),
+    ]);
 
-  const tag = cipher.getAuthTag();
-  const encryptedData = Buffer.concat([encrypted, tag]);
+    const tag = cipher.getAuthTag();
+    const encryptedData = Buffer.concat([encrypted, tag]);
 
-  return encryptedData.toString('base64');
+    return encryptedData.toString('base64');
+  } catch (error) {
+    console.error('Encryption error:', error.message);
+    throw error;
+  }
 }
 
 // ============================================================================
@@ -150,7 +193,7 @@ export default async function handler(req, res) {
 }
 
 // ============================================================================
-// FLOW DATA EXCHANGE HANDLER (encrypted)
+// FLOW DATA EXCHANGE HANDLER
 // ============================================================================
 
 async function handleFlowDataExchange(req, res) {
@@ -158,9 +201,30 @@ async function handleFlowDataExchange(req, res) {
     let decryptedRequest;
     let isEncrypted = false;
     
-    // Check if request is encrypted
+    // Log received request
+    console.log('Flow request body keys:', Object.keys(req.body));
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
+    // IMPORTANT: Check for health check FIRST before checking encryption
+    if (req.body.action === "ping") {
+      console.log('Health check (ping) detected - responding without decryption');
+      
+      const responseData = {
+        version: req.body.version || "3.0",
+        data: {
+          status: "active"
+        }
+      };
+      
+      console.log('Responding to health check with:', responseData);
+      return res.status(200).json(responseData);
+    }
+    
+    // Now check if request is encrypted
     if (req.body.encrypted_flow_data && req.body.encrypted_aes_key && req.body.initial_vector) {
       isEncrypted = true;
+      
+      console.log('Processing encrypted request...');
       
       // Decrypt the request
       decryptedRequest = decryptRequest(
@@ -171,16 +235,16 @@ async function handleFlowDataExchange(req, res) {
       
       console.log('Decrypted request:', decryptedRequest);
     } else {
-      // Handle unencrypted request (health check/ping)
+      // Handle unencrypted request
       decryptedRequest = req.body;
-      console.log('Unencrypted request (health check):', decryptedRequest);
+      console.log('Unencrypted request:', decryptedRequest);
     }
 
     const { action, screen, data, flow_token, version } = decryptedRequest;
     
     let responseData = {};
     
-    // Health check / ping
+    // Double-check for ping action after decryption
     if (action === "ping") {
       responseData = {
         version: version || "3.0",
@@ -189,14 +253,23 @@ async function handleFlowDataExchange(req, res) {
         }
       };
       
-      console.log('Responding to health check');
+      console.log('Ping action after decryption');
       
-      // Health checks are NEVER encrypted - always return plain JSON
-      return res.status(200).json(responseData);
+      // If it was encrypted, encrypt response; otherwise plain JSON
+      if (isEncrypted) {
+        const encryptedResponse = encryptResponse(
+          responseData,
+          req.body.encrypted_aes_key,
+          req.body.initial_vector
+        );
+        return res.status(200).send(encryptedResponse);
+      } else {
+        return res.status(200).json(responseData);
+      }
     }
     
     // Handle INIT action (when flow is first opened)
-    else if (action === "INIT") {
+    if (action === "INIT") {
       responseData = {
         version: version || "3.0",
         screen: "ADD_MEMBER",
@@ -223,49 +296,32 @@ async function handleFlowDataExchange(req, res) {
       }
     }
     
-    // If request was encrypted, encrypt the response
+    // Send response
     if (isEncrypted) {
+      console.log('Encrypting response...');
       const encryptedResponse = encryptResponse(
         responseData,
         req.body.encrypted_aes_key,
         req.body.initial_vector
       );
       
+      console.log('Sending encrypted response');
       return res.status(200).send(encryptedResponse);
     } else {
-      // If request was not encrypted, send plain JSON response
+      console.log('Sending plain JSON response:', responseData);
       return res.status(200).json(responseData);
     }
     
   } catch (error) {
-    console.error("Flow data exchange error:", error);
+    console.error("Flow data exchange error:", error.message);
     console.error("Error stack:", error.stack);
     
-    // Try to send encrypted error if we have the keys
-    if (req.body.encrypted_aes_key && req.body.initial_vector) {
-      try {
-        const errorData = {
-          version: "3.0",
-          data: {
-            error: error.message || "Internal server error"
-          }
-        };
-        
-        const encryptedError = encryptResponse(
-          errorData,
-          req.body.encrypted_aes_key,
-          req.body.initial_vector
-        );
-        
-        return res.status(200).send(encryptedError);
-      } catch (encryptError) {
-        console.error("Failed to encrypt error response:", encryptError);
+    // Simple error response - don't try to encrypt if we failed
+    return res.status(200).json({
+      version: "3.0",
+      data: {
+        error: error.message || "Internal server error"
       }
-    }
-    
-    // Fallback: send plain JSON error
-    return res.status(500).json({
-      error: error.message || "Internal server error"
     });
   }
 }
