@@ -155,16 +155,26 @@ export default async function handler(req, res) {
 
 async function handleFlowDataExchange(req, res) {
   try {
-    const { encrypted_flow_data, encrypted_aes_key, initial_vector } = req.body;
-
-    // Decrypt the request
-    const decryptedRequest = decryptRequest(
-      encrypted_flow_data,
-      encrypted_aes_key,
-      initial_vector
-    );
-
-    console.log('Decrypted request:', decryptedRequest);
+    let decryptedRequest;
+    let isEncrypted = false;
+    
+    // Check if request is encrypted
+    if (req.body.encrypted_flow_data && req.body.encrypted_aes_key && req.body.initial_vector) {
+      isEncrypted = true;
+      
+      // Decrypt the request
+      decryptedRequest = decryptRequest(
+        req.body.encrypted_flow_data,
+        req.body.encrypted_aes_key,
+        req.body.initial_vector
+      );
+      
+      console.log('Decrypted request:', decryptedRequest);
+    } else {
+      // Handle unencrypted request (health check/ping)
+      decryptedRequest = req.body;
+      console.log('Unencrypted request (health check):', decryptedRequest);
+    }
 
     const { action, screen, data, flow_token, version } = decryptedRequest;
     
@@ -178,6 +188,11 @@ async function handleFlowDataExchange(req, res) {
           status: "active"
         }
       };
+      
+      console.log('Responding to health check');
+      
+      // Health checks are NEVER encrypted - always return plain JSON
+      return res.status(200).json(responseData);
     }
     
     // Handle INIT action (when flow is first opened)
@@ -208,46 +223,50 @@ async function handleFlowDataExchange(req, res) {
       }
     }
     
-    // Encrypt the response
-    const encryptedResponse = encryptResponse(
-      responseData,
-      encrypted_aes_key,
-      initial_vector
-    );
-    
-    return res.status(200).send(encryptedResponse);
-    
-  } catch (error) {
-    console.error("Flow data exchange error:", error);
-    
-    // For errors during health check, send unencrypted error
-    if (!req.body.encrypted_aes_key) {
-      return res.status(500).json({
-        error: error.message
-      });
-    }
-    
-    // For errors after decryption, send encrypted error
-    try {
-      const errorData = {
-        version: "3.0",
-        data: {
-          error: error.message || "Internal server error"
-        }
-      };
-      
-      const encryptedError = encryptResponse(
-        errorData,
+    // If request was encrypted, encrypt the response
+    if (isEncrypted) {
+      const encryptedResponse = encryptResponse(
+        responseData,
         req.body.encrypted_aes_key,
         req.body.initial_vector
       );
       
-      return res.status(200).send(encryptedError);
-    } catch (encryptError) {
-      return res.status(500).json({
-        error: "Encryption error"
-      });
+      return res.status(200).send(encryptedResponse);
+    } else {
+      // If request was not encrypted, send plain JSON response
+      return res.status(200).json(responseData);
     }
+    
+  } catch (error) {
+    console.error("Flow data exchange error:", error);
+    console.error("Error stack:", error.stack);
+    
+    // Try to send encrypted error if we have the keys
+    if (req.body.encrypted_aes_key && req.body.initial_vector) {
+      try {
+        const errorData = {
+          version: "3.0",
+          data: {
+            error: error.message || "Internal server error"
+          }
+        };
+        
+        const encryptedError = encryptResponse(
+          errorData,
+          req.body.encrypted_aes_key,
+          req.body.initial_vector
+        );
+        
+        return res.status(200).send(encryptedError);
+      } catch (encryptError) {
+        console.error("Failed to encrypt error response:", encryptError);
+      }
+    }
+    
+    // Fallback: send plain JSON error
+    return res.status(500).json({
+      error: error.message || "Internal server error"
+    });
   }
 }
 
