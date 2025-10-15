@@ -22,15 +22,30 @@ const PRIVATE_KEY = process.env.FLOW_RSA_PRIVATE_KEY; // Your private key from M
 const PASSPHRASE = process.env.FLOW_PASSPHRASE; // Passphrase for private key
 
 // ============================================================================
-// ENCRYPTION HELPERS
+// ENCRYPTION HELPERS - Get keys inside functions, not at module level
 // ============================================================================
 
 function getPrivateKey() {
-  let privateKey = process.env.FLOW_RSA_PRIVATE_KEY;
+  // Try multiple possible variable names
+  let privateKey = process.env.FLOW_RSA_PRIVATE_KEY || 
+                   process.env.FLOWS_RSA_PRIVATE_KEY ||
+                   process.env.PRIVATE_KEY;
+  
+  // Debug logging
+  console.log('Environment variables check:', {
+    FLOW_RSA_PRIVATE_KEY: !!process.env.FLOW_RSA_PRIVATE_KEY,
+    FLOWS_RSA_PRIVATE_KEY: !!process.env.FLOWS_RSA_PRIVATE_KEY,
+    allEnvKeys: Object.keys(process.env).filter(k => k.includes('KEY') || k.includes('FLOW'))
+  });
   
   if (!privateKey) {
-    throw new Error('FLOW_RSA_PRIVATE_KEY environment variable is not set');
+    const availableKeys = Object.keys(process.env).filter(k => 
+      k.includes('KEY') || k.includes('FLOW') || k.includes('RSA')
+    );
+    throw new Error(`FLOW_RSA_PRIVATE_KEY environment variable is not set. Available keys: ${availableKeys.join(', ')}`);
   }
+  
+  console.log('Private key found, length:', privateKey.length);
   
   // Replace literal \n with actual newlines if needed
   privateKey = privateKey.replace(/\\n/g, '\n');
@@ -316,7 +331,35 @@ async function handleFlowDataExchange(req, res) {
     console.error("Flow data exchange error:", error.message);
     console.error("Error stack:", error.stack);
     
-    // Simple error response - don't try to encrypt if we failed
+    // For encrypted requests, we MUST return encrypted errors
+    if (req.body.encrypted_aes_key && req.body.initial_vector) {
+      try {
+        const errorResponse = {
+          version: "3.0",
+          data: {
+            error: error.message || "Internal server error"
+          }
+        };
+        
+        console.log('Attempting to encrypt error response...');
+        const encryptedError = encryptResponse(
+          errorResponse,
+          req.body.encrypted_aes_key,
+          req.body.initial_vector
+        );
+        
+        console.log('Sending encrypted error response');
+        return res.status(200).send(encryptedError);
+      } catch (encryptError) {
+        console.error("Failed to encrypt error response:", encryptError);
+        // If we can't encrypt, we have to return 500
+        return res.status(500).json({
+          error: "Failed to process encrypted request: " + error.message
+        });
+      }
+    }
+    
+    // For unencrypted requests, return plain JSON
     return res.status(200).json({
       version: "3.0",
       data: {
