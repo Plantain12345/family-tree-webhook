@@ -303,14 +303,19 @@
         statusEl.textContent = '';
         document.querySelector(chartSel).innerHTML = ''; // Clear previous chart
         
-        const store = f3.createStore({
+        const store = f3.stores.createStore({
           data: personsToShow,
           node_separation: 250,
           level_separation: 150
         });
 
-        const view = f3.d3AnimationView({ store, cont: document.querySelector(chartSel) });
-
+        // Use the 'f3.views' namespace to create the view
+        const view = f3.views.d3AnimationView({ 
+          store, 
+          cont: document.querySelector(chartSel) 
+        });
+        
+        // This line was already correct, using the 'f3.elements' namespace
         const Card = f3.elements.Card({
           store,
           svg: view.svg,
