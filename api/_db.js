@@ -1,106 +1,73 @@
 // api/_db.js
-// Database operations for family tree bot
+// Database operations for family tree webapp
+// ALL IDs ARE STRING UUIDs | Gender: Male/Female/Undefined | Dates: YYYY only
 
 import { createClient } from "@supabase/supabase-js";
+import {
+  GENDER,
+  RELATIONSHIP_KIND,
+  normalizePersonData,
+  normalizeGender,
+  normalizeYear,
+  validatePersonData,
+  isValidRelationshipKind,
+  generateJoinCode,
+  isUUID,
+  ensureUUIDString
+} from "./_models.js";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error("Missing Supabase credentials in environment variables");
+}
+
 export const db = createClient(supabaseUrl, supabaseKey);
 
-// Constants
-export const RELATIONSHIP_TYPES = {
-  PARENT: 'parent',
-  CHILD: 'child',
-  SPOUSE: 'spouse',
-  DIVORCED: 'divorced',
-  SEPARATED: 'separated'
-};
-
-export const GENDER_TYPES = {
-  MALE: 'M',
-  FEMALE: 'F',
-  UNKNOWN: 'U'
-};
-
 // ============================================================================
-// USER STATE MANAGEMENT
+// TREE OPERATIONS
 // ============================================================================
 
-export async function getUserState(phoneNumber) {
-  const { data, error } = await db
-    .from("user_states")
-    .select("*")
-    .eq("phone", phoneNumber)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
-    console.error("Error fetching user state:", error);
+/**
+ * Create a new tree
+ * @param {string} name - Tree name
+ * @returns {Promise<Object>} Created tree with UUID strings
+ */
+export async function createTree(name) {
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    throw new Error("Tree name is required");
   }
-  
-  return data || null;
-}
 
-export async function setUserState(phoneNumber, treeId, lastPersonId, lastPersonName) {
-  const { data, error } = await db
-    .from("user_states")
-    .upsert(
-      {
-        phone: phoneNumber,
-        tree_id: treeId,
-        last_person_id: lastPersonId,
-        last_person_name: lastPersonName,
-        updated_at: new Date().toISOString()
-      },
-      { onConflict: "phone" }
-    )
-    .select("*")
-    .single();
-
-  if (error) throw error;
-  return data;
-}
-
-// ============================================================================
-// TREE MANAGEMENT
-// ============================================================================
-
-export async function createTree(phoneNumber, treeName) {
   const joinCode = generateJoinCode();
+  
   const { data, error } = await db
     .from("trees")
     .insert({ 
-      name: treeName, 
+      name: name.trim(), 
       join_code: joinCode 
     })
     .select("*")
     .single();
 
-  if (error) throw error;
-
-  // Auto-add creator as member
-  await addMember(data.id, phoneNumber);
-
-  return data;
-}
-
-export async function getTreeByCode(joinCode) {
-  if (!joinCode) return null;
+  if (error) throw new Error(`Failed to create tree: ${error.message}`);
   
-  const { data, error } = await db
-    .from("trees")
-    .select("*")
-    .eq("join_code", joinCode.toUpperCase())
-    .single();
-
-  if (error) {
-    if (error.code === 'PGRST116') return null;
-    throw error;
-  }
-  return data;
+  // Ensure ID is string
+  return {
+    ...data,
+    id: String(data.id)
+  };
 }
 
+/**
+ * Get tree by ID
+ * @param {string} treeId - Tree UUID string
+ * @returns {Promise<Object|null>} Tree or null if not found
+ */
 export async function getTreeById(treeId) {
-  if (!treeId) return null;
+  if (!treeId || !isUUID(treeId)) {
+    return null;
+  }
   
   const { data, error } = await db
     .from("trees")
@@ -109,55 +76,123 @@ export async function getTreeById(treeId) {
     .single();
 
   if (error) {
-    if (error.code === 'PGRST116') return null;
-    throw error;
+    if (error.code === 'PGRST116') return null; // Not found
+    throw new Error(`Failed to get tree: ${error.message}`);
   }
-  return data;
+  
+  return data ? { ...data, id: String(data.id) } : null;
 }
 
-// ============================================================================
-// MEMBER MANAGEMENT
-// ============================================================================
-
-export async function addMember(treeId, phoneNumber) {
+/**
+ * Get tree by join code
+ * @param {string} joinCode - 6-character join code
+ * @returns {Promise<Object|null>} Tree or null if not found
+ */
+export async function getTreeByCode(joinCode) {
+  if (!joinCode || typeof joinCode !== 'string') {
+    return null;
+  }
+  
+  const code = joinCode.toUpperCase().trim();
+  
   const { data, error } = await db
-    .from("members")
-    .insert({ tree_id: treeId, phone: phoneNumber })
+    .from("trees")
+    .select("*")
+    .eq("join_code", code)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') return null; // Not found
+    throw new Error(`Failed to get tree: ${error.message}`);
+  }
+  
+  return data ? { ...data, id: String(data.id) } : null;
+}
+
+/**
+ * Update tree name
+ * @param {string} treeId - Tree UUID string
+ * @param {string} name - New tree name
+ * @returns {Promise<Object>} Updated tree
+ */
+export async function updateTreeName(treeId, name) {
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
+  }
+  
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    throw new Error("Tree name is required");
+  }
+
+  const { data, error } = await db
+    .from("trees")
+    .update({ name: name.trim() })
+    .eq("id", treeId)
     .select("*")
     .single();
 
-  if (error && error.code !== '23505') { // Ignore duplicate key errors
-    throw error;
+  if (error) throw new Error(`Failed to update tree: ${error.message}`);
+  return { ...data, id: String(data.id) };
+}
+
+/**
+ * Delete tree and all associated data (CASCADE handles persons/relationships)
+ * @param {string} treeId - Tree UUID string
+ * @returns {Promise<void>}
+ */
+export async function deleteTree(treeId) {
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
   }
-  return data;
-}
 
-export async function isMember(treeId, phoneNumber) {
-  const { data, error } = await db
-    .from("members")
-    .select("id")
-    .eq("tree_id", treeId)
-    .eq("phone", phoneNumber)
-    .single();
+  const { error } = await db
+    .from("trees")
+    .delete()
+    .eq("id", treeId);
 
-  return !!data;
+  if (error) throw new Error(`Failed to delete tree: ${error.message}`);
 }
 
 // ============================================================================
-// PERSON MANAGEMENT
+// PERSON OPERATIONS (all IDs are string UUIDs)
 // ============================================================================
 
+/**
+ * List all persons in a tree
+ * @param {string} treeId - Tree UUID string
+ * @returns {Promise<Array>} Array of persons with string UUIDs
+ */
 export async function listPersons(treeId) {
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
+  }
+
   const { data, error } = await db
     .from("persons")
-    .select("id, tree_id, data, created_at, updated_at")
-    .eq("tree_id", treeId);
+    .select("*")
+    .eq("tree_id", treeId)
+    .order("created_at", { ascending: true });
 
-  if (error) throw error;
-  return data || [];
+  if (error) throw new Error(`Failed to list persons: ${error.message}`);
+  
+  // Ensure all IDs are strings
+  return (data || []).map(person => ({
+    ...person,
+    id: String(person.id),
+    tree_id: String(person.tree_id)
+  }));
 }
 
+/**
+ * Get person by ID
+ * @param {string} personId - Person UUID string
+ * @returns {Promise<Object|null>} Person or null if not found
+ */
 export async function getPersonById(personId) {
+  if (!personId || !isUUID(personId)) {
+    return null;
+  }
+
   const { data, error } = await db
     .from("persons")
     .select("*")
@@ -166,109 +201,161 @@ export async function getPersonById(personId) {
 
   if (error) {
     if (error.code === 'PGRST116') return null;
-    throw error;
+    throw new Error(`Failed to get person: ${error.message}`);
   }
-  return data;
-}
-
-export async function findPersonByName(treeId, name) {
-  const persons = await listPersons(treeId);
-  const searchName = name.toLowerCase().trim();
   
-  return persons.filter(person => {
-    const fullName = `${person.data.first_name || ''} ${person.data.last_name || ''}`.toLowerCase().trim();
-    const firstName = (person.data.first_name || '').toLowerCase().trim();
-    
-    return fullName.includes(searchName) || 
-           firstName === searchName ||
-           fullName === searchName;
-  });
+  return data ? {
+    ...data,
+    id: String(data.id),
+    tree_id: String(data.tree_id)
+  } : null;
 }
 
-export async function findSimilarPersons(treeId, firstName, lastName, birthday) {
-  const persons = await listPersons(treeId);
-  const searchFirst = (firstName || '').toLowerCase().trim();
-  const searchLast = (lastName || '').toLowerCase().trim();
-  const searchYear = extractYear(birthday);
+/**
+ * Create a new person
+ * Gender: Male/Female/Undefined | Birthday: YYYY only
+ * @param {string} treeId - Tree UUID string
+ * @param {Object} personData - Person data
+ * @returns {Promise<Object>} Created person with string UUID
+ */
+export async function createPerson(treeId, personData) {
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
+  }
 
-  return persons.filter(person => {
-    const pFirst = (person.data.first_name || '').toLowerCase().trim();
-    const pLast = (person.data.last_name || '').toLowerCase().trim();
-    const pYear = extractYear(person.data.birthday);
+  // Validate person data
+  const validation = validatePersonData(personData);
+  if (!validation.valid) {
+    throw new Error(`Invalid person data: ${validation.errors.join(', ')}`);
+  }
 
-    // Match if first name is similar and either:
-    // 1. Last names match, or
-    // 2. Birth years are within 2 years, or
-    // 3. Both last name and birth year are missing
-    const firstMatch = similarity(searchFirst, pFirst) > 0.8;
-    const lastMatch = searchLast && pLast && similarity(searchLast, pLast) > 0.8;
-    const yearMatch = searchYear && pYear && Math.abs(parseInt(searchYear) - parseInt(pYear)) <= 2;
-    
-    return firstMatch && (lastMatch || yearMatch || (!searchLast && !searchYear));
-  });
-}
+  const normalized = normalizePersonData(personData);
 
-export async function insertPerson(treeId, firstName, lastName, gender, birthday) {
   const { data, error } = await db
     .from("persons")
     .insert({
       tree_id: treeId,
-      data: {
-        first_name: firstName,
-        last_name: lastName,
-        gender: normalizeGender(gender),
-        birthday: normalizeDate(birthday),
-        deathday: null
-      }
+      data: normalized
     })
     .select("*")
     .single();
 
-  if (error) throw error;
-  return data;
+  if (error) throw new Error(`Failed to create person: ${error.message}`);
+  
+  return {
+    ...data,
+    id: String(data.id),
+    tree_id: String(data.tree_id)
+  };
 }
 
+/**
+ * Update person data
+ * @param {string} personId - Person UUID string
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} Updated person
+ */
 export async function updatePerson(personId, updates) {
-  const person = await getPersonById(personId);
-  if (!person) throw new Error("Person not found");
+  if (!personId || !isUUID(personId)) {
+    throw new Error("Invalid person ID");
+  }
 
+  const person = await getPersonById(personId);
+  if (!person) {
+    throw new Error("Person not found");
+  }
+
+  // Merge updates with existing data
   const updatedData = {
     ...person.data,
     ...updates
   };
 
+  // Validate merged data
+  const validation = validatePersonData(updatedData);
+  if (!validation.valid) {
+    throw new Error(`Invalid person data: ${validation.errors.join(', ')}`);
+  }
+
+  const normalized = normalizePersonData(updatedData);
+
   const { data, error } = await db
     .from("persons")
     .update({ 
-      data: updatedData,
+      data: normalized,
       updated_at: new Date().toISOString()
     })
     .eq("id", personId)
     .select("*")
     .single();
 
-  if (error) throw error;
-  return data;
+  if (error) throw new Error(`Failed to update person: ${error.message}`);
+  
+  return {
+    ...data,
+    id: String(data.id),
+    tree_id: String(data.tree_id)
+  };
 }
 
-export async function updatePersonGender(personId, gender) {
-  return updatePerson(personId, { gender: normalizeGender(gender) });
+/**
+ * Delete person and all associated relationships (CASCADE handles relationships)
+ * @param {string} personId - Person UUID string
+ * @returns {Promise<void>}
+ */
+export async function deletePerson(personId) {
+  if (!personId || !isUUID(personId)) {
+    throw new Error("Invalid person ID");
+  }
+
+  const { error } = await db
+    .from("persons")
+    .delete()
+    .eq("id", personId);
+
+  if (error) throw new Error(`Failed to delete person: ${error.message}`);
 }
 
 // ============================================================================
-// RELATIONSHIP MANAGEMENT
+// RELATIONSHIP OPERATIONS (all IDs are string UUIDs)
 // ============================================================================
 
+/**
+ * List all relationships in a tree
+ * @param {string} treeId - Tree UUID string
+ * @returns {Promise<Array>} Array of relationships with string UUIDs
+ */
 export async function listRelationships(treeId) {
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
+  }
+
   const { data, error } = await db
     .from("relationships")
     .select("*")
-    .eq("tree_id", treeId);
+    .eq("tree_id", treeId)
+    .order("created_at", { ascending: true });
 
-  if (error) throw error;
-  return data || [];
+  if (error) throw new Error(`Failed to list relationships: ${error.message}`);
+  
+  // Ensure all IDs are strings
+  return (data || []).map(rel => ({
+    ...rel,
+    id: String(rel.id),
+    tree_id: String(rel.tree_id),
+    person_a_id: String(rel.person_a_id),
+    person_b_id: String(rel.person_b_id)
+  }));
 }
 
+/**
+ * Check if a relationship exists
+ * @param {string} treeId - Tree UUID string
+ * @param {string} kind - Relationship kind
+ * @param {string} personAId - Person A UUID string
+ * @param {string} personBId - Person B UUID string
+ * @returns {Promise<boolean>} True if relationship exists
+ */
 export async function relationshipExists(treeId, kind, personAId, personBId) {
   const { data, error } = await db
     .from("relationships")
@@ -277,14 +364,14 @@ export async function relationshipExists(treeId, kind, personAId, personBId) {
     .eq("kind", kind)
     .eq("person_a_id", personAId)
     .eq("person_b_id", personBId)
-    .single();
+    .maybeSingle();
 
   if (error && error.code !== 'PGRST116') {
     console.error("Error checking relationship:", error);
   }
 
   // For symmetric relationships (spouse, divorced, separated), check reverse too
-  if ([RELATIONSHIP_TYPES.SPOUSE, RELATIONSHIP_TYPES.DIVORCED, RELATIONSHIP_TYPES.SEPARATED].includes(kind)) {
+  if ([RELATIONSHIP_KIND.SPOUSE, RELATIONSHIP_KIND.DIVORCED, RELATIONSHIP_KIND.SEPARATED].includes(kind)) {
     const { data: reverseData } = await db
       .from("relationships")
       .select("id")
@@ -292,7 +379,7 @@ export async function relationshipExists(treeId, kind, personAId, personBId) {
       .eq("kind", kind)
       .eq("person_a_id", personBId)
       .eq("person_b_id", personAId)
-      .single();
+      .maybeSingle();
     
     return !!(data || reverseData);
   }
@@ -300,25 +387,45 @@ export async function relationshipExists(treeId, kind, personAId, personBId) {
   return !!data;
 }
 
-export async function addRelationship(treeId, kind, personAId, personBId) {
-  // Validate kind
-  const validKinds = Object.values(RELATIONSHIP_TYPES);
-  if (!validKinds.includes(kind)) {
-    throw new Error(`Invalid relationship kind: ${kind}. Must be one of: ${validKinds.join(', ')}`);
+/**
+ * Create a relationship between two persons
+ * @param {string} treeId - Tree UUID string
+ * @param {string} kind - Relationship kind (parent/child/spouse/divorced/separated)
+ * @param {string} personAId - Person A UUID string
+ * @param {string} personBId - Person B UUID string
+ * @returns {Promise<Object>} Created relationship with string UUIDs
+ */
+export async function createRelationship(treeId, kind, personAId, personBId) {
+  // Validate inputs
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
+  }
+  
+  if (!isValidRelationshipKind(kind)) {
+    throw new Error(`Invalid relationship kind: ${kind}. Must be one of: ${Object.values(RELATIONSHIP_KIND).join(', ')}`);
+  }
+  
+  if (!personAId || !isUUID(personAId)) {
+    throw new Error("Invalid person A ID");
+  }
+  
+  if (!personBId || !isUUID(personBId)) {
+    throw new Error("Invalid person B ID");
+  }
+  
+  if (personAId === personBId) {
+    throw new Error("A person cannot have a relationship with themselves");
   }
 
-  // Check for duplicates
+  // Check if relationship already exists
   const exists = await relationshipExists(treeId, kind, personAId, personBId);
   if (exists) {
-    return { duplicate: true };
+    throw new Error("This relationship already exists");
   }
 
   // Validate logical consistency
-  const validation = await validateRelationship(treeId, kind, personAId, personBId);
-  if (!validation.valid) {
-    throw new Error(validation.error);
-  }
-  
+  await validateRelationshipLogic(treeId, kind, personAId, personBId);
+
   const { data, error } = await db
     .from("relationships")
     .insert({ 
@@ -330,178 +437,155 @@ export async function addRelationship(treeId, kind, personAId, personBId) {
     .select("*")
     .single();
 
-  if (error) {
-    console.error("Relationship insert error:", error);
-    throw error;
-  }
-
-  return data;
+  if (error) throw new Error(`Failed to create relationship: ${error.message}`);
+  
+  return {
+    ...data,
+    id: String(data.id),
+    tree_id: String(data.tree_id),
+    person_a_id: String(data.person_a_id),
+    person_b_id: String(data.person_b_id)
+  };
 }
 
-export async function validateRelationship(treeId, kind, personAId, personBId) {
-  // Prevent self-relationships
-  if (personAId === personBId) {
-    return { valid: false, error: "A person cannot have a relationship with themselves." };
+/**
+ * Delete a relationship
+ * @param {string} relationshipId - Relationship UUID string
+ * @returns {Promise<void>}
+ */
+export async function deleteRelationship(relationshipId) {
+  if (!relationshipId || !isUUID(relationshipId)) {
+    throw new Error("Invalid relationship ID");
   }
 
-  // Get both persons
+  const { error } = await db
+    .from("relationships")
+    .delete()
+    .eq("id", relationshipId);
+
+  if (error) throw new Error(`Failed to delete relationship: ${error.message}`);
+}
+
+/**
+ * Validate relationship logic (prevent impossible relationships)
+ * @param {string} treeId - Tree UUID string
+ * @param {string} kind - Relationship kind
+ * @param {string} personAId - Person A UUID string
+ * @param {string} personBId - Person B UUID string
+ * @returns {Promise<void>} Throws error if invalid
+ */
+async function validateRelationshipLogic(treeId, kind, personAId, personBId) {
   const [personA, personB] = await Promise.all([
     getPersonById(personAId),
     getPersonById(personBId)
   ]);
 
-  // Check birth years for parent-child relationships
-  if (kind === RELATIONSHIP_TYPES.PARENT) {
-    const yearA = extractYear(personA.data.birthday);
-    const yearB = extractYear(personB.data.birthday);
-
-    if (yearA && yearB && parseInt(yearB) <= parseInt(yearA)) {
-      return { 
-        valid: false, 
-        error: `${personA.data.first_name} cannot be the parent of ${personB.data.first_name} because they were born in the same year or later.` 
-      };
-    }
+  if (!personA || !personB) {
+    throw new Error("One or both persons not found");
   }
 
-  return { valid: true };
+  // Check birth years for parent-child relationships
+  if (kind === RELATIONSHIP_KIND.PARENT) {
+    const yearA = personA.data.birthday; // Already in YYYY format
+    const yearB = personB.data.birthday; // Already in YYYY format
+
+    if (yearA && yearB) {
+      const diff = parseInt(yearB) - parseInt(yearA);
+      if (diff <= 0) {
+        throw new Error(`${personA.data.first_name} cannot be the parent of ${personB.data.first_name} (born in same year or later)`);
+      }
+      if (diff < 12) {
+        throw new Error(`${personA.data.first_name} was too young to be ${personB.data.first_name}'s parent`);
+      }
+    }
+  }
 }
 
 // ============================================================================
-// PENDING ACTIONS (For inference mode)
+// MEMBER OPERATIONS (for future collaboration features)
 // ============================================================================
 
-export async function savePendingAction(phoneNumber, treeId, action) {
+/**
+ * Add a member to a tree
+ * @param {string} treeId - Tree UUID string
+ * @param {string} phone - Phone number or user identifier
+ * @returns {Promise<Object>} Created member
+ */
+export async function addMember(treeId, phone) {
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
+  }
+
+  if (!phone || typeof phone !== 'string') {
+    throw new Error("Phone/identifier is required");
+  }
+
   const { data, error } = await db
-    .from("pending_actions")
-    .insert({
-      phone: phoneNumber,
-      tree_id: treeId,
-      action: action
+    .from("members")
+    .insert({ 
+      tree_id: treeId, 
+      phone: phone.trim() 
     })
     .select("*")
     .single();
 
-  if (error) throw error;
-  return data;
+  // Ignore duplicate key errors (member already exists)
+  if (error && error.code !== '23505') {
+    throw new Error(`Failed to add member: ${error.message}`);
+  }
+  
+  return data ? {
+    ...data,
+    id: String(data.id),
+    tree_id: String(data.tree_id)
+  } : null;
 }
 
-export async function getPendingAction(phoneNumber) {
+/**
+ * Check if a phone/identifier is a member of a tree
+ * @param {string} treeId - Tree UUID string
+ * @param {string} phone - Phone number or user identifier
+ * @returns {Promise<boolean>} True if member exists
+ */
+export async function isMember(treeId, phone) {
+  if (!treeId || !isUUID(treeId)) {
+    return false;
+  }
+
   const { data, error } = await db
-    .from("pending_actions")
+    .from("members")
+    .select("id")
+    .eq("tree_id", treeId)
+    .eq("phone", phone)
+    .maybeSingle();
+
+  return !!data;
+}
+
+/**
+ * List all members of a tree
+ * @param {string} treeId - Tree UUID string
+ * @returns {Promise<Array>} Array of members
+ */
+export async function listMembers(treeId) {
+  if (!treeId || !isUUID(treeId)) {
+    throw new Error("Invalid tree ID");
+  }
+
+  const { data, error } = await db
+    .from("members")
     .select("*")
-    .eq("phone", phoneNumber)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
+    .eq("tree_id", treeId)
+    .order("joined_at", { ascending: true });
 
-  if (error && error.code !== 'PGRST116') {
-    console.error("Error fetching pending action:", error);
-  }
-
-  return data || null;
+  if (error) throw new Error(`Failed to list members: ${error.message}`);
+  
+  return (data || []).map(member => ({
+    ...member,
+    id: String(member.id),
+    tree_id: String(member.tree_id)
+  }));
 }
 
-export async function clearPendingAction(phoneNumber) {
-  const { error } = await db
-    .from("pending_actions")
-    .delete()
-    .eq("phone", phoneNumber);
-
-  if (error) {
-    console.error("Error clearing pending action:", error);
-  }
-}
-
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
-
-export function normalizeGender(input) {
-  if (!input) return GENDER_TYPES.UNKNOWN;
-  
-  const normalized = String(input).trim().toLowerCase();
-  
-  if (normalized.startsWith("m") || normalized === "boy" || normalized === "male") {
-    return GENDER_TYPES.MALE;
-  }
-  if (normalized.startsWith("f") || normalized === "girl" || normalized === "female") {
-    return GENDER_TYPES.FEMALE;
-  }
-  
-  return GENDER_TYPES.UNKNOWN;
-}
-
-export function normalizeDate(input) {
-  if (!input) return null;
-  
-  // Extract year from various formats
-  const cleaned = String(input).trim();
-  
-  // Match full date formats (YYYY-MM-DD, DD/MM/YYYY, etc.)
-  const fullDateMatch = cleaned.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (fullDateMatch) {
-    return fullDateMatch[1]; // Return only year
-  }
-  
-  const slashDateMatch = cleaned.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-  if (slashDateMatch) {
-    let year = slashDateMatch[3];
-    // Convert 2-digit to 4-digit year
-    if (year.length === 2) {
-      year = parseInt(year) > 30 ? `19${year}` : `20${year}`;
-    }
-    return year;
-  }
-  
-  // Match 4-digit year
-  const yearMatch = cleaned.match(/\b(19|20)\d{2}\b/);
-  if (yearMatch) {
-    return yearMatch[0];
-  }
-  
-  // Match decade (e.g., "1940s" -> "1940")
-  const decadeMatch = cleaned.match(/\b(19|20)(\d)0s?\b/);
-  if (decadeMatch) {
-    return `${decadeMatch[1]}${decadeMatch[2]}0`;
-  }
-  
-  return null;
-}
-
-export function extractYear(dateString) {
-  if (!dateString) return null;
-  const match = String(dateString).match(/\b(19|20)\d{2}\b/);
-  return match ? match[0] : null;
-}
-
-function generateJoinCode() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  return Array.from({ length: 6 })
-    .map(() => chars[Math.floor(Math.random() * chars.length)])
-    .join("");
-}
-
-// Simple string similarity (Levenshtein distance based)
-function similarity(s1, s2) {
-  const len1 = s1.length;
-  const len2 = s2.length;
-  const matrix = Array(len1 + 1).fill(null).map(() => Array(len2 + 1).fill(null));
-  
-  for (let i = 0; i <= len1; i++) matrix[i][0] = i;
-  for (let j = 0; j <= len2; j++) matrix[0][j] = j;
-  
-  for (let i = 1; i <= len1; i++) {
-    for (let j = 1; j <= len2; j++) {
-      const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      );
-    }
-  }
-  
-  const distance = matrix[len1][len2];
-  const maxLen = Math.max(len1, len2);
-  return 1 - distance / maxLen;
-}
+// Export constants for use in other modules
+export { GENDER, RELATIONSHIP_KIND }
