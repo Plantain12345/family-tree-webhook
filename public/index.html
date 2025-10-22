@@ -1,0 +1,283 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Family Tree Viewer</title>
+  <style>
+    :root {
+      --bg: #212121;
+      --text: #fff;
+      --muted: #aaa;
+      --panel: #2a2a2a;
+      --accent: #7fa3b2;
+    }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 500px;
+      width: 100%;
+      background: var(--panel);
+      border-radius: 16px;
+      padding: 40px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+    h1 {
+      font-size: 32px;
+      margin-bottom: 10px;
+      color: var(--accent);
+    }
+    p {
+      color: var(--muted);
+      margin-bottom: 30px;
+      line-height: 1.6;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    input {
+      width: 100%;
+      padding: 12px 16px;
+      background: var(--bg);
+      border: 1px solid #3a3a3a;
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 16px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-align: center;
+      transition: border-color 0.2s;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    input::placeholder {
+      color: #555;
+      text-transform: none;
+      letter-spacing: normal;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: var(--bg);
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, opacity 0.2s;
+    }
+    button:hover {
+      transform: translateY(-2px);
+      opacity: 0.9;
+    }
+    button:active {
+      transform: translateY(0);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .error {
+      background: #ff4444;
+      color: white;
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      display: none;
+      font-size: 14px;
+    }
+    .error.show {
+      display: block;
+    }
+    .divider {
+      display: flex;
+      align-items: center;
+      margin: 30px 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: #3a3a3a;
+    }
+    .divider::before {
+      margin-right: 12px;
+    }
+    .divider::after {
+      margin-left: 12px;
+    }
+    .create-btn {
+      background: transparent;
+      border: 2px solid var(--accent);
+      color: var(--accent);
+    }
+    .create-btn:hover {
+      background: var(--accent);
+      color: var(--bg);
+    }
+    .footer {
+      margin-top: 30px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🌳 Family Tree</h1>
+    <p>Enter a tree code to view an existing family tree</p>
+
+    <div id="error" class="error"></div>
+
+    <form id="joinForm">
+      <div class="form-group">
+        <label for="code">Tree Code</label>
+        <input 
+          type="text" 
+          id="code" 
+          name="code" 
+          placeholder="ABC123"
+          maxlength="6"
+          pattern="[A-Z0-9]{6}"
+          required
+          autocomplete="off"
+        />
+      </div>
+      <button type="submit" id="submitBtn">View Tree</button>
+    </form>
+
+    <div class="divider">OR</div>
+
+    <button type="button" class="create-btn" id="createBtn">Create New Tree</button>
+
+    <div class="footer">
+      Enter a 6-character alphanumeric code
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('joinForm');
+    const codeInput = document.getElementById('code');
+    const submitBtn = document.getElementById('submitBtn');
+    const createBtn = document.getElementById('createBtn');
+    const errorDiv = document.getElementById('error');
+
+    // Auto-format input to uppercase
+    codeInput.addEventListener('input', (e) => {
+      e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+
+    // Handle form submission
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const code = codeInput.value.trim().toUpperCase();
+      
+      if (!code || code.length !== 6) {
+        showError('Please enter a valid 6-character code');
+        return;
+      }
+
+      // Verify tree exists
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Checking...';
+
+      try {
+        const response = await fetch(`/api/tree?code=${code}`);
+        
+        if (response.ok) {
+          // Tree exists, redirect to viewer
+          window.location.href = `/tree.html?code=${code}`;
+        } else if (response.status === 404) {
+          showError('Tree not found. Please check the code and try again.');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'View Tree';
+        } else {
+          showError('An error occurred. Please try again.');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'View Tree';
+        }
+      } catch (error) {
+        console.error('Error:', error);
+        showError('Failed to connect. Please check your internet connection.');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'View Tree';
+      }
+    });
+
+    // Handle create new tree
+    createBtn.addEventListener('click', () => {
+      const treeName = prompt('Enter a name for your new tree:', 'My Family Tree');
+      
+      if (!treeName || !treeName.trim()) {
+        return;
+      }
+
+      createBtn.disabled = true;
+      createBtn.textContent = 'Creating...';
+
+      // Call API to create tree
+      fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: treeName.trim() })
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.tree && data.tree.join_code) {
+          // Redirect to new tree
+          window.location.href = `/tree.html?code=${data.tree.join_code}`;
+        } else {
+          showError('Failed to create tree. Please try again.');
+          createBtn.disabled = false;
+          createBtn.textContent = 'Create New Tree';
+        }
+      })
+      .catch(error => {
+        console.error('Error:', error);
+        showError('Failed to create tree. Please try again.');
+        createBtn.disabled = false;
+        createBtn.textContent = 'Create New Tree';
+      });
+    });
+
+    function showError(message) {
+      errorDiv.textContent = message;
+      errorDiv.classList.add('show');
+      setTimeout(() => {
+        errorDiv.classList.remove('show');
+      }, 5000);
+    }
+
+    // Auto-focus input on load
+    codeInput.focus();
+  </script>
+</body>
+</html>
