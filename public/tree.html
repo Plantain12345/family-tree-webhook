@@ -393,25 +393,28 @@
       }
     });
 
-    // Main execution
+   // Main execution
     async function main() {
       if (!code) {
         statusEl.textContent = 'Missing ?code parameter in URL.';
         return;
       }
       
-      // Render once and setup auto-refresh
-      const loop = async () => {
-        try {
-          await renderOnce();
-        } catch (e) {
-          console.error(e);
-          statusEl.textContent = 'Render error. Retrying...';
-        }
-      };
+      // This will set the `isNewTree` flag correctly based on the API response.
+      await renderOnce(); 
       
-      await loop();
-      setInterval(loop, 5000); // Refresh every 5 seconds
+      // NEW LOGIC: Only set up the refresh interval if the tree is NOT new.
+      // The `isNewTree` flag is set inside `renderOnce`.
+      if (!isNewTree) {
+        setInterval(async () => {
+          try {
+            await renderOnce();
+          } catch (e) {
+            console.error(e);
+            statusEl.textContent = 'Render error. Retrying...';
+          }
+        }, 5000); // Refresh every 5 seconds
+      }
     }
 
     main();
