@@ -192,10 +192,58 @@
   </div>
 
   <script type="module">
-    // ... (keep existing variable declarations near the top)
+    const statusEl = document.getElementById('Status');
+    const chartSel = '#FamilyChart';
+    const treeNameEl = document.getElementById('TreeName');
+    const treeCodeEl = document.getElementById('TreeCode');
+    const shareWA = document.getElementById('ShareWA');
+    const shareBtn = document.getElementById('ShareBtn');
+    const code = new URLSearchParams(location.search).get('code');
+    
     let currentTree = null;
     let currentPersons = [];
     let editingPersonId = null;
+    let personsToShow = []; // Make this globally accessible within the script
+    let isNewTree = false; // **Declare isNewTree here**
+
+    // Get color based on gender abbreviation
+    const colorGender = (g) => {
+      if (g === 'M') return 'var(--male)';
+      if (g === 'F') return 'var(--female)';
+      return 'var(--unknown)';
+    };
+
+    // Fetch tree data from API
+    async function fetchTree() {
+      const url = `/api/tree?code=${encodeURIComponent(code)}`;
+      const response = await fetch(url, { cache: 'no-store' });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || response.statusText);
+      }
+      
+      return response.json();
+    }
+
+    // Load family-chart library
+    async function loadLib() {
+      try {
+        return (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
+      } catch {
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
+        await new Promise(resolve => script.onload = resolve);
+        document.head.appendChild(script);
+        return window.f3;
+      }
+    }
+    
+    // Check if person has any relationships
+    function hasRels(person) {
+      const r = person.rels || {};
+      return r.father || r.mother || (r.spouses && r.spouses.length > 0) || (r.children && r.children.length > 0);
+    }
 
     // Main render function
     async function renderOnce() {
@@ -205,22 +253,16 @@
         
         currentTree = api.tree;
         currentPersons = api.persons || [];
-        let personsToShow = []; // This will be our final data for the chart
-
+        
         // If no persons exist in the database, build the placeholder view
         if (currentPersons.length === 0) {
+          isNewTree = true; // **Set the flag to true for a new tree**
           const mainPerson = {
-            id: 'starter_person', // A temporary ID for the new person
-            data: {
-              first_name: 'First Name',
-              last_name: 'Surname',
-              birthday: null,
-              gender: 'U'
-            },
+            id: 'starter_person',
+            data: { first_name: 'First Name', last_name: 'Surname', birthday: null, gender: 'U' },
             rels: {}
           };
           
-          // Placeholder nodes for adding relatives
           const placeholders = [
             { id: 'add_father', data: { first_name: 'Add Father', gender: 'M' }, rels: {} },
             { id: 'add_mother', data: { first_name: 'Add Mother', gender: 'F' }, rels: {} },
@@ -228,44 +270,46 @@
             { id: 'add_child', data: { first_name: 'Add Child', gender: 'U' }, rels: {} }
           ];
 
-          // Link the placeholders to the main person's relationships
           mainPerson.rels = {
-            father: 'add_father',
-            mother: 'add_mother',
-            spouses: ['add_spouse'],
-            children: ['add_child']
+            father: 'add_father', mother: 'add_mother',
+            spouses: ['add_spouse'], children: ['add_child']
           };
           
-          // The final data for the chart includes the main person and placeholders
           personsToShow = [mainPerson, ...placeholders];
-
         } else {
-          // If the tree already has people, just use them
+          isNewTree = false; // **Set the flag to false for an existing tree**
           personsToShow = [...currentPersons];
         }
 
-        // ... (keep existing code for updating the header and share buttons)
+        treeNameEl.textContent = api.tree?.name || 'Family Tree';
+        treeCodeEl.textContent = api.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
+        
+        const joinUrl = `${location.origin}/tree.html?code=${api.tree?.join_code || code}`;
+        shareWA.href = `https://wa.me/?text=${encodeURIComponent("View our family tree: " + joinUrl)}`;
+        shareBtn.onclick = () => {
+          if (navigator.share) {
+            navigator.share({ title: api.tree?.name, text: 'View our family tree', url: joinUrl });
+          } else {
+            window.open(shareWA.href, '_blank');
+          }
+        };
 
-        // The family-chart library needs a valid, non-empty array to render
         if (personsToShow.length === 0) {
           statusEl.textContent = 'This tree is empty. Refresh to add the first person.';
           return;
         }
 
-        // Load library and render tree
         const f3 = await loadLib();
         statusEl.textContent = '';
+        document.querySelector(chartSel).innerHTML = ''; // Clear previous chart
         
         const store = f3.createStore({
-          data: personsToShow, // Use our generated data
+          data: personsToShow,
           node_separation: 250,
           level_separation: 150
         });
 
-        const view = f3.d3AnimationView({
-          store,
-          cont: document.querySelector(chartSel)
-        });
+        const view = f3.d3AnimationView({ store, cont: document.querySelector(chartSel) });
 
         const Card = f3.elements.Card({
           store,
@@ -275,9 +319,8 @@
           mini_tree: true,
           link_break: false,
           cardEditForm: (cardData) => {
-            // Prevent the "Add..." placeholders from being editable
             if (String(cardData.data.id).startsWith('add_')) return;
-            handleCardClick(cardData);
+            openEditModal(cardData.data.id);
           }
         });
 
@@ -294,11 +337,8 @@
       }
     }
 
-    // ... (keep handleCardClick and open/close modal functions)
-
-    // MODIFY the 'openEditModal' function to hide the delete button for new persons
     window.openEditModal = function(personId) {
-      const person = currentPersons.find(p => p.id === personId) || personsToShow.find(p => p.id === personId);
+      const person = personsToShow.find(p => p.id === personId);
       if (!person) return;
       
       editingPersonId = personId;
@@ -309,13 +349,16 @@
       document.getElementById('editBirthday').value = person.data.birthday || '';
       document.getElementById('editDeathday').value = person.data.deathday || '';
       
-      // Hide the delete button if this is the temporary starter person
       document.getElementById('deleteBtn').style.display = (personId === 'starter_person') ? 'none' : 'flex';
       
       document.getElementById('editModal').classList.add('show');
     };
 
-    // MODIFY the form submission logic to handle both creating and updating
+    window.closeEditModal = function() {
+      document.getElementById('editModal').classList.remove('show');
+      editingPersonId = null;
+    };
+
     document.getElementById('editForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       
@@ -329,7 +372,6 @@
         deathday: document.getElementById('editDeathday').value || null
       };
       
-      // The first name is essential
       if (!data.first_name || data.first_name === 'First Name') {
         alert('First Name is required.');
         return;
@@ -337,8 +379,6 @@
       
       try {
         let response;
-        
-        // If we are editing the temporary 'starter_person', we must CREATE a new person (POST)
         if (editingPersonId === 'starter_person') {
           response = await fetch(`/api/person?code=${code}`, {
             method: 'POST',
@@ -346,7 +386,6 @@
             body: JSON.stringify(data)
           });
         } else {
-          // Otherwise, we are UPDATING an existing person (PUT)
           response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -356,7 +395,7 @@
         
         if (response.ok) {
           closeEditModal();
-          await renderOnce(); // Refresh tree from the server
+          await renderOnce();
         } else {
           const error = await response.json();
           alert('Error: ' + error.error);
@@ -367,22 +406,15 @@
       }
     });
 
-    // Handle delete
     document.getElementById('deleteBtn').addEventListener('click', async () => {
-      if (!editingPersonId) return;
-      
-      if (!confirm('Are you sure you want to delete this person? All their relationships will also be removed.')) {
-        return;
-      }
+      if (!editingPersonId || !confirm('Are you sure you want to delete this person? All their relationships will also be removed.')) return;
       
       try {
-        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
-          method: 'DELETE'
-        });
+        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, { method: 'DELETE' });
         
         if (response.ok) {
           closeEditModal();
-          await renderOnce(); // Refresh tree
+          await renderOnce();
         } else {
           const error = await response.json();
           alert('Error: ' + error.error);
@@ -393,18 +425,16 @@
       }
     });
 
-   // Main execution
+    // Main execution
     async function main() {
       if (!code) {
         statusEl.textContent = 'Missing ?code parameter in URL.';
         return;
       }
       
-      // This will set the `isNewTree` flag correctly based on the API response.
-      await renderOnce(); 
+      await renderOnce();
       
-      // NEW LOGIC: Only set up the refresh interval if the tree is NOT new.
-      // The `isNewTree` flag is set inside `renderOnce`.
+      // **This check will now work correctly**
       if (!isNewTree) {
         setInterval(async () => {
           try {
@@ -413,11 +443,11 @@
             console.error(e);
             statusEl.textContent = 'Render error. Retrying...';
           }
-        }, 5000); // Refresh every 5 seconds
+        }, 5000);
       }
     }
 
     main();
-  </script>
+</script>
 </body>
 </html>
