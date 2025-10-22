@@ -192,56 +192,10 @@
   </div>
 
   <script type="module">
-    const statusEl = document.getElementById('Status');
-    const chartSel = '#FamilyChart';
-    const treeNameEl = document.getElementById('TreeName');
-    const treeCodeEl = document.getElementById('TreeCode');
-    const shareWA = document.getElementById('ShareWA');
-    const shareBtn = document.getElementById('ShareBtn');
-    const code = new URLSearchParams(location.search).get('code');
-    
+    // ... (keep existing variable declarations near the top)
     let currentTree = null;
     let currentPersons = [];
     let editingPersonId = null;
-
-    // Get color based on gender abbreviation
-    const colorGender = (g) => {
-      if (g === 'M') return 'var(--male)';
-      if (g === 'F') return 'var(--female)';
-      return 'var(--unknown)';
-    };
-
-    // Fetch tree data from API
-    async function fetchTree() {
-      const url = `/api/tree?code=${encodeURIComponent(code)}`;
-      const response = await fetch(url, { cache: 'no-store' });
-      
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || response.statusText);
-      }
-      
-      return response.json();
-    }
-
-    // Load family-chart library
-    async function loadLib() {
-      try {
-        return (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
-      } catch {
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
-        await new Promise(resolve => script.onload = resolve);
-        document.head.appendChild(script);
-        return window.f3;
-      }
-    }
-
-    // Check if person has any relationships
-    function hasRels(person) {
-      const r = person.rels || {};
-      return r.father || r.mother || (r.spouses && r.spouses.length > 0) || (r.children && r.children.length > 0);
-    }
 
     // Main render function
     async function renderOnce() {
@@ -251,46 +205,50 @@
         
         currentTree = api.tree;
         currentPersons = api.persons || [];
-        
-        console.log('Total persons:', currentPersons.length);
-        
-        // Split into linked and orphaned persons
-        const linked = currentPersons.filter(p => hasRels(p));
-        const orphans = currentPersons.filter(p => !hasRels(p));
-        
-        console.log('Linked persons:', linked.length);
-        console.log('Orphan persons:', orphans.length);
+        let personsToShow = []; // This will be our final data for the chart
 
-        // Update header
-        treeNameEl.textContent = api.tree?.name || 'Family Tree';
-        treeCodeEl.textContent = api.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
-        
-        // Setup sharing
-        const joinUrl = `${location.origin}/tree.html?code=${api.tree?.join_code || code}`;
-        shareWA.href = `https://wa.me/?text=${encodeURIComponent("View our family tree: " + joinUrl)}`;
-        shareBtn.onclick = () => {
-          if (navigator.share) {
-            navigator.share({
-              title: api.tree?.name,
-              text: 'View our family tree',
-              url: joinUrl
-            });
-          } else {
-            window.open(shareWA.href, '_blank');
-          }
-        };
-
-        // If no persons at all, show message
+        // If no persons exist in the database, build the placeholder view
         if (currentPersons.length === 0) {
-          statusEl.textContent = 'No people in this tree yet.';
-          return;
+          const mainPerson = {
+            id: 'starter_person', // A temporary ID for the new person
+            data: {
+              first_name: 'First Name',
+              last_name: 'Surname',
+              birthday: null,
+              gender: 'U'
+            },
+            rels: {}
+          };
+          
+          // Placeholder nodes for adding relatives
+          const placeholders = [
+            { id: 'add_father', data: { first_name: 'Add Father', gender: 'M' }, rels: {} },
+            { id: 'add_mother', data: { first_name: 'Add Mother', gender: 'F' }, rels: {} },
+            { id: 'add_spouse', data: { first_name: 'Add Spouse', gender: 'U' }, rels: {} },
+            { id: 'add_child', data: { first_name: 'Add Child', gender: 'U' }, rels: {} }
+          ];
+
+          // Link the placeholders to the main person's relationships
+          mainPerson.rels = {
+            father: 'add_father',
+            mother: 'add_mother',
+            spouses: ['add_spouse'],
+            children: ['add_child']
+          };
+          
+          // The final data for the chart includes the main person and placeholders
+          personsToShow = [mainPerson, ...placeholders];
+
+        } else {
+          // If the tree already has people, just use them
+          personsToShow = [...currentPersons];
         }
 
-        // If we have persons but none are linked, show the first one with add options
-        const personsToShow = linked.length > 0 ? linked : (orphans.length > 0 ? [orphans[0]] : []);
-        
+        // ... (keep existing code for updating the header and share buttons)
+
+        // The family-chart library needs a valid, non-empty array to render
         if (personsToShow.length === 0) {
-          statusEl.textContent = 'Loading...';
+          statusEl.textContent = 'This tree is empty. Refresh to add the first person.';
           return;
         }
 
@@ -298,10 +256,8 @@
         const f3 = await loadLib();
         statusEl.textContent = '';
         
-        console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
-        
         const store = f3.createStore({
-          data: personsToShow,
+          data: personsToShow, // Use our generated data
           node_separation: 250,
           level_separation: 150
         });
@@ -318,7 +274,11 @@
           card_display: [d => `${d.data['first_name'] || ''} ${d.data['last_name'] || ''}`.trim(), d => `${d.data['birthday'] || ''}`],
           mini_tree: true,
           link_break: false,
-          cardEditForm: handleCardClick
+          cardEditForm: (cardData) => {
+            // Prevent the "Add..." placeholders from being editable
+            if (String(cardData.data.id).startsWith('add_')) return;
+            handleCardClick(cardData);
+          }
         });
 
         view.setCard(Card);
@@ -334,15 +294,11 @@
       }
     }
 
-    // Handle card click to edit
-    function handleCardClick(cardData) {
-      console.log('Card clicked:', cardData);
-      openEditModal(cardData.data.id);
-    }
+    // ... (keep handleCardClick and open/close modal functions)
 
-    // Open edit modal
+    // MODIFY the 'openEditModal' function to hide the delete button for new persons
     window.openEditModal = function(personId) {
-      const person = currentPersons.find(p => p.id === personId);
+      const person = currentPersons.find(p => p.id === personId) || personsToShow.find(p => p.id === personId);
       if (!person) return;
       
       editingPersonId = personId;
@@ -353,16 +309,13 @@
       document.getElementById('editBirthday').value = person.data.birthday || '';
       document.getElementById('editDeathday').value = person.data.deathday || '';
       
+      // Hide the delete button if this is the temporary starter person
+      document.getElementById('deleteBtn').style.display = (personId === 'starter_person') ? 'none' : 'flex';
+      
       document.getElementById('editModal').classList.add('show');
     };
 
-    // Close edit modal
-    window.closeEditModal = function() {
-      document.getElementById('editModal').classList.remove('show');
-      editingPersonId = null;
-    };
-
-    // Handle form submission
+    // MODIFY the form submission logic to handle both creating and updating
     document.getElementById('editForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       
@@ -376,16 +329,34 @@
         deathday: document.getElementById('editDeathday').value || null
       };
       
+      // The first name is essential
+      if (!data.first_name || data.first_name === 'First Name') {
+        alert('First Name is required.');
+        return;
+      }
+      
       try {
-        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
-        });
+        let response;
+        
+        // If we are editing the temporary 'starter_person', we must CREATE a new person (POST)
+        if (editingPersonId === 'starter_person') {
+          response = await fetch(`/api/person?code=${code}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+        } else {
+          // Otherwise, we are UPDATING an existing person (PUT)
+          response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+        }
         
         if (response.ok) {
           closeEditModal();
-          await renderOnce(); // Refresh tree
+          await renderOnce(); // Refresh tree from the server
         } else {
           const error = await response.json();
           alert('Error: ' + error.error);
