@@ -249,20 +249,25 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: treeName.trim() })
       })
-      .then(response => response.json())
-      .then(data => {
+      .then(async response => {
+        const data = await response.json();
+        console.log('Create tree response:', data);
+        
+        if (!response.ok) {
+          throw new Error(data.error || data.message || 'Failed to create tree');
+        }
+        
         if (data.tree && data.tree.join_code) {
+          console.log('Redirecting to tree:', data.tree.join_code);
           // Redirect to new tree
           window.location.href = `/tree.html?code=${data.tree.join_code}`;
         } else {
-          showError('Failed to create tree. Please try again.');
-          createBtn.disabled = false;
-          createBtn.textContent = 'Create New Tree';
+          throw new Error('No join code in response');
         }
       })
       .catch(error => {
         console.error('Error:', error);
-        showError('Failed to create tree. Please try again.');
+        showError('Failed to create tree: ' + error.message);
         createBtn.disabled = false;
         createBtn.textContent = 'Create New Tree';
       });
