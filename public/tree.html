@@ -203,8 +203,6 @@
     let currentTree = null;
     let currentPersons = [];
     let editingPersonId = null;
-    let personsToShow = []; // Make this globally accessible within the script
-    let isNewTree = false; // **Declare isNewTree here**
 
     // Get color based on gender abbreviation
     const colorGender = (g) => {
@@ -238,7 +236,7 @@
         return window.f3;
       }
     }
-    
+
     // Check if person has any relationships
     function hasRels(person) {
       const r = person.rels || {};
@@ -254,68 +252,65 @@
         currentTree = api.tree;
         currentPersons = api.persons || [];
         
-        // If no persons exist in the database, build the placeholder view
-        if (currentPersons.length === 0) {
-          isNewTree = true; // **Set the flag to true for a new tree**
-          const mainPerson = {
-            id: 'starter_person',
-            data: { first_name: 'First Name', last_name: 'Surname', birthday: null, gender: 'U' },
-            rels: {}
-          };
-          
-          const placeholders = [
-            { id: 'add_father', data: { first_name: 'Add Father', gender: 'M' }, rels: {} },
-            { id: 'add_mother', data: { first_name: 'Add Mother', gender: 'F' }, rels: {} },
-            { id: 'add_spouse', data: { first_name: 'Add Spouse', gender: 'U' }, rels: {} },
-            { id: 'add_child', data: { first_name: 'Add Child', gender: 'U' }, rels: {} }
-          ];
+        console.log('Total persons:', currentPersons.length);
+        
+        // Split into linked and orphaned persons
+        const linked = currentPersons.filter(p => hasRels(p));
+        const orphans = currentPersons.filter(p => !hasRels(p));
+        
+        console.log('Linked persons:', linked.length);
+        console.log('Orphan persons:', orphans.length);
 
-          mainPerson.rels = {
-            father: 'add_father', mother: 'add_mother',
-            spouses: ['add_spouse'], children: ['add_child']
-          };
-          
-          personsToShow = [mainPerson, ...placeholders];
-        } else {
-          isNewTree = false; // **Set the flag to false for an existing tree**
-          personsToShow = [...currentPersons];
-        }
-
+        // Update header
         treeNameEl.textContent = api.tree?.name || 'Family Tree';
         treeCodeEl.textContent = api.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
         
+        // Setup sharing
         const joinUrl = `${location.origin}/tree.html?code=${api.tree?.join_code || code}`;
         shareWA.href = `https://wa.me/?text=${encodeURIComponent("View our family tree: " + joinUrl)}`;
         shareBtn.onclick = () => {
           if (navigator.share) {
-            navigator.share({ title: api.tree?.name, text: 'View our family tree', url: joinUrl });
+            navigator.share({
+              title: api.tree?.name,
+              text: 'View our family tree',
+              url: joinUrl
+            });
           } else {
             window.open(shareWA.href, '_blank');
           }
         };
 
-        if (personsToShow.length === 0) {
-          statusEl.textContent = 'This tree is empty. Refresh to add the first person.';
+        // If no persons at all, show message
+        if (currentPersons.length === 0) {
+          statusEl.textContent = 'No people in this tree yet.';
           return;
         }
 
+        // If we have persons but none are linked, show the first one with add options
+        const personsToShow = linked.length > 0 ? linked : (orphans.length > 0 ? [orphans[0]] : []);
+        
+        if (personsToShow.length === 0) {
+          statusEl.textContent = 'Loading...';
+          return;
+        }
+
+        // Load library and render tree
         const f3 = await loadLib();
         statusEl.textContent = '';
-        document.querySelector(chartSel).innerHTML = ''; // Clear previous chart
         
-        const store = f3.stores.createStore({
+        console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
+        
+        const store = f3.createStore({
           data: personsToShow,
           node_separation: 250,
           level_separation: 150
         });
 
-        // Use the 'f3.views' namespace to create the view
-        const view = f3.views.d3AnimationView({ 
-          store, 
-          cont: document.querySelector(chartSel) 
+        const view = f3.d3AnimationView({
+          store,
+          cont: document.querySelector(chartSel)
         });
-        
-        // This line was already correct, using the 'f3.elements' namespace
+
         const Card = f3.elements.Card({
           store,
           svg: view.svg,
@@ -323,10 +318,7 @@
           card_display: [d => `${d.data['first_name'] || ''} ${d.data['last_name'] || ''}`.trim(), d => `${d.data['birthday'] || ''}`],
           mini_tree: true,
           link_break: false,
-          cardEditForm: (cardData) => {
-            if (String(cardData.data.id).startsWith('add_')) return;
-            openEditModal(cardData.data.id);
-          }
+          cardEditForm: handleCardClick
         });
 
         view.setCard(Card);
@@ -342,8 +334,15 @@
       }
     }
 
+    // Handle card click to edit
+    function handleCardClick(cardData) {
+      console.log('Card clicked:', cardData);
+      openEditModal(cardData.data.id);
+    }
+
+    // Open edit modal
     window.openEditModal = function(personId) {
-      const person = personsToShow.find(p => p.id === personId);
+      const person = currentPersons.find(p => p.id === personId);
       if (!person) return;
       
       editingPersonId = personId;
@@ -354,16 +353,16 @@
       document.getElementById('editBirthday').value = person.data.birthday || '';
       document.getElementById('editDeathday').value = person.data.deathday || '';
       
-      document.getElementById('deleteBtn').style.display = (personId === 'starter_person') ? 'none' : 'flex';
-      
       document.getElementById('editModal').classList.add('show');
     };
 
+    // Close edit modal
     window.closeEditModal = function() {
       document.getElementById('editModal').classList.remove('show');
       editingPersonId = null;
     };
 
+    // Handle form submission
     document.getElementById('editForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       
@@ -377,30 +376,16 @@
         deathday: document.getElementById('editDeathday').value || null
       };
       
-      if (!data.first_name || data.first_name === 'First Name') {
-        alert('First Name is required.');
-        return;
-      }
-      
       try {
-        let response;
-        if (editingPersonId === 'starter_person') {
-          response = await fetch(`/api/person?code=${code}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-          });
-        } else {
-          response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-          });
-        }
+        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
         
         if (response.ok) {
           closeEditModal();
-          await renderOnce();
+          await renderOnce(); // Refresh tree
         } else {
           const error = await response.json();
           alert('Error: ' + error.error);
@@ -411,15 +396,22 @@
       }
     });
 
+    // Handle delete
     document.getElementById('deleteBtn').addEventListener('click', async () => {
-      if (!editingPersonId || !confirm('Are you sure you want to delete this person? All their relationships will also be removed.')) return;
+      if (!editingPersonId) return;
+      
+      if (!confirm('Are you sure you want to delete this person? All their relationships will also be removed.')) {
+        return;
+      }
       
       try {
-        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, { method: 'DELETE' });
+        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
+          method: 'DELETE'
+        });
         
         if (response.ok) {
           closeEditModal();
-          await renderOnce();
+          await renderOnce(); // Refresh tree
         } else {
           const error = await response.json();
           alert('Error: ' + error.error);
@@ -437,22 +429,21 @@
         return;
       }
       
-      await renderOnce();
+      // Render once and setup auto-refresh
+      const loop = async () => {
+        try {
+          await renderOnce();
+        } catch (e) {
+          console.error(e);
+          statusEl.textContent = 'Render error. Retrying...';
+        }
+      };
       
-      // **This check will now work correctly**
-      if (!isNewTree) {
-        setInterval(async () => {
-          try {
-            await renderOnce();
-          } catch (e) {
-            console.error(e);
-            statusEl.textContent = 'Render error. Retrying...';
-          }
-        }, 5000);
-      }
+      await loop();
+      setInterval(loop, 5000); // Refresh every 5 seconds
     }
 
     main();
-</script>
+  </script>
 </body>
 </html>
