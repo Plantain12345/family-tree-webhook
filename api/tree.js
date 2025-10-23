@@ -46,7 +46,7 @@ export default async function handler(req, res) {
 
 /**
  * POST /api/tree
- * Create a new tree
+ * Create a new tree with a starter person
  * Body: { name: "Tree Name" }
  */
 async function handleCreateTree(req, res) {
@@ -58,7 +58,14 @@ async function handleCreateTree(req, res) {
 
   const tree = await createTree(name.trim());
 
-  // REMOVED: The block that created a "starter person" is now gone.
+  // Create a starter person so users can begin editing
+  const { createPerson } = await import("./_db.js");
+  const starterPerson = await createPerson(tree.id, {
+    first_name: "First Name",
+    last_name: "Surname",
+    gender: "Undefined",
+    birthday: null
+  });
 
   return res.status(201).json({
     tree: {
@@ -67,7 +74,9 @@ async function handleCreateTree(req, res) {
       join_code: tree.join_code,
       created_at: tree.created_at
     },
-    // REMOVED: The 'starter_person' key is no longer returned.
+    starter_person: {
+      id: starterPerson.id
+    },
     message: "Tree created successfully"
   });
 }
