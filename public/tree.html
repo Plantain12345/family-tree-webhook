@@ -282,7 +282,8 @@
 
         // If no persons at all, show message
         if (currentPersons.length === 0) {
-          statusEl.textContent = 'No people in this tree yet.';
+          statusEl.textContent = 'No people in this tree yet. Something went wrong!';
+          statusEl.innerHTML = '<a href="/" style="color: #7fa3b2;">Go back home</a>';
           return;
         }
 
@@ -296,7 +297,12 @@
 
         // Load library and render tree
         const f3 = await loadLib();
-        statusEl.textContent = '';
+        statusEl.innerHTML = '';
+        
+        // Show helpful message for new trees
+        if (orphans.length > 0 && linked.length === 0) {
+          statusEl.innerHTML = '<div style="padding: 12px; background: var(--panel); border-radius: 8px; margin: 0 16px 16px;">👆 <strong>Click the person card above</strong> to edit their details, then use the <strong>"Add Father/Mother/Spouse/Child"</strong> buttons to build your tree!</div>';
+        }
         
         console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
         
@@ -315,7 +321,14 @@
           store,
           svg: view.svg,
           card_dim: {w:220,h:70,text_x:75,text_y:15,img_w:60,img_h:60,img_x:5,img_y:5},
-          card_display: [d => `${d.data['first_name'] || ''} ${d.data['last_name'] || ''}`.trim(), d => `${d.data['birthday'] || ''}`],
+          card_display: [
+            d => {
+              const firstName = d.data['first_name'] || 'Unnamed';
+              const lastName = d.data['last_name'] || '';
+              return `${firstName} ${lastName}`.trim();
+            }, 
+            d => d.data['birthday'] || 'Click to edit'
+          ],
           mini_tree: true,
           link_break: false,
           cardEditForm: handleCardClick
@@ -330,6 +343,7 @@
       } catch (error) {
         console.error('Render error:', error);
         statusEl.textContent = 'Error: ' + error.message;
+        console.error('Full error:', error);
         throw error;
       }
     }
