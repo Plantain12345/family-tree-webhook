@@ -306,37 +306,30 @@
         
         console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
         
-        const store = f3.createStore({
-          data: personsToShow,
-          node_separation: 250,
-          level_separation: 150
-        });
-
-        const view = f3.d3AnimationView({
-          store,
-          cont: document.querySelector(chartSel)
-        });
-
-        const Card = f3.elements.Card({
-          store,
-          svg: view.svg,
-          card_dim: {w:220,h:70,text_x:75,text_y:15,img_w:60,img_h:60,img_x:5,img_y:5},
-          card_display: [
-            d => {
-              const firstName = d.data['first_name'] || 'Unnamed';
-              const lastName = d.data['last_name'] || '';
-              return `${firstName} ${lastName}`.trim();
-            }, 
-            d => d.data['birthday'] || 'Click to edit'
-          ],
-          mini_tree: true,
-          link_break: false,
-          cardEditForm: handleCardClick
-        });
-
-        view.setCard(Card);
-        store.setOnUpdate(props => view.update(props || {}));
-        store.update.tree({initial: true});
+        // Use the correct family-chart API
+        const chart = f3.createChart(chartSel, personsToShow)
+          .setTransitionTime(900)
+          .setCardXSpacing(250)
+          .setCardYSpacing(150);
+        
+        // Set card template with custom display
+        chart.setCard(f3.CardHtml).setCardDisplay([
+          [d => {
+            const firstName = d.data['first_name'] || 'Unnamed';
+            const lastName = d.data['last_name'] || '';
+            return `${firstName} ${lastName}`.trim();
+          }],
+          [d => d.data['birthday'] || 'Click to edit']
+        ]);
+        
+        // Handle card clicks for editing
+        chart.onCardClick = (d) => {
+          console.log('Card clicked:', d);
+          openEditModal(d.id);
+        };
+        
+        // Initial render
+        chart.updateTree({initial: true});
         
         console.log('Chart created successfully');
         
