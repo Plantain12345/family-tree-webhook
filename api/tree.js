@@ -4,16 +4,34 @@
 import { 
   getTreeByCode, 
   createTree,
+  createPerson,
   listPersons, 
   listRelationships,
   RELATIONSHIP_KIND,
   GENDER
 } from "./_db.js";
-import { 
-  isJoinCode, 
-  genderToAbbreviation,
-  normalizePersonData 
-} from "./_models.js";
+
+// Simple helper functions (no need for _models.js dependency)
+function isJoinCode(value) {
+  return typeof value === 'string' && /^[A-Z0-9]{6}$/.test(value);
+}
+
+function genderToAbbreviation(gender) {
+  if (gender === 'Male') return 'M';
+  if (gender === 'Female') return 'F';
+  return 'U';
+}
+
+function normalizePersonData(data) {
+  if (!data) return {};
+  return {
+    first_name: data.first_name || '',
+    last_name: data.last_name || null,
+    gender: data.gender || 'Undefined',
+    birthday: data.birthday || null,
+    deathday: data.deathday || null
+  };
+}
 
 export default async function handler(req, res) {
   // Set CORS headers
@@ -56,29 +74,40 @@ async function handleCreateTree(req, res) {
     return res.status(400).json({ error: "Tree name is required" });
   }
 
-  const tree = await createTree(name.trim());
+  try {
+    // Create tree
+    const tree = await createTree(name.trim());
+    console.log('Created tree:', tree.id, tree.join_code);
 
-  // Create a starter person so users can begin editing
-  const { createPerson } = await import("./_db.js");
-  const starterPerson = await createPerson(tree.id, {
-    first_name: "First Name",
-    last_name: "Surname",
-    gender: "Undefined",
-    birthday: null
-  });
+    // Create a starter person so users can begin editing
+    const starterPerson = await createPerson(tree.id, {
+      first_name: "Click to Edit",
+      last_name: null,
+      gender: "Undefined",
+      birthday: null
+    });
+    console.log('Created starter person:', starterPerson.id);
 
-  return res.status(201).json({
-    tree: {
-      id: tree.id,
-      name: tree.name,
-      join_code: tree.join_code,
-      created_at: tree.created_at
-    },
-    starter_person: {
-      id: starterPerson.id
-    },
-    message: "Tree created successfully"
-  });
+    return res.status(201).json({
+      tree: {
+        id: tree.id,
+        name: tree.name,
+        join_code: tree.join_code,
+        created_at: tree.created_at
+      },
+      starter_person: {
+        id: starterPerson.id
+      },
+      message: "Tree created successfully"
+    });
+  } catch (error) {
+    console.error('Error creating tree:', error);
+    return res.status(500).json({ 
+      error: "Failed to create tree",
+      message: error.message,
+      details: error.toString()
+    });
+  }
 }
 
 /**
