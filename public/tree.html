@@ -306,31 +306,30 @@
         
         console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
         
-        // Use the correct family-chart API
-        const chart = f3.createChart(chartSel, personsToShow, {
+        // Create chart with proper configuration
+        const chart = f3.createChart(chartSel, personsToShow);
+        
+        // Configure card display
+        chart.setCard(f3.elements.Card({
+          store: chart.store,
+          svg: chart.view.svg,
           card_dim: {w:220, h:70, text_x:75, text_y:15, img_w:60, img_h:60, img_x:5, img_y:5},
           card_display: [
-            d => {
-              const firstName = d.data['first_name'] || 'Unnamed';
-              const lastName = d.data['last_name'] || '';
-              return `${firstName} ${lastName}`.trim();
-            },
-            d => d.data['birthday'] || 'Click to edit'
+            d => `${d.data.first_name || 'Unnamed'} ${d.data.last_name || ''}`.trim(),
+            d => d.data.birthday || 'Click to edit'
           ],
           mini_tree: true,
-          node_separation: 250,
-          level_separation: 150
-        });
+          cardEditForm: (d) => {
+            console.log('Card clicked:', d);
+            openEditModal(d.data.id);
+            return false; // Prevent default
+          }
+        }));
         
-        // Set card template
-        chart.setCard(f3.elements.Card);
-        
-        // Handle card clicks for editing
-        chart.elements.Card.setCardEditForm((d) => {
-          console.log('Card clicked via setCardEditForm:', d);
-          openEditModal(d.data.id);
-          return false; // Prevent default form
-        });
+        // Set spacing
+        chart.setTransitionTime(900);
+        chart.setCardXSpacing(250);
+        chart.setCardYSpacing(150);
         
         // Initial render
         chart.updateTree({initial: true});
