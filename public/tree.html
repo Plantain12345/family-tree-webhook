@@ -305,25 +305,20 @@
         
         // === START OF FIX ===
         
-        // Set the card type to HTML and provide onCardClick as an option
-        // to override the default click handler.
-        f3Chart.setCard(f3.CardHtml, {
-          onCardClick: (e, d) => {
-            // d is the data object for the clicked card
+        // Set the card type to HTML and chain settings
+        f3Chart.setCard(f3.CardHtml)
+          .setCardDisplay([["first name", "last name"], ["birthday"]])
+          .onCardClick((d) => { // 'd' is the data object for the clicked card
             if (d && d.id) {
               console.log('Card clicked, opening custom modal for:', d.id);
               window.openEditModal(d.id);
             } else {
-              console.error('Card click detected, but no data object found.', {d, e});
+              console.error('Card click detected, but no data object found.', {d});
             }
-          }
-        });
+          });
         
-        // Chain the display settings onto the chart
-        f3Chart.setCardDisplay([["first name", "last name"], ["birthday"]]);
-        
-        // REMOVED the f3Chart.editTree() block that was here
-        // We are overriding the click behavior, so we don't need the default editor.
+        // REMOVED the f3Chart.setCard(f3.CardHtml, { ... })
+        // and the separate f3Chart.setCardDisplay(...)
         
         // === END OF FIX ===
         
@@ -476,3 +471,5 @@
   </script>
 </body>
 </html>
+
+
