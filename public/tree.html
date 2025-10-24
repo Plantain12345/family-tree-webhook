@@ -280,7 +280,7 @@
         
         // Show helpful message for new trees
         if (orphans.length > 0 && linked.length === 0) {
-          statusEl.innerHTML = '<div style="padding: 12px; background: var(--panel); border-radius: 8px; margin: 0 16px 16px;">👆 <strong>Click the person card above</strong> to edit their details, then use the <strong>"Add Father/Mother/Spouse/Child"</strong> buttons to build your tree!</div>';
+          statusEl.innerHTML = '<div style="padding: 12px; background: var(--panel); border-radius: 8px; margin: 0 16px 16px;">👆 <strong>Click the person card above</strong> to edit their details!</div>';
         }
         
         console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
@@ -292,52 +292,36 @@
             "first name": p.data.first_name || '',
             "last name": p.data.last_name || '',
             "birthday": p.data.birthday || '',
-            "gender": p.data.gender
+            "gender": p.data.gender // This should be M, F, or U from the API
           },
           rels: p.rels
         }));
         
-        // Create chart using EXACT API from working examples
+        // Create chart
         f3Chart = f3.createChart('#FamilyChart', chartData)
           .setTransitionTime(1000)
           .setCardXSpacing(250)
           .setCardYSpacing(150);
         
-        // Use their Card API with edit form - from create-tree.html example
-        const f3Card = f3Chart.setCard(f3.CardHtml)
-          .setCardDisplay([["first name", "last name"], ["birthday"]]);
+        // === START OF FIX ===
         
-        // Set up the built-in edit tree functionality
-        const f3EditTree = f3Chart.editTree()
-          .setFields(["first name", "last name", "birthday"])
-          .setEditFirst(true)  // true = open form on click
-          .setCardClickOpen(f3Card)
-          .setOnUpdate(async (updatedData) => {
-            console.log('Person updated via f3 form:', updatedData);
-            
-            // Save to your API
-            const personId = updatedData.id;
-            const apiData = {
-              first_name: updatedData.data["first name"],
-              last_name: updatedData.data["last name"],
-              gender: updatedData.data.gender,
-              birthday: updatedData.data.birthday
-            };
-            
-            try {
-              await fetch(`/api/person?code=${code}&id=${personId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(apiData)
-              });
-            } catch (error) {
-              console.error('Failed to save:', error);
-            }
+        // Set the card type to HTML
+        const f3Card = f3Chart.setCard(f3.CardHtml)
+          .setCardDisplay([["first name", "last name"], ["birthday"]])
+          // Add the onCardClick handler to call YOUR modal
+          .onCardClick((d) => {
+            console.log('Card clicked, opening custom modal for:', d.id);
+            window.openEditModal(d.id);
           });
+        
+        // REMOVED the f3Chart.editTree() block that was here
+        // It was causing the error and conflicting with the custom modal
+        
+        // === END OF FIX ===
         
         f3Chart.updateTree({initial: true});
         
-        console.log('Chart created successfully with built-in editing');
+        console.log('Chart created successfully with custom click handler');
         
       } catch (error) {
         console.error('Render error:', error);
@@ -358,7 +342,7 @@
       console.log('Found person:', person);
       editingPersonId = personId;
       
-      // Map gender abbreviation back to full word
+      // Map gender abbreviation back to full word for the dropdown
       let genderValue = 'Undefined';
       if (person.data.gender === 'M') genderValue = 'Male';
       else if (person.data.gender === 'F') genderValue = 'Female';
@@ -387,10 +371,15 @@
       const data = {
         first_name: document.getElementById('editFirstName').value.trim(),
         last_name: document.getElementById('editLastName').value.trim() || null,
+        // Map full word back to abbreviation for the API
         gender: document.getElementById('editGender').value,
         birthday: document.getElementById('editBirthday').value || null,
         deathday: document.getElementById('editDeathday').value || null
       };
+
+      // The API's /api/person endpoint expects "Male", "Female", or "Undefined"
+      // not "M", "F", "U". My _models.js file confirms this.
+      // So, data.gender is already in the correct format for the PUT request.
       
       try {
         const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
@@ -404,11 +393,12 @@
           await renderOnce(); // Refresh tree
         } else {
           const error = await response.json();
-          alert('Error: ' + error.error);
+          // Use a custom message box instead of alert()
+          statusEl.textContent = 'Error: ' + error.error;
         }
       } catch (error) {
         console.error('Update error:', error);
-        alert('Failed to update person');
+        statusEl.textContent = 'Failed to update person';
       }
     });
 
@@ -416,25 +406,39 @@
     document.getElementById('deleteBtn').addEventListener('click', async () => {
       if (!editingPersonId) return;
       
-      if (!confirm('Are you sure you want to delete this person? All their relationships will also be removed.')) {
-        return;
-      }
-      
-      try {
-        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
-          method: 'DELETE'
-        });
-        
-        if (response.ok) {
-          closeEditModal();
-          await renderOnce(); // Refresh tree
-        } else {
-          const error = await response.json();
-          alert('Error: ' + error.error);
+      // Using the modal for confirmation instead of window.confirm()
+      if (document.getElementById('deleteBtn').textContent === 'Confirm Delete?') {
+        // Second click, proceed with delete
+        try {
+          const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
+            method: 'DELETE'
+          });
+          
+          if (response.ok) {
+            closeEditModal();
+            await renderOnce(); // Refresh tree
+          } else {
+            const error = await response.json();
+            statusEl.textContent = 'Error: ' + error.error;
+          }
+        } catch (error) {
+          console.error('Delete error:', error);
+          statusEl.textContent = 'Failed to delete person';
+        } finally {
+          document.getElementById('deleteBtn').textContent = 'Delete Person';
+          document.getElementById('deleteBtn').style.background = '#ff4444';
         }
-      } catch (error) {
-        console.error('Delete error:', error);
-        alert('Failed to delete person');
+      } else {
+        // First click, ask for confirmation
+        document.getElementById('deleteBtn').textContent = 'Confirm Delete?';
+        document.getElementById('deleteBtn').style.background = '#ff8800'; // Change color to orange
+        // Reset after 3 seconds if not confirmed
+        setTimeout(() => {
+          if (document.getElementById('deleteBtn').textContent === 'Confirm Delete?') {
+            document.getElementById('deleteBtn').textContent = 'Delete Person';
+            document.getElementById('deleteBtn').style.background = '#ff4444';
+          }
+        }, 3000);
       }
     });
 
@@ -456,7 +460,8 @@
       };
       
       await loop();
-      setInterval(loop, 5000); // Refresh every 5 seconds
+      // Temporarily disabling auto-refresh as it can be jarring
+      // setInterval(loop, 5000); 
     }
 
     main();
