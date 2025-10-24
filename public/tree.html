@@ -203,11 +203,6 @@
     let currentTree = null;
     let currentPersons = [];
     let editingPersonId = null;
-    
-    // --- REFACTORED CODE ---
-    let chart = null; // Hold the chart instance
-    let f3 = null; // Hold the library instance
-    // --- END REFACTORED CODE ---
 
     // Get color based on gender abbreviation
     const colorGender = (g) => {
@@ -231,17 +226,15 @@
 
     // Load family-chart library
     async function loadLib() {
-      if (f3) return f3; // Return if already loaded
       try {
-        f3 = (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
+        return (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
       } catch {
         const script = document.createElement('script');
         script.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
         await new Promise(resolve => script.onload = resolve);
         document.head.appendChild(script);
-        f3 = window.f3;
+        return window.f3;
       }
-      return f3;
     }
 
     // Check if person has any relationships
@@ -250,137 +243,134 @@
       return r.father || r.mother || (r.spouses && r.spouses.length > 0) || (r.children && r.children.length > 0);
     }
 
-    // --- NEW FUNCTION: Initializes the chart ---
-    /**
-     * Creates the chart instance one time.
-     * @param {Array} initialData - The first batch of person data.
-     */
-    async function initChart(initialData) {
-      await loadLib();
-      statusEl.innerHTML = '';
-      
-      console.log('Initializing chart with data:', JSON.stringify(initialData, null, 2));
-        
-      // Use the correct family-chart API
-      chart = f3.createChart(chartSel, initialData)
-        .setTransitionTime(900)
-        .setCardXSpacing(250)
-        .setCardYSpacing(150);
-      
-      // Set card template with custom display
-      chart.setCard(f3.CardHtml).setCardDisplay([
-        [d => {
-          const firstName = d.data['first_name'] || 'Unnamed';
-          const lastName = d.data['last_name'] || '';
-          return `${firstName} ${lastName}`.trim();
-        }],
-        [d => d.data['birthday'] || 'Click to edit']
-      ]);
-      
-      // Handle card clicks for editing
-      chart.onCardClick = (d) => {
-        if (!d || !d.id) return; // Safety check
-        console.log('Card clicked:', d); // Debug log
-        openEditModal(d.id);
-      };
-      
-      // Initial render
-      chart.updateTree({initial: true});
-      
-      console.log('Chart created successfully');
-    }
-
-    // --- MODIFIED FUNCTION: Fetches and updates data ---
-    /**
-     * Fetches data and updates the chart.
-     * If chart isn't created, it initializes it.
-     */
-    async function updateDataLoop() {
-      let api;
+    // Main render function
+    async function renderOnce() {
       try {
-        api = await fetchTree();
+        const api = await fetchTree();
         console.log('API Response:', api);
-      } catch (error) {
-        console.error('Fetch error:', error);
-        statusEl.textContent = 'Error: ' + error.message + '. Retrying...';
-        console.error('Full error:', error);
-        return; // Stop this loop iteration
-      }
         
-      currentTree = api.tree;
-      currentPersons = api.persons || [];
-      
-      console.log('Total persons:', currentPersons.length);
-      
-      // Split into linked and orphaned persons
-      const linked = currentPersons.filter(p => hasRels(p));
-      const orphans = currentPersons.filter(p => !hasRels(p));
-      
-      console.log('Linked persons:', linked.length);
-      console.log('Orphan persons:', orphans.length);
+        currentTree = api.tree;
+        currentPersons = api.persons || [];
+        
+        console.log('Total persons:', currentPersons.length);
+        
+        // Split into linked and orphaned persons
+        const linked = currentPersons.filter(p => hasRels(p));
+        const orphans = currentPersons.filter(p => !hasRels(p));
+        
+        console.log('Linked persons:', linked.length);
+        console.log('Orphan persons:', orphans.length);
 
-      // Update header
-      treeNameEl.textContent = api.tree?.name || 'Family Tree';
-      treeCodeEl.textContent = api.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
-      
-      // Setup sharing
-      const joinUrl = `${location.origin}/tree.html?code=${api.tree?.join_code || code}`;
-      shareWA.href = `https://wa.me/?text=${encodeURIComponent("View our family tree: " + joinUrl)}`;
-      shareBtn.onclick = () => {
-        if (navigator.share) {
-          navigator.share({
-            title: api.tree?.name,
-            text: 'View our family tree',
-            url: joinUrl
-          });
-        } else {
-          window.open(shareWA.href, '_blank');
+        // Update header
+        treeNameEl.textContent = api.tree?.name || 'Family Tree';
+        treeCodeEl.textContent = api.tree?.join_code ? `Code: ${api.tree.join_code}` : '';
+        
+        // Setup sharing
+        const joinUrl = `${location.origin}/tree.html?code=${api.tree?.join_code || code}`;
+        shareWA.href = `https://wa.me/?text=${encodeURIComponent("View our family tree: " + joinUrl)}`;
+        shareBtn.onclick = () => {
+          if (navigator.share) {
+            navigator.share({
+              title: api.tree?.name,
+              text: 'View our family tree',
+              url: joinUrl
+            });
+          } else {
+            window.open(shareWA.href, '_blank');
+          }
+        };
+
+        // If no persons at all, show message
+        if (currentPersons.length === 0) {
+          statusEl.textContent = 'No people in this tree yet. Something went wrong!';
+          statusEl.innerHTML = '<a href="/" style="color: #7fa3b2;">Go back home</a>';
+          return;
         }
-      };
 
-      // If no persons at all, show message
-      if (currentPersons.length === 0) {
-        statusEl.textContent = 'No people in this tree yet. Something went wrong!';
-        statusEl.innerHTML = '<a href="/" style="color: #7fa3b2;">Go back home</a>';
-        return;
-      }
+        // If we have persons but none are linked, show the first one with add options
+        const personsToShow = linked.length > 0 ? linked : (orphans.length > 0 ? [orphans[0]] : []);
+        
+        if (personsToShow.length === 0) {
+          statusEl.textContent = 'Loading...';
+          return;
+        }
 
-      // If we have persons but none are linked, show the first one with add options
-      const personsToShow = linked.length > 0 ? linked : (orphans.length > 0 ? [orphans[0]] : []);
-      
-      if (personsToShow.length === 0) {
-        statusEl.textContent = 'Loading...';
-        return;
-      }
-
-      // --- CHART LOGIC ---
-      if (!chart) {
-        // Chart doesn't exist, create it.
+        // Load library and render tree
+        const f3 = await loadLib();
+        statusEl.innerHTML = '';
+        
         // Show helpful message for new trees
         if (orphans.length > 0 && linked.length === 0) {
           statusEl.innerHTML = '<div style="padding: 12px; background: var(--panel); border-radius: 8px; margin: 0 16px 16px;">👆 <strong>Click the person card above</strong> to edit their details, then use the <strong>"Add Father/Mother/Spouse/Child"</strong> buttons to build your tree!</div>';
         }
-        await initChart(personsToShow);
-      } else {
-        // Chart exists, just update it.
-        console.log('Updating tree with new data...');
-        chart.updateTree(personsToShow);
+        
+        console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
+        
+        // Use the correct family-chart API
+        const chart = f3.createChart(chartSel, personsToShow, {
+          card_dim: {w:220, h:70, text_x:75, text_y:15, img_w:60, img_h:60, img_x:5, img_y:5},
+          card_display: [
+            d => {
+              const firstName = d.data['first_name'] || 'Unnamed';
+              const lastName = d.data['last_name'] || '';
+              return `${firstName} ${lastName}`.trim();
+            },
+            d => d.data['birthday'] || 'Click to edit'
+          ],
+          mini_tree: true,
+          node_separation: 250,
+          level_separation: 150
+        });
+        
+        // Set card template
+        chart.setCard(f3.elements.Card);
+        
+        // Handle card clicks for editing
+        chart.elements.Card.setCardEditForm((d) => {
+          console.log('Card clicked via setCardEditForm:', d);
+          openEditModal(d.data.id);
+          return false; // Prevent default form
+        });
+        
+        // Initial render
+        chart.updateTree({initial: true});
+        
+        console.log('Chart created successfully');
+        
+      } catch (error) {
+        console.error('Render error:', error);
+        statusEl.textContent = 'Error: ' + error.message;
+        console.error('Full error:', error);
+        throw error;
       }
+    }
+
+    // Handle card click to edit
+    function handleCardClick(cardData) {
+      console.log('Card clicked:', cardData);
+      openEditModal(cardData.id);
     }
 
     // Open edit modal
     window.openEditModal = function(personId) {
+      console.log('Opening modal for person:', personId);
       const person = currentPersons.find(p => p.id === personId);
       if (!person) {
-        console.error('Could not find person with ID:', personId);
+        console.error('Person not found:', personId);
         return;
       }
       
+      console.log('Found person:', person);
       editingPersonId = personId;
+      
+      // Map gender abbreviation back to full word
+      let genderValue = 'Undefined';
+      if (person.data.gender === 'M') genderValue = 'Male';
+      else if (person.data.gender === 'F') genderValue = 'Female';
       
       document.getElementById('editFirstName').value = person.data.first_name || '';
       document.getElementById('editLastName').value = person.data.last_name || '';
-      document.getElementById('editGender').value = person.data.gender === 'M' ? 'Male' : person.data.gender === 'F' ? 'Female' : 'Undefined';
+      document.getElementById('editGender').value = genderValue;
       document.getElementById('editBirthday').value = person.data.birthday || '';
       document.getElementById('editDeathday').value = person.data.deathday || '';
       
@@ -416,7 +406,7 @@
         
         if (response.ok) {
           closeEditModal();
-          await updateDataLoop(); // Refresh tree data
+          await renderOnce(); // Refresh tree
         } else {
           const error = await response.json();
           alert('Error: ' + error.error);
@@ -431,24 +421,25 @@
     document.getElementById('deleteBtn').addEventListener('click', async () => {
       if (!editingPersonId) return;
       
-      // Use a custom modal for confirmation instead of alert/confirm
-      if (window.confirm('Are you sure you want to delete this person? All their relationships will also be removed.')) {
-        try {
-          const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
-            method: 'DELETE'
-          });
-          
-          if (response.ok) {
-            closeEditModal();
-            await updateDataLoop(); // Refresh tree data
-          } else {
-            const error = await response.json();
-            alert('Error: ' + error.error);
-          }
-        } catch (error) {
-          console.error('Delete error:', error);
-          alert('Failed to delete person');
+      if (!confirm('Are you sure you want to delete this person? All their relationships will also be removed.')) {
+        return;
+      }
+      
+      try {
+        const response = await fetch(`/api/person?code=${code}&id=${editingPersonId}`, {
+          method: 'DELETE'
+        });
+        
+        if (response.ok) {
+          closeEditModal();
+          await renderOnce(); // Refresh tree
+        } else {
+          const error = await response.json();
+          alert('Error: ' + error.error);
         }
+      } catch (error) {
+        console.error('Delete error:', error);
+        alert('Failed to delete person');
       }
     });
 
@@ -460,8 +451,17 @@
       }
       
       // Render once and setup auto-refresh
-      await updateDataLoop(); // Run the first time
-      setInterval(updateDataLoop, 5000); // Refresh every 5 seconds
+      const loop = async () => {
+        try {
+          await renderOnce();
+        } catch (e) {
+          console.error(e);
+          statusEl.textContent = 'Render error. Retrying...';
+        }
+      };
+      
+      await loop();
+      setInterval(loop, 5000); // Refresh every 5 seconds
     }
 
     main();
