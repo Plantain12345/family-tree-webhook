@@ -305,17 +305,25 @@
         
         // === START OF FIX ===
         
-        // Set the card type to HTML
-        const f3Card = f3Chart.setCard(f3.CardHtml)
-          .setCardDisplay([["first name", "last name"], ["birthday"]])
-          // Add the onCardClick handler to call YOUR modal
-          .onCardClick((d) => {
-            console.log('Card clicked, opening custom modal for:', d.id);
-            window.openEditModal(d.id);
-          });
+        // Set the card type to HTML and provide onCardClick as an option
+        // to override the default click handler.
+        f3Chart.setCard(f3.CardHtml, {
+          onCardClick: (e, d) => {
+            // d is the data object for the clicked card
+            if (d && d.id) {
+              console.log('Card clicked, opening custom modal for:', d.id);
+              window.openEditModal(d.id);
+            } else {
+              console.error('Card click detected, but no data object found.', {d, e});
+            }
+          }
+        });
+        
+        // Chain the display settings onto the chart
+        f3Chart.setCardDisplay([["first name", "last name"], ["birthday"]]);
         
         // REMOVED the f3Chart.editTree() block that was here
-        // It was causing the error and conflicting with the custom modal
+        // We are overriding the click behavior, so we don't need the default editor.
         
         // === END OF FIX ===
         
