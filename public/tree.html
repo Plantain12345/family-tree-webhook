@@ -27,7 +27,7 @@
     .dot.f { background:var(--female); }
     .dot.u { background:var(--unknown); }
     #Status { padding:12px 16px; font-size:14px; opacity:.85; }
-    #FamilyChart.f3 { width:100%; height:900px; max-height:70vh; margin:auto; }
+    #FamilyChart { width:100%; height:900px; max-height:70vh; margin:auto; }
     
     /* Edit Modal Styles */
     .modal {
@@ -192,8 +192,9 @@
   </div>
 
   <script type="module">
+    import f3 from 'https://unpkg.com/family-chart@0.8.0?module';
+    
     const statusEl = document.getElementById('Status');
-    const chartSel = '#FamilyChart';
     const treeNameEl = document.getElementById('TreeName');
     const treeCodeEl = document.getElementById('TreeCode');
     const shareWA = document.getElementById('ShareWA');
@@ -203,13 +204,7 @@
     let currentTree = null;
     let currentPersons = [];
     let editingPersonId = null;
-
-    // Get color based on gender abbreviation
-    const colorGender = (g) => {
-      if (g === 'M') return 'var(--male)';
-      if (g === 'F') return 'var(--female)';
-      return 'var(--unknown)';
-    };
+    let f3Chart = null;
 
     // Fetch tree data from API
     async function fetchTree() {
@@ -222,19 +217,6 @@
       }
       
       return response.json();
-    }
-
-    // Load family-chart library
-    async function loadLib() {
-      try {
-        return (await import('https://unpkg.com/family-chart@0.8.0?module')).default;
-      } catch {
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/family-chart@0.8.0/dist/family-chart.umd.js';
-        await new Promise(resolve => script.onload = resolve);
-        document.head.appendChild(script);
-        return window.f3;
-      }
     }
 
     // Check if person has any relationships
@@ -282,8 +264,7 @@
 
         // If no persons at all, show message
         if (currentPersons.length === 0) {
-          statusEl.textContent = 'No people in this tree yet. Something went wrong!';
-          statusEl.innerHTML = '<a href="/" style="color: #7fa3b2;">Go back home</a>';
+          statusEl.innerHTML = 'No people in this tree yet. <a href="/" style="color: #7fa3b2;">Go back home</a>';
           return;
         }
 
@@ -295,8 +276,6 @@
           return;
         }
 
-        // Load library and render tree
-        const f3 = await loadLib();
         statusEl.innerHTML = '';
         
         // Show helpful message for new trees
@@ -306,48 +285,65 @@
         
         console.log('Creating chart with data:', JSON.stringify(personsToShow, null, 2));
         
-        // Create chart with proper configuration
-        const chart = f3.createChart(chartSel, personsToShow);
-        
-        // Configure card display
-        chart.setCard(f3.elements.Card({
-          store: chart.store,
-          svg: chart.view.svg,
-          card_dim: {w:220, h:70, text_x:75, text_y:15, img_w:60, img_h:60, img_x:5, img_y:5},
-          card_display: [
-            d => `${d.data.first_name || 'Unnamed'} ${d.data.last_name || ''}`.trim(),
-            d => d.data.birthday || 'Click to edit'
-          ],
-          mini_tree: true,
-          cardEditForm: (d) => {
-            console.log('Card clicked:', d);
-            openEditModal(d.data.id);
-            return false; // Prevent default
-          }
+        // Transform data to match family-chart format (with spaces in field names)
+        const chartData = personsToShow.map(p => ({
+          id: p.id,
+          data: {
+            "first name": p.data.first_name || '',
+            "last name": p.data.last_name || '',
+            "birthday": p.data.birthday || '',
+            "gender": p.data.gender
+          },
+          rels: p.rels
         }));
         
-        // Set spacing
-        chart.setTransitionTime(900);
-        chart.setCardXSpacing(250);
-        chart.setCardYSpacing(150);
+        // Create chart using EXACT API from working examples
+        f3Chart = f3.createChart('#FamilyChart', chartData)
+          .setTransitionTime(1000)
+          .setCardXSpacing(250)
+          .setCardYSpacing(150);
         
-        // Initial render
-        chart.updateTree({initial: true});
+        // Use their Card API with edit form - from create-tree.html example
+        const f3Card = f3Chart.setCard(f3.CardHtml)
+          .setCardDisplay([["first name", "last name"], ["birthday"]]);
         
-        console.log('Chart created successfully');
+        // Set up the built-in edit tree functionality
+        const f3EditTree = f3Chart.editTree()
+          .setFields(["first name", "last name", "birthday"])
+          .setEditFirst(true)  // true = open form on click
+          .setCardClickOpen(f3Card)
+          .setOnUpdate(async (updatedData) => {
+            console.log('Person updated via f3 form:', updatedData);
+            
+            // Save to your API
+            const personId = updatedData.id;
+            const apiData = {
+              first_name: updatedData.data["first name"],
+              last_name: updatedData.data["last name"],
+              gender: updatedData.data.gender,
+              birthday: updatedData.data.birthday
+            };
+            
+            try {
+              await fetch(`/api/person?code=${code}&id=${personId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(apiData)
+              });
+            } catch (error) {
+              console.error('Failed to save:', error);
+            }
+          });
+        
+        f3Chart.updateTree({initial: true});
+        
+        console.log('Chart created successfully with built-in editing');
         
       } catch (error) {
         console.error('Render error:', error);
         statusEl.textContent = 'Error: ' + error.message;
         console.error('Full error:', error);
-        throw error;
       }
-    }
-
-    // Handle card click to edit
-    function handleCardClick(cardData) {
-      console.log('Card clicked:', cardData);
-      openEditModal(cardData.id);
     }
 
     // Open edit modal
