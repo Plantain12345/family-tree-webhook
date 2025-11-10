@@ -1,62 +1,71 @@
-// ===== landing.js =====
 import { APP } from "./config.js";
 import { createFamilyTree } from "./supabase-client.js";
 
-function $(sel) {
-  return document.querySelector(sel);
+const $ = (selector) => document.querySelector(selector);
+
+function toast(message) {
+  alert(message);
 }
 
-function showError(msg) {
-  alert(msg);
-}
-
-function validateCodeInput(str) {
-  const code = String(str || "").trim().toUpperCase();
-  if (code.length !== APP.codeLength) throw new Error(`Enter a ${APP.codeLength}-character code`);
-  if (!/^[A-Z0-9]+$/.test(code)) throw new Error("Code must be alphanumeric (A–Z, 0–9)");
+function parseCodeInput(value) {
+  const code = String(value ?? "").trim().toUpperCase();
+  if (code.length !== APP.codeLength) {
+    throw new Error(`Enter a ${APP.codeLength}-character code.`);
+  }
+  if (!/^[A-Z0-9]+$/.test(code)) {
+    throw new Error("Code must be alphanumeric (A–Z, 0–9).");
+  }
   return code;
 }
 
-function handleViewTree(e) {
-  e.preventDefault();
+function onViewSubmit(event) {
+  event.preventDefault();
   try {
-    const code = validateCodeInput($("#treeCode").value);
+    const code = parseCodeInput($("#treeCode").value);
     window.location.href = `tree.html?code=${encodeURIComponent(code)}`;
-  } catch (err) {
-    showError(err.message || "Invalid code");
+  } catch (error) {
+    toast(error.message);
   }
 }
 
-async function handleCreateTree(e) {
-  e.preventDefault();
-  const name = $("#treeName").value.trim();
-  const firstName = $("#firstName").value.trim();
-  const lastName = $("#lastName").value.trim();
-  const birthday = $("#birthday").value ? Number($("#birthday").value) : null;
-  const death = $("#death").value ? Number($("#death").value) : null;
-  const gender = $("#gender").value || "U";
+async function onCreateSubmit(event) {
+  event.preventDefault();
+  const treeName = $("#treeName").value.trim();
+  if (!treeName) {
+    toast("Please provide a name for the tree.");
+    return;
+  }
 
-  if (!name) return showError("Please enter a tree name.");
+  const payload = {
+    treeName,
+    firstName: $("#firstName").value.trim(),
+    lastName: $("#lastName").value.trim(),
+    birthday: $("#birthday").value ? Number($("#birthday").value) : null,
+    death: $("#death").value ? Number($("#death").value) : null,
+    gender: $("#gender").value || "U",
+  };
+
+  const button = $("#createBtn");
+  button.disabled = true;
 
   try {
-    $("#createBtn").disabled = true;
-    const result = await createFamilyTree({ treeName: name, firstName, lastName, birthday, death, gender });
-    const code = result.treeCode; // guaranteed string with the SQL fix, but also robust JS in supabase-client
-    window.location.href = `tree.html?code=${encodeURIComponent(code)}`;
-  } catch (err) {
-    console.error("Create tree failed:", err);
-    showError("Could not create tree. Please try again.");
+    const result = await createFamilyTree(payload);
+    window.location.href = `tree.html?code=${encodeURIComponent(result.treeCode)}`;
+  } catch (error) {
+    console.error("Create tree failed", error);
+    toast("Could not create tree. Please try again.");
   } finally {
-    $("#createBtn").disabled = false;
+    button.disabled = false;
   }
 }
 
 export function initLanding() {
-  $("#viewForm").addEventListener("submit", handleViewTree);
-  $("#createForm").addEventListener("submit", handleCreateTree);
+  $("#viewForm").addEventListener("submit", onViewSubmit);
+  $("#createForm").addEventListener("submit", onCreateSubmit);
 }
 
-// Auto-init if this script is loaded on index.html
 document.addEventListener("DOMContentLoaded", () => {
-  if (document.body.dataset.page === "landing") initLanding();
+  if (document.body.dataset.page === "landing") {
+    initLanding();
+  }
 });
