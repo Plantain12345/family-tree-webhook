@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Family Tree</title>
+  <link rel="stylesheet" href="css/landing.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="tree-icon">🌳</div>
+      <h1>Family Tree</h1>
+    </div>
+    
+    <p class="subtitle">Enter a tree code to view an existing family tree</p>
+    
+    <div class="form-section">
+      <label for="treeCode">Tree Code</label>
+      <input 
+        type="text" 
+        id="treeCode" 
+        placeholder="ABC123"
+        maxlength="6"
+        autocomplete="off"
+      >
+      <button id="viewTreeBtn" class="btn btn-primary">View Tree</button>
+    </div>
+    
+    <div class="divider">
+      <span>OR</span>
+    </div>
+    
+    <button id="createTreeBtn" class="btn btn-secondary">Create New Tree</button>
+    
+    <p class="hint">Enter a 6-character alphanumeric code</p>
+    
+    <div id="errorMessage" class="error-message"></div>
+  </div>
+
+  <!-- Create Tree Modal -->
+  <div id="createModal" class="modal">
+    <div class="modal-content">
+      <span class="close">&times;</span>
+      <h2>Create New Family Tree</h2>
+      <div class="form-section">
+        <label for="treeName">Family Tree Name</label>
+        <input 
+          type="text" 
+          id="treeName" 
+          placeholder="Smith Family Tree"
+          maxlength="255"
+        >
+        <button id="confirmCreateBtn" class="btn btn-primary">Create Tree</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script type="module" src="js/landing.js"></script>
+</body>
+</html>
