@@ -1,132 +1,62 @@
-import { createFamilyTree, getFamilyTreeByCode, createFamilyMember } from './supabase-client.js'
+// ===== landing.js =====
+import { APP } from "./config.js";
+import { createFamilyTree } from "./supabase-client.js";
 
-// DOM Elements
-const treeCodeInput = document.getElementById('treeCode')
-const viewTreeBtn = document.getElementById('viewTreeBtn')
-const createTreeBtn = document.getElementById('createTreeBtn')
-const errorMessage = document.getElementById('errorMessage')
-const createModal = document.getElementById('createModal')
-const closeModal = document.querySelector('.close')
-const treeNameInput = document.getElementById('treeName')
-const confirmCreateBtn = document.getElementById('confirmCreateBtn')
-
-// Show error message
-function showError(message) {
-  errorMessage.textContent = message
-  errorMessage.classList.add('show')
-  setTimeout(() => {
-    errorMessage.classList.remove('show')
-  }, 4000)
+function $(sel) {
+  return document.querySelector(sel);
 }
 
-// View existing tree
-viewTreeBtn.addEventListener('click', async () => {
-  const code = treeCodeInput.value.trim().toUpperCase()
-  
-  if (!code) {
-    showError('Please enter a tree code')
-    return
-  }
-  
-  if (code.length !== 6) {
-    showError('Tree code must be 6 characters')
-    return
-  }
-  
-  viewTreeBtn.disabled = true
-  viewTreeBtn.textContent = 'Loading...'
-  
-  const result = await getFamilyTreeByCode(code)
-  
-  if (result.success) {
-    // Redirect to tree page with code
-    window.location.href = `tree.html?code=${code}`
-  } else {
-    showError('Tree not found. Please check the code and try again.')
-    viewTreeBtn.disabled = false
-    viewTreeBtn.textContent = 'View Tree'
-  }
-})
+function showError(msg) {
+  alert(msg);
+}
 
-// Enter key on tree code input
-treeCodeInput.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') {
-    viewTreeBtn.click()
+function validateCodeInput(str) {
+  const code = String(str || "").trim().toUpperCase();
+  if (code.length !== APP.codeLength) throw new Error(`Enter a ${APP.codeLength}-character code`);
+  if (!/^[A-Z0-9]+$/.test(code)) throw new Error("Code must be alphanumeric (A–Z, 0–9)");
+  return code;
+}
+
+function handleViewTree(e) {
+  e.preventDefault();
+  try {
+    const code = validateCodeInput($("#treeCode").value);
+    window.location.href = `tree.html?code=${encodeURIComponent(code)}`;
+  } catch (err) {
+    showError(err.message || "Invalid code");
   }
-})
+}
 
-// Auto-format tree code to uppercase
-treeCodeInput.addEventListener('input', (e) => {
-  e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '')
-})
+async function handleCreateTree(e) {
+  e.preventDefault();
+  const name = $("#treeName").value.trim();
+  const firstName = $("#firstName").value.trim();
+  const lastName = $("#lastName").value.trim();
+  const birthday = $("#birthday").value ? Number($("#birthday").value) : null;
+  const death = $("#death").value ? Number($("#death").value) : null;
+  const gender = $("#gender").value || "U";
 
-// Open create tree modal
-createTreeBtn.addEventListener('click', () => {
-  createModal.style.display = 'block'
-  treeNameInput.focus()
-})
+  if (!name) return showError("Please enter a tree name.");
 
-// Close modal
-closeModal.addEventListener('click', () => {
-  createModal.style.display = 'none'
-  treeNameInput.value = ''
-})
-
-// Close modal when clicking outside
-window.addEventListener('click', (e) => {
-  if (e.target === createModal) {
-    createModal.style.display = 'none'
-    treeNameInput.value = ''
+  try {
+    $("#createBtn").disabled = true;
+    const result = await createFamilyTree({ treeName: name, firstName, lastName, birthday, death, gender });
+    const code = result.treeCode; // guaranteed string with the SQL fix, but also robust JS in supabase-client
+    window.location.href = `tree.html?code=${encodeURIComponent(code)}`;
+  } catch (err) {
+    console.error("Create tree failed:", err);
+    showError("Could not create tree. Please try again.");
+  } finally {
+    $("#createBtn").disabled = false;
   }
-})
+}
 
-// Confirm create tree
-confirmCreateBtn.addEventListener('click', async () => {
-  const treeName = treeNameInput.value.trim()
-  
-  if (!treeName) {
-    showError('Please enter a family tree name')
-    return
-  }
-  
-  confirmCreateBtn.disabled = true
-  confirmCreateBtn.textContent = 'Creating...'
-  
-  const result = await createFamilyTree(treeName)
-  
-  if (result.success) {
-    const treeId = result.data.id
-    const treeCode = result.treeCode
-    
-    // Create the first person (main person) with name "Name"
-    const firstPersonResult = await createFamilyMember({
-      tree_id: treeId,
-      first_name: 'Name',
-      last_name: '',
-      birthday: null,
-      death: null,
-      gender: null,
-      is_main: true
-    })
-    
-    if (firstPersonResult.success) {
-      // Redirect to tree page
-      window.location.href = `tree.html?code=${treeCode}`
-    } else {
-      showError('Error creating initial person. Please try again.')
-      confirmCreateBtn.disabled = false
-      confirmCreateBtn.textContent = 'Create Tree'
-    }
-  } else {
-    showError('Error creating tree. Please try again.')
-    confirmCreateBtn.disabled = false
-    confirmCreateBtn.textContent = 'Create Tree'
-  }
-})
+export function initLanding() {
+  $("#viewForm").addEventListener("submit", handleViewTree);
+  $("#createForm").addEventListener("submit", handleCreateTree);
+}
 
-// Enter key on tree name input
-treeNameInput.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') {
-    confirmCreateBtn.click()
-  }
-})
+// Auto-init if this script is loaded on index.html
+document.addEventListener("DOMContentLoaded", () => {
+  if (document.body.dataset.page === "landing") initLanding();
+});
