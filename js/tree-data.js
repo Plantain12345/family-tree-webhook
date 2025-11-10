@@ -1,47 +1,34 @@
-// ===== tree-data.js =====
-// Map DB rows -> family-chart input shape
-// Adjust keys to the exact API your family-chart build expects.
-
-function mapGender(g) {
-  if (!g) return "";
-  const s = String(g).toUpperCase();
-  if (s === "M") return "male";
-  if (s === "F") return "female";
+function mapGender(value) {
+  const gender = String(value ?? "").trim().toUpperCase();
+  if (gender === "M") return "male";
+  if (gender === "F") return "female";
   return "";
 }
 
-export function toFamilyChartData({ members, parentChild, spousal }) {
-  const persons = members.map((m) => ({
-    id: m.id,
-    firstName: m.first_name || "",
-    lastName: m.last_name || "",
-    gender: mapGender(m.gender),
-    birthday: m.birthday ?? null,
-    death: m.death ?? null,
-    // You can carry any metadata you like; the lib ignores unknown fields
-    isMain: !!m.is_main,
+export function buildFamilyChartPayload({ members, parentChild, spousal }) {
+  const persons = members.map((member) => ({
+    id: member.id,
+    firstName: member.first_name ?? "",
+    lastName: member.last_name ?? "",
+    gender: mapGender(member.gender),
+    birthday: member.birthday ?? null,
+    death: member.death ?? null,
+    isMain: Boolean(member.is_main),
   }));
 
-  const relationships = [];
-
-  // Parent-child (directed)
-  for (const r of parentChild) {
-    relationships.push({
+  const relationships = [
+    ...parentChild.map((row) => ({
       type: "parentChild",
-      parentId: r.parent_id,
-      childId: r.child_id,
-    });
-  }
-
-  // Spousal/partner links (undirected)
-  for (const r of spousal) {
-    relationships.push({
+      parentId: row.parent_id,
+      childId: row.child_id,
+    })),
+    ...spousal.map((row) => ({
       type: "spouse",
-      partnerOneId: r.person1_id,
-      partnerTwoId: r.person2_id,
-      status: r.relationship_type, // 'married' | 'divorced' | 'partner' | 'separated'
-    });
-  }
+      partnerOneId: row.person1_id,
+      partnerTwoId: row.person2_id,
+      status: row.relationship_type,
+    })),
+  ];
 
   return { persons, relationships };
 }
