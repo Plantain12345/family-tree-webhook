@@ -1,274 +1,97 @@
-import { 
+// ===== tree-main.js =====
+import {
   getFamilyTreeByCode,
   getFamilyMembers,
   getParentChildRelationships,
   getSpousalRelationships,
-  createFamilyMember,
-  updateFamilyMember,
-  deleteFamilyMember,
-  createParentChildRelationship,
-  createSpousalRelationship,
-  deleteParentChildRelationship,
-  deleteSpousalRelationship
-} from './supabase-client.js'
+} from "./supabase-client.js";
+import { toFamilyChartData } from "./tree-data.js";
+import { watchTree } from "./tree-sync.js";
+import { APP } from "./config.js";
 
-import { 
-  transformDatabaseToFamilyChart,
-  findMainPersonId,
-  createMemberData
-} from './tree-data.js'
+// family-chart is assumed to be globally available (as in the example)
+// e.g., included via <script src=".../family-chart.min.js"></script>
 
-import { setupRealtimeSync } from './tree-sync.js'
-
-// Global variables
-let currentTreeId = null
-let currentTreeCode = null
-let f3Chart = null
-let allMembers = []
-let allParentChildRels = []
-let allSpousalRels = []
-
-// Get tree code from URL
-const urlParams = new URLSearchParams(window.location.search)
-const treeCode = urlParams.get('code')
-
-if (!treeCode) {
-  window.location.href = 'index.html'
-} else {
-  // Wait for f3 to load before initializing
-  if (window.f3) {
-    initializeTree(treeCode)
-  } else {
-    window.addEventListener('load', () => {
-      setTimeout(() => initializeTree(treeCode), 100)
-    })
-  }
+function getQueryParam(name) {
+  const params = new URLSearchParams(location.search);
+  return params.get(name);
 }
 
-// Copy tree code to clipboard
-document.getElementById('copyCodeBtn').addEventListener('click', () => {
-  navigator.clipboard.writeText(currentTreeCode)
-  const btn = document.getElementById('copyCodeBtn')
-  const originalText = btn.textContent
-  btn.textContent = '✓'
-  setTimeout(() => {
-    btn.textContent = originalText
-  }, 2000)
-})
+function $(sel) {
+  return document.querySelector(sel);
+}
 
-async function initializeTree(code) {
+let unwatch = null;
+let chart = null;
+
+async function loadAndRender(treeCode) {
+  $("#loading").style.display = "block";
+
   try {
-    // Show loading overlay
-    document.getElementById('loadingOverlay').classList.remove('hidden')
-    
-    // Get tree info
-    const treeResult = await getFamilyTreeByCode(code)
-    if (!treeResult.success) {
-      alert('Tree not found!')
-      window.location.href = 'index.html'
-      return
-    }
-    
-    const tree = treeResult.data
-    currentTreeId = tree.id
-    currentTreeCode = tree.tree_code
-    
-    // Update UI
-    document.getElementById('treeName').textContent = tree.tree_name
-    document.getElementById('treeCodeDisplay').textContent = tree.tree_code
-    
-    // Load all data
-    const [membersResult, parentChildResult, spousalResult] = await Promise.all([
+    const tree = await getFamilyTreeByCode(treeCode);
+
+    // Header UI
+    $("#treeName").textContent = tree.tree_name || "Untitled Tree";
+    $("#treeCodeDisplay").textContent = tree.tree_code;
+
+    // Data loads
+    const [members, pc, spousal] = await Promise.all([
       getFamilyMembers(tree.id),
       getParentChildRelationships(tree.id),
-      getSpousalRelationships(tree.id)
-    ])
-    
-    if (!membersResult.success || !parentChildResult.success || !spousalResult.success) {
-      throw new Error('Failed to load tree data')
-    }
-    
-    allMembers = membersResult.data
-    allParentChildRels = parentChildResult.data
-    allSpousalRels = spousalResult.data
-    
-    // Transform data for family-chart
-    const familyChartData = transformDatabaseToFamilyChart(
-      allMembers,
-      allParentChildRels,
-      allSpousalRels
-    )
-    
-    // Initialize chart
-    createChart(familyChartData)
-    
-    // Setup realtime sync
-    setupRealtimeSync(currentTreeId, refreshTree)
-    
-    // Hide loading
-    document.getElementById('loadingOverlay').classList.add('hidden')
-    
-  } catch (error) {
-    console.error('Error initializing tree:', error)
-    alert('Error loading tree. Please try again.')
-    document.getElementById('loadingOverlay').classList.add('hidden')
-  }
-}
+      getSpousalRelationships(tree.id),
+    ]);
 
-function createChart(data) {
-  // Check if f3 is available
-  if (!window.f3) {
-    console.error('family-chart library not loaded')
-    alert('Error: Family chart library not loaded. Please refresh the page.')
-    return
-  }
-  
-  // Create family-chart instance
-  f3Chart = window.f3.createChart('#FamilyChart', data)
-    .setTransitionTime(1000)
-    .setCardXSpacing(250)
-    .setCardYSpacing(150)
-  
-  // Setup card display
-  const f3Card = f3Chart.setCardHtml()
-    .setCardDisplay([["first name", "last name"], ["birthday"]])
-  
-  // Setup edit tree functionality
-  const f3EditTree = f3Chart.editTree()
-    .setFields(["first name", "last name", "birthday", "death", "gender"])
-    .setEditFirst(true)
-    .setCardClickOpen(f3Card)
-    .onUpdate(handlePersonUpdate)
-    .onRemove(handlePersonRemove)
-  
-  // Set main person
-  const mainPersonId = findMainPersonId(allMembers)
-  if (mainPersonId) {
-    f3Chart.updateMainId(mainPersonId)
-  }
-  
-  // Initial tree update
-  f3Chart.updateTree({ initial: true })
-  
-  // Apply relationship styling to links
-  applyRelationshipStyling()
-  
-  // Store globally
-  window.f3Chart = f3Chart
-}
+    const data = toFamilyChartData({ members, parentChild: pc, spousal });
 
-// Handle person update/create
-async function handlePersonUpdate(personData) {
-  try {
-    const isNewPerson = !personData.id || personData.id.startsWith('new_')
-    
-    if (isNewPerson) {
-      // Create new person
-      const memberData = createMemberData(currentTreeId, personData.data)
-      const result = await createFamilyMember(memberData)
-      
-      if (result.success) {
-        const newMember = result.data
-        
-        // Handle relationships
-        if (personData.rels) {
-          // Parent relationships
-          if (personData.rels.father) {
-            await createParentChildRelationship(currentTreeId, personData.rels.father, newMember.id)
-          }
-          if (personData.rels.mother) {
-            await createParentChildRelationship(currentTreeId, personData.rels.mother, newMember.id)
-          }
-          
-          // Spouse relationships
-          if (personData.rels.spouses) {
-            for (const spouseId of personData.rels.spouses) {
-              await createSpousalRelationship(currentTreeId, newMember.id, spouseId, 'married')
-            }
-          }
-        }
-        
-        // Refresh tree
-        await refreshTree()
+    // Render (family-chart API)
+    if (!window.FamilyChart) throw new Error("family-chart library not loaded");
+    const container = $("#chart");
+    container.innerHTML = ""; // clear previous mount
+
+    chart = window.FamilyChart.create({
+      container,
+      data,
+      // you can pass options here as per library docs
+    });
+
+    // Live updates
+    if (unwatch) unwatch();
+    unwatch = watchTree(tree.id, async () => {
+      try {
+        const [m2, pc2, sp2] = await Promise.all([
+          getFamilyMembers(tree.id),
+          getParentChildRelationships(tree.id),
+          getSpousalRelationships(tree.id),
+        ]);
+        const d2 = toFamilyChartData({ members: m2, parentChild: pc2, spousal: sp2 });
+        chart.update(d2);
+      } catch (e) {
+        console.warn("Live refresh failed:", e);
       }
-    } else {
-      // Update existing person
-      const updates = {
-        first_name: personData.data['first name'] || '',
-        last_name: personData.data['last name'] || '',
-        birthday: personData.data['birthday'] ? parseInt(personData.data['birthday']) : null,
-        death: personData.data['death'] ? parseInt(personData.data['death']) : null,
-        gender: personData.data['gender'] || null
-      }
-      
-      await updateFamilyMember(personData.id, updates)
-      
-      // Refresh tree
-      await refreshTree()
-    }
-  } catch (error) {
-    console.error('Error updating person:', error)
-    alert('Error saving changes. Please try again.')
+    });
+  } finally {
+    $("#loading").style.display = "none";
   }
 }
 
-// Handle person removal
-async function handlePersonRemove(personId) {
+export async function initializeTree() {
+  const raw = getQueryParam("code");
+  if (!raw) {
+    alert("Missing tree code; returning to home.");
+    window.location.href = "index.html";
+    return;
+  }
+
   try {
-    await deleteFamilyMember(personId)
-    await refreshTree()
-  } catch (error) {
-    console.error('Error removing person:', error)
-    alert('Error removing person. Please try again.')
+    const code = String(raw).trim().toUpperCase();
+    if (code.length !== APP.codeLength) throw new Error("Invalid code in URL");
+    await loadAndRender(code);
+  } catch (err) {
+    console.error("Error initializing tree:", err);
+    alert("Error loading tree. Please try again.");
   }
 }
 
-// Refresh tree data
-async function refreshTree() {
-  try {
-    // Reload all data
-    const [membersResult, parentChildResult, spousalResult] = await Promise.all([
-      getFamilyMembers(currentTreeId),
-      getParentChildRelationships(currentTreeId),
-      getSpousalRelationships(currentTreeId)
-    ])
-    
-    allMembers = membersResult.data
-    allParentChildRels = parentChildResult.data
-    allSpousalRels = spousalResult.data
-    
-    // Transform and update
-    const familyChartData = transformDatabaseToFamilyChart(
-      allMembers,
-      allParentChildRels,
-      allSpousalRels
-    )
-    
-    // Update chart data
-    f3Chart.updateData(familyChartData)
-    f3Chart.updateTree({ initial: false })
-    
-    // Reapply styling
-    setTimeout(() => applyRelationshipStyling(), 500)
-    
-  } catch (error) {
-    console.error('Error refreshing tree:', error)
-  }
-}
-
-// Apply relationship styling to spousal links
-function applyRelationshipStyling() {
-  // Find all spousal links and apply styling based on relationship type
-  allSpousalRels.forEach(rel => {
-    const linkClass = `link-${rel.relationship_type.toLowerCase()}`
-    
-    // Find the link element between these two people
-    // This is a simplified approach - you may need to adjust based on family-chart's DOM structure
-    const links = document.querySelectorAll('.f3 .link')
-    links.forEach(link => {
-      // You'll need to identify which link corresponds to which relationship
-      // This may require inspecting the family-chart library's link data attributes
-      link.classList.add(linkClass)
-    })
-  })
-}
+document.addEventListener("DOMContentLoaded", () => {
+  if (document.body.dataset.page === "tree") initializeTree();
+});
