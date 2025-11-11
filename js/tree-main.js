@@ -217,7 +217,6 @@ function hookFormSubmissions() {
   console.log('🔗 Hooking into form submissions...')
   
   // Listen for form submissions by intercepting the submit button clicks
-  // We'll use event delegation on the document
   document.addEventListener('click', async (e) => {
     // Check if the clicked element is a submit button in the f3 form
     if (e.target.matches('.f3-form button[type="submit"]')) {
@@ -226,7 +225,7 @@ function hookFormSubmissions() {
       // Give the library a moment to update its internal data
       setTimeout(async () => {
         await saveTreeToDatabase()
-      }, 100)
+      }, 200)
     }
     
     // Check for delete button
@@ -235,9 +234,9 @@ function hookFormSubmissions() {
       
       setTimeout(async () => {
         await saveTreeToDatabase()
-      }, 100)
+      }, 200)
     }
-  })
+  }, true) // Use capture phase to catch it early
   
   console.log('✅ Form submission hooks set up')
 }
