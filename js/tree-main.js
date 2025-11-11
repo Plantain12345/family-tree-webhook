@@ -109,6 +109,12 @@ async function initializeTree(code) {
 }
 
 function createChart(data) {
+  // Wait for f3 to be available
+  if (!window.f3) {
+    console.error('family-chart library not loaded')
+    return
+  }
+  
   // Create family-chart instance
   f3Chart = window.f3.createChart('#FamilyChart', data)
     .setTransitionTime(1000)
@@ -116,7 +122,7 @@ function createChart(data) {
     .setCardYSpacing(150)
   
   // Setup card display
-  const f3Card = f3Chart.setCard(window.f3.CardHtml)
+  const f3Card = f3Chart.setCardHtml()
     .setCardDisplay([["first name", "last name"], ["birthday"]])
   
   // Setup edit tree functionality
