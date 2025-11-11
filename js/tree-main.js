@@ -35,7 +35,14 @@ const treeCode = urlParams.get('code')
 if (!treeCode) {
   window.location.href = 'index.html'
 } else {
-  initializeTree(treeCode)
+  // Wait for f3 to load before initializing
+  if (window.f3) {
+    initializeTree(treeCode)
+  } else {
+    window.addEventListener('load', () => {
+      setTimeout(() => initializeTree(treeCode), 100)
+    })
+  }
 }
 
 // Copy tree code to clipboard
@@ -109,9 +116,10 @@ async function initializeTree(code) {
 }
 
 function createChart(data) {
-  // Wait for f3 to be available
+  // Check if f3 is available
   if (!window.f3) {
     console.error('family-chart library not loaded')
+    alert('Error: Family chart library not loaded. Please refresh the page.')
     return
   }
   
