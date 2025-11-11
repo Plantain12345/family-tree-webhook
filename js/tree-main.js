@@ -169,9 +169,13 @@ function createChart(data) {
       .setCardDisplay([["first name", "last name"], ["birthday"]])
     
     // Setup edit tree functionality
-    f3Chart.editTree()
+    const f3Card = f3Chart.setCardHtml()
+      .setCardDisplay([["first name", "last name"], ["birthday"]])
+    
+    const f3EditTree = f3Chart.editTree()
       .setFields(["first name", "last name", "birthday", "death", "gender"])
       .setEditFirst(true)
+      .setCardClickOpen(f3Card)
     
     // Set main person
     const mainPersonId = findMainPersonId(allMembers)
@@ -179,7 +183,13 @@ function createChart(data) {
       f3Chart.updateMainId(mainPersonId)
     }
     
-    // Render tree
+    // CRITICAL: First update to render the tree
+    f3Chart.updateTree({ initial: true })
+    
+    // CRITICAL: Open the main person's form to activate edit mode
+    f3EditTree.open(f3Chart.getMainDatum())
+    
+    // CRITICAL: Update again after opening the form
     f3Chart.updateTree({ initial: true })
     
     // Hook into form submissions
