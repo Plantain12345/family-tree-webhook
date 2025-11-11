@@ -216,13 +216,11 @@ function updateChart(data) {
 function hookFormSubmissions() {
   console.log('🔗 Hooking into form submissions...')
   
-  // Listen for form submissions by intercepting the submit button clicks
+  // Listen for form submissions
   document.addEventListener('click', async (e) => {
-    // Check if the clicked element is a submit button in the f3 form
+    // Check if clicked element is submit button
     if (e.target.matches('.f3-form button[type="submit"]')) {
       console.log('💾 Form submit detected!')
-      
-      // Give the library a moment to update its internal data
       setTimeout(async () => {
         await saveTreeToDatabase()
       }, 200)
@@ -231,12 +229,11 @@ function hookFormSubmissions() {
     // Check for delete button
     if (e.target.matches('.f3-form .f3-delete-btn')) {
       console.log('🗑️ Delete button detected!')
-      
       setTimeout(async () => {
         await saveTreeToDatabase()
       }, 200)
     }
-  }, true) // Use capture phase to catch it early
+  }, true) // Use capture phase
   
   console.log('✅ Form submission hooks set up')
 }
