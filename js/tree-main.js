@@ -14,21 +14,22 @@ import {
 
 import { 
   transformDatabaseToFamilyChart,
-  findMainPersonId,
-  createMemberData
+  findMainPersonId
 } from './tree-data.js'
 
 import { setupRealtimeSync } from './tree-sync.js'
-import { wrapStoreForDatabaseSync } from './tree-sync-wrapper.js'
 
 // Global variables
 let currentTreeId = null
 let currentTreeCode = null
 let f3Chart = null
-let f3EditTree = null
 let allMembers = []
 let allParentChildRels = []
 let allSpousalRels = []
+let isSaving = false
+
+// Track chart IDs to database IDs
+const chartToDbIdMap = new Map()
 
 // Get tree code from URL
 const urlParams = new URLSearchParams(window.location.search)
@@ -40,19 +41,18 @@ if (!treeCode) {
   console.log('❌ No tree code found, redirecting to index')
   window.location.href = 'index.html'
 } else {
-  // Wait for f3 to load before initializing
-  if (window.f3) {
-    console.log('✅ f3 library already loaded')
-    initializeTree(treeCode)
-  } else {
-    console.log('⏳ Waiting for f3 library to load...')
-    window.addEventListener('load', () => {
-      setTimeout(() => {
-        console.log('✅ f3 library loaded after page load')
+  // Wait for DOM and f3 library to load
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      if (window.f3) {
+        console.log('✅ f3 library loaded')
         initializeTree(treeCode)
-      }, 500)
-    })
-  }
+      } else {
+        console.error('❌ f3 library not loaded')
+        alert('Error loading family chart library. Please refresh.')
+      }
+    }, 300)
+  })
 }
 
 // Copy tree code to clipboard
@@ -68,18 +68,13 @@ document.getElementById('copyCodeBtn').addEventListener('click', () => {
 
 async function initializeTree(code) {
   try {
-    console.log('🚀 Starting tree initialization for code:', code)
-    
-    // Show loading overlay
+    console.log('🚀 Initializing tree for code:', code)
     document.getElementById('loadingOverlay').classList.remove('hidden')
     
     // Get tree info
-    console.log('📡 Fetching tree from database...')
     const treeResult = await getFamilyTreeByCode(code)
-    console.log('📊 Tree result:', treeResult)
     
     if (!treeResult.success) {
-      console.error('❌ Tree not found in database')
       alert('Tree not found!')
       window.location.href = 'index.html'
       return
@@ -88,158 +83,32 @@ async function initializeTree(code) {
     const tree = treeResult.data
     currentTreeId = tree.id
     currentTreeCode = tree.tree_code
-    console.log('✅ Tree loaded:', { id: currentTreeId, code: currentTreeCode, name: tree.tree_name })
     
     // Update UI
     document.getElementById('treeName').textContent = tree.tree_name
     document.getElementById('treeCodeDisplay').textContent = tree.tree_code
     
     // Load all data
-    console.log('📡 Loading family members and relationships...')
-    const [membersResult, parentChildResult, spousalResult] = await Promise.all([
-      getFamilyMembers(tree.id),
-      getParentChildRelationships(tree.id),
-      getSpousalRelationships(tree.id)
-    ])
+    await loadTreeData()
     
-    console.log('📊 Members result:', membersResult)
-    console.log('📊 Parent-child result:', parentChildResult)
-    console.log('📊 Spousal result:', spousalResult)
+    // Setup realtime sync to reload when others make changes
+    setupRealtimeSync(currentTreeId, loadTreeData)
     
-    if (!membersResult.success || !parentChildResult.success || !spousalResult.success) {
-      console.error('❌ Failed to load tree data')
-      throw new Error('Failed to load tree data')
-    }
-    
-    allMembers = membersResult.data
-    allParentChildRels = parentChildResult.data
-    allSpousalRels = spousalResult.data
-    
-    console.log('✅ Data loaded:', {
-      members: allMembers.length,
-      parentChildRels: allParentChildRels.length,
-      spousalRels: allSpousalRels.length
-    })
-    
-    // Transform data for family-chart
-    console.log('🔄 Transforming data for family-chart...')
-    const familyChartData = transformDatabaseToFamilyChart(
-      allMembers,
-      allParentChildRels,
-      allSpousalRels
-    )
-    console.log('📊 Family chart data:', familyChartData)
-    
-    // Initialize chart
-    console.log('🎨 Creating chart...')
-    createChart(familyChartData)
-    
-    // Setup realtime sync
-    console.log('🔄 Setting up real-time sync...')
-    setupRealtimeSync(currentTreeId, refreshTree)
-    
-    // Hide loading
     document.getElementById('loadingOverlay').classList.add('hidden')
-    console.log('✅ Tree initialization complete!')
+    console.log('✅ Tree initialized!')
     
   } catch (error) {
     console.error('❌ Error initializing tree:', error)
-    console.error('Error details:', {
-      message: error.message,
-      stack: error.stack
-    })
-    alert('Error loading tree. Check console for details.')
+    alert('Error loading tree. Please try again.')
     document.getElementById('loadingOverlay').classList.add('hidden')
   }
 }
 
-function createChart(data) {
-  console.log('🎨 createChart called with data:', data)
-  
-  // Check if f3 is available
-  if (!window.f3) {
-    console.error('❌ f3 library not available on window object')
-    alert('Error: Family chart library not loaded. Please refresh the page.')
-    return
-  }
-  
-  console.log('✅ f3 library available')
+async function loadTreeData() {
+  console.log('📡 Loading tree data from Supabase...')
   
   try {
-    // Create family-chart instance
-    console.log('🏗️ Creating f3 chart instance...')
-    f3Chart = window.f3.createChart('#FamilyChart', data)
-      .setTransitionTime(1000)
-      .setCardXSpacing(250)
-      .setCardYSpacing(150)
-    
-    console.log('✅ Chart instance created')
-    
-    // Setup card display
-    console.log('🎨 Setting up card display...')
-    const f3Card = f3Chart.setCardHtml()
-      .setCardDisplay([["first name", "last name"], ["birthday"]])
-    
-    console.log('✅ Card display configured')
-    
-    // Setup edit tree functionality - THIS IS THE KEY PART!
-    console.log('✏️ Setting up edit functionality...')
-    f3EditTree = f3Chart.editTree()
-      .setFields(["first name", "last name", "birthday", "death", "gender"])
-      .setEditFirst(true)  // true = open form on click, false = open info on click
-      .setCardClickOpen(f3Card)
-    
-    console.log('✅ Edit functionality configured')
-    
-    // Set main person
-    const mainPersonId = findMainPersonId(allMembers)
-    console.log('👤 Main person ID:', mainPersonId)
-    
-    if (mainPersonId) {
-      f3Chart.updateMainId(mainPersonId)
-    }
-    
-    // Initial tree update - IMPORTANT: Call this twice for edit mode
-    console.log('🔄 Updating tree (first time)...')
-    f3Chart.updateTree({ initial: true })
-    
-    // Open the main person's form to start editing
-    console.log('📝 Opening main person form...')
-    f3EditTree.open(f3Chart.getMainDatum())
-    
-    // Update tree again after opening form
-    console.log('🔄 Updating tree (second time)...')
-    f3Chart.updateTree({ initial: true })
-    
-    // Apply relationship styling to links
-    setTimeout(() => applyRelationshipStyling(), 1000)
-    
-    // Store globally
-    window.f3Chart = f3Chart
-    window.f3EditTree = f3EditTree
-    
-    // Wrap the store to sync changes to database
-    console.log('🔄 Setting up database sync wrapper...')
-    wrapStoreForDatabaseSync(f3Chart, currentTreeId)
-    
-    console.log('✅ Chart creation complete!')
-    
-  } catch (error) {
-    console.error('❌ Error creating chart:', error)
-    console.error('Error details:', {
-      message: error.message,
-      stack: error.stack
-    })
-    alert('Error creating chart. Check console for details.')
-  }
-}
-
-// Refresh tree data from database
-async function refreshTree() {
-  console.log('🔄 Refreshing tree from database...')
-  
-  try {
-    // Reload all data
+    // Load all data from Supabase
     const [membersResult, parentChildResult, spousalResult] = await Promise.all([
       getFamilyMembers(currentTreeId),
       getParentChildRelationships(currentTreeId),
@@ -247,57 +116,220 @@ async function refreshTree() {
     ])
     
     if (!membersResult.success || !parentChildResult.success || !spousalResult.success) {
-      console.error('❌ Failed to refresh tree data')
-      return
+      throw new Error('Failed to load tree data')
     }
     
     allMembers = membersResult.data
     allParentChildRels = parentChildResult.data
     allSpousalRels = spousalResult.data
     
-    console.log('✅ Data refreshed:', {
+    console.log('✅ Loaded from Supabase:', {
       members: allMembers.length,
-      parentChildRels: allParentChildRels.length,
-      spousalRels: allSpousalRels.length
+      relationships: allParentChildRels.length + allSpousalRels.length
     })
     
-    // Transform and update
+    // Build ID mapping (database ID = chart ID, we use same IDs)
+    chartToDbIdMap.clear()
+    allMembers.forEach(member => {
+      chartToDbIdMap.set(member.id, member.id)
+    })
+    
+    // Transform to family-chart format
     const familyChartData = transformDatabaseToFamilyChart(
       allMembers,
       allParentChildRels,
       allSpousalRels
     )
     
-    // Update chart data
-    if (f3Chart && f3Chart.updateData) {
-      f3Chart.updateData(familyChartData)
-      f3Chart.updateTree({ initial: false })
+    // Create or update chart
+    if (!f3Chart) {
+      createChart(familyChartData)
+    } else {
+      updateChart(familyChartData)
     }
     
-    // Reapply styling
-    setTimeout(() => applyRelationshipStyling(), 500)
-    
-    console.log('✅ Tree refresh complete')
-    
   } catch (error) {
-    console.error('❌ Error refreshing tree:', error)
+    console.error('❌ Error loading tree data:', error)
+    throw error
   }
 }
 
-// Apply relationship styling to spousal links
-function applyRelationshipStyling() {
-  console.log('🎨 Applying relationship styling...')
+function createChart(data) {
+  console.log('🎨 Creating chart with', data.length, 'members')
   
-  // Find all spousal links and apply styling based on relationship type
-  allSpousalRels.forEach(rel => {
-    const linkClass = `link-${rel.relationship_type.toLowerCase()}`
+  try {
+    // Create chart
+    f3Chart = window.f3.createChart('#FamilyChart', data)
+      .setTransitionTime(1000)
+      .setCardXSpacing(250)
+      .setCardYSpacing(150)
     
-    // Find the link element between these two people
-    const links = document.querySelectorAll('.f3 .link')
-    links.forEach(link => {
-      link.classList.add(linkClass)
-    })
+    // Setup card display
+    f3Chart.setCardHtml()
+      .setCardDisplay([["first name", "last name"], ["birthday"]])
+    
+    // Setup edit tree functionality
+    f3Chart.editTree()
+      .setFields(["first name", "last name", "birthday", "death", "gender"])
+      .setEditFirst(true)
+    
+    // Set main person
+    const mainPersonId = findMainPersonId(allMembers)
+    if (mainPersonId) {
+      f3Chart.updateMainId(mainPersonId)
+    }
+    
+    // Render tree
+    f3Chart.updateTree({ initial: true })
+    
+    // Hook into form submissions
+    hookFormSubmissions()
+    
+    window.f3Chart = f3Chart
+    console.log('✅ Chart created and interactive!')
+    
+  } catch (error) {
+    console.error('❌ Error creating chart:', error)
+    throw error
+  }
+}
+
+function updateChart(data) {
+  console.log('🔄 Updating chart with new data')
+  
+  if (!isSaving) { // Don't update if we're currently saving
+    f3Chart.updateData(data)
+    f3Chart.updateTree({ initial: false })
+  }
+}
+
+function hookFormSubmissions() {
+  console.log('🔗 Hooking into form submissions...')
+  
+  // Listen for form submissions by intercepting the submit button clicks
+  // We'll use event delegation on the document
+  document.addEventListener('click', async (e) => {
+    // Check if the clicked element is a submit button in the f3 form
+    if (e.target.matches('.f3-form button[type="submit"]')) {
+      console.log('💾 Form submit detected!')
+      
+      // Give the library a moment to update its internal data
+      setTimeout(async () => {
+        await saveTreeToDatabase()
+      }, 100)
+    }
+    
+    // Check for delete button
+    if (e.target.matches('.f3-form .f3-delete-btn')) {
+      console.log('🗑️ Delete button detected!')
+      
+      setTimeout(async () => {
+        await saveTreeToDatabase()
+      }, 100)
+    }
   })
   
-  console.log('✅ Styling applied')
+  console.log('✅ Form submission hooks set up')
+}
+
+async function saveTreeToDatabase() {
+  if (isSaving) return
+  
+  isSaving = true
+  console.log('💾 Saving entire tree to Supabase...')
+  
+  try {
+    // Get current chart data
+    const currentChartData = f3Chart.store.getData()
+    
+    // Find what changed compared to our database state
+    // For simplicity, we'll do a full sync approach:
+    // 1. Get all members from chart
+    // 2. Update/create each one in database
+    // 3. Update relationships
+    
+    for (const datum of currentChartData) {
+      const dbId = chartToDbIdMap.get(datum.id)
+      
+      const memberData = {
+        tree_id: currentTreeId,
+        first_name: datum.data['first name'] || '',
+        last_name: datum.data['last name'] || '',
+        birthday: datum.data['birthday'] ? parseInt(datum.data['birthday']) : null,
+        death: datum.data['death'] ? parseInt(datum.data['death']) : null,
+        gender: datum.data['gender'] || null,
+        is_main: false
+      }
+      
+      if (!dbId) {
+        // New member - create in database
+        console.log('🆕 Creating new member:', memberData.first_name)
+        const result = await createFamilyMember(memberData)
+        
+        if (result.success) {
+          chartToDbIdMap.set(datum.id, result.data.id)
+          
+          // Create relationships
+          await syncRelationships(datum, result.data.id)
+        }
+      } else {
+        // Existing member - update
+        console.log('📝 Updating member:', memberData.first_name)
+        await updateFamilyMember(dbId, memberData)
+        
+        // Update relationships
+        await syncRelationships(datum, dbId)
+      }
+    }
+    
+    // Reload from database to ensure sync
+    setTimeout(() => {
+      isSaving = false
+      loadTreeData()
+    }, 1000)
+    
+    console.log('✅ Save complete!')
+    
+  } catch (error) {
+    console.error('❌ Error saving tree:', error)
+    isSaving = false
+  }
+}
+
+async function syncRelationships(datum, dbId) {
+  // This is a simplified version - in production you'd want to:
+  // 1. Compare existing relationships
+  // 2. Only create new ones
+  // 3. Delete removed ones
+  
+  // For now, we'll rely on the loadTreeData to refresh everything
+  console.log('🔗 Syncing relationships for:', dbId)
+  
+  // Parent relationships
+  if (datum.rels?.father) {
+    const fatherDbId = chartToDbIdMap.get(datum.rels.father)
+    if (fatherDbId) {
+      await createParentChildRelationship(currentTreeId, fatherDbId, dbId)
+        .catch(e => console.log('Relationship might already exist'))
+    }
+  }
+  
+  if (datum.rels?.mother) {
+    const motherDbId = chartToDbIdMap.get(datum.rels.mother)
+    if (motherDbId) {
+      await createParentChildRelationship(currentTreeId, motherDbId, dbId)
+        .catch(e => console.log('Relationship might already exist'))
+    }
+  }
+  
+  // Spouse relationships
+  if (datum.rels?.spouses) {
+    for (const spouseChartId of datum.rels.spouses) {
+      const spouseDbId = chartToDbIdMap.get(spouseChartId)
+      if (spouseDbId) {
+        await createSpousalRelationship(currentTreeId, dbId, spouseDbId, 'married')
+          .catch(e => console.log('Relationship might already exist'))
+      }
+    }
+  }
 }
