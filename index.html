@@ -1,73 +1,62 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Family Tree</title>
-    <link rel="stylesheet" href="./css/landing.css" />
-  </head>
-  <body data-page="landing">
-    <main class="card">
-      <header>
-        <h1>🌳 Family Tree</h1>
-        <p class="intro">Open an existing tree or spin up a new one.</p>
-      </header>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Family Tree</title>
+  <link rel="stylesheet" href="css/landing.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="tree-icon">🌳</div>
+      <h1>Family Tree</h1>
+    </div>
+    
+    <p class="subtitle">Enter a tree code to view an existing family tree</p>
+    
+    <div class="form-section">
+      <label for="treeCode">Tree Code</label>
+      <input 
+        type="text" 
+        id="treeCode" 
+        placeholder="ABC123"
+        maxlength="6"
+        autocomplete="off"
+      >
+      <button id="viewTreeBtn" class="btn btn-primary">View Tree</button>
+    </div>
+    
+    <div class="divider">
+      <span>OR</span>
+    </div>
+    
+    <button id="createTreeBtn" class="btn btn-secondary">Create New Tree</button>
+    
+    <p class="hint">Enter a 6-character alphanumeric code</p>
+    
+    <div id="errorMessage" class="error-message"></div>
+  </div>
 
-      <section>
-        <h2>View existing tree</h2>
-        <form id="viewForm" class="form">
-          <label for="treeCode">Tree code</label>
-          <input id="treeCode" name="treeCode" maxlength="6" autocomplete="off" placeholder="ABC123" />
-          <button type="submit" class="btn">View tree</button>
-        </form>
-      </section>
+  <!-- Create Tree Modal -->
+  <div id="createModal" class="modal">
+    <div class="modal-content">
+      <span class="close">&times;</span>
+      <h2>Create New Family Tree</h2>
+      <div class="form-section">
+        <label for="treeName">Family Tree Name</label>
+        <input 
+          type="text" 
+          id="treeName" 
+          placeholder="Smith Family Tree"
+          maxlength="255"
+        >
+        <button id="confirmCreateBtn" class="btn btn-primary">Create Tree</button>
+      </div>
+    </div>
+  </div>
 
-      <div class="divider" role="presentation"><span>or</span></div>
-
-      <section>
-        <h2>Create new tree</h2>
-        <form id="createForm" class="form">
-          <label for="treeName">Family tree name</label>
-          <input id="treeName" name="treeName" placeholder="e.g. De Coninck" />
-
-          <div class="grid">
-            <label class="field">
-              <span>Starter first name</span>
-              <input id="firstName" name="firstName" placeholder="First name" />
-            </label>
-            <label class="field">
-              <span>Starter last name</span>
-              <input id="lastName" name="lastName" placeholder="Last name" />
-            </label>
-          </div>
-
-          <div class="grid">
-            <label class="field">
-              <span>Birth year</span>
-              <input id="birthday" name="birthday" type="number" inputmode="numeric" />
-            </label>
-            <label class="field">
-              <span>Death year</span>
-              <input id="death" name="death" type="number" inputmode="numeric" />
-            </label>
-          </div>
-
-          <label for="gender">Gender</label>
-          <select id="gender" name="gender">
-            <option value="U">Unspecified</option>
-            <option value="M">Male</option>
-            <option value="F">Female</option>
-          </select>
-
-          <button id="createBtn" type="submit" class="btn primary">Create new tree</button>
-        </form>
-      </section>
-
-      <footer>
-        <p class="hint">Tree codes are six uppercase letters or numbers.</p>
-      </footer>
-    </main>
-
-    <script type="module" src="./js/landing.js"></script>
-  </body>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script type="module" src="js/landing.js"></script>
+</body>
 </html>
