@@ -30,11 +30,7 @@ let allParentChildRels = []
 let allSpousalRels = []
 let isSaving = false
 let isLoadingFromDatabase = false
-
-// Undo/Redo functionality
-let operationHistory = []
-let currentHistoryIndex = -1
-const MAX_HISTORY = 50
+let formHooksSetup = false
 
 // Get tree code from URL
 const urlParams = new URLSearchParams(window.location.search)
@@ -70,17 +66,6 @@ document.getElementById('copyCodeBtn').addEventListener('click', () => {
   }, 2000)
 })
 
-// Undo/Redo keyboard shortcuts
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-    e.preventDefault()
-    undo()
-  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
-    e.preventDefault()
-    redo()
-  }
-})
-
 async function initializeTree(code) {
   try {
     console.log('🚀 Initializing tree for code:', code)
@@ -105,9 +90,6 @@ async function initializeTree(code) {
     
     // Setup realtime sync with debounced reload
     setupRealtimeSync(currentTreeId, handleRealtimeUpdate)
-    
-    // Setup undo/redo buttons
-    setupUndoRedoUI()
     
     document.getElementById('loadingOverlay').classList.add('hidden')
     console.log('✅ Tree initialized!')
@@ -190,7 +172,7 @@ function createChart(data) {
         ["birthday", "death"]
       ])
     
-    // Setup edit tree with custom field labels and no gender text field
+    // Setup edit tree
     f3EditTree = f3Chart.editTree()
       .setFields(["first name", "last name", "birthday", "death"])
       .setEditFirst(true)
@@ -203,10 +185,13 @@ function createChart(data) {
     
     f3Chart.updateTree({ initial: true })
     
-    // Customize form labels and remove gender text field after render
+    // Customize form after initial render
     setTimeout(() => {
-      customizeFormFields()
-      setupFormHooks()
+      customizeForm()
+      if (!formHooksSetup) {
+        setupFormHooks()
+        formHooksSetup = true
+      }
     }, 500)
     
     window.f3Chart = f3Chart
@@ -229,13 +214,21 @@ function updateChartFromDatabase(data) {
       
       // Re-customize form after update
       setTimeout(() => {
-        customizeFormFields()
-        setupFormHooks()
+        customizeForm()
       }, 500)
     } catch (error) {
       console.error('Error updating chart:', error)
     }
   }
+}
+
+// Customize form labels and button text
+function customizeForm() {
+  // Customize field labels
+  customizeFormFields()
+  
+  // Customize "Add" card labels
+  customizeAddCardLabels()
 }
 
 // Customize form field labels
@@ -259,7 +252,7 @@ function customizeFormFields() {
     deathLabel.textContent = 'Year of death'
   }
   
-  // Remove gender text input field (keep only radio buttons)
+  // Hide gender text input field (keep only radio buttons)
   const genderInput = form.querySelector('input[name="gender"][type="text"]')
   if (genderInput) {
     const genderFormField = genderInput.closest('.f3-form-field')
@@ -268,7 +261,7 @@ function customizeFormFields() {
     }
   }
   
-  // Ensure radio buttons update the hidden gender field when changed
+  // Ensure radio buttons update the hidden gender field
   const radioButtons = form.querySelectorAll('input[name="gender"][type="radio"]')
   radioButtons.forEach(radio => {
     radio.addEventListener('change', () => {
@@ -277,35 +270,92 @@ function customizeFormFields() {
       }
     })
   })
+  
+  // Add relationship type selector for spouse forms
+  addRelationshipTypeSelector(form)
 }
 
-// Setup form submission hooks
+// Add relationship type selector to spouse forms
+function addRelationshipTypeSelector(form) {
+  // Check if this is a spouse form by looking for existing spouse in the data
+  const formTitle = form.querySelector('.f3-form-title')
+  if (!formTitle) return
+  
+  // Only add for spouse relationships
+  const isSpouseForm = formTitle.textContent.includes('Partner')
+  if (!isSpouseForm) return
+  
+  // Check if selector already exists
+  if (form.querySelector('.relationship-type-selector')) return
+  
+  // Create relationship type selector
+  const relTypeDiv = document.createElement('div')
+  relTypeDiv.className = 'f3-form-field relationship-type-selector'
+  relTypeDiv.innerHTML = `
+    <label>Relationship Type</label>
+    <select name="relationship_type" class="relationship-type-select">
+      <option value="married">Married</option>
+      <option value="partner">Partner</option>
+      <option value="divorced">Divorced</option>
+      <option value="separated">Separated</option>
+    </select>
+  `
+  
+  // Insert after gender field
+  const genderField = form.querySelector('.f3-radio-group')
+  if (genderField && genderField.parentNode) {
+    genderField.parentNode.insertBefore(relTypeDiv, genderField.nextSibling)
+  }
+}
+
+// Customize "Add" card labels
+function customizeAddCardLabels() {
+  // Change "Add Father" and "Add Mother" to "Add Parent"
+  document.querySelectorAll('.card-to-add').forEach(card => {
+    const label = card.querySelector('.card-label')
+    if (label) {
+      const text = label.textContent.trim()
+      if (text === 'Add Father' || text === 'Add Mother') {
+        label.textContent = 'Add Parent'
+      } else if (text === 'Add Son' || text === 'Add Daughter') {
+        label.textContent = 'Add Child'
+      } else if (text === 'Add Spouse') {
+        label.textContent = 'Add Partner'
+      }
+    }
+  })
+}
+
+// Setup form submission hooks (only once)
 function setupFormHooks() {
   console.log('🔗 Setting up form hooks...')
   
-  const formContainer = document.querySelector('.f3-form-cont')
-  if (!formContainer) {
-    console.log('Form container not found yet')
-    return
-  }
-  
-  // Remove old listeners by cloning
-  const newFormContainer = formContainer.cloneNode(true)
-  formContainer.parentNode.replaceChild(newFormContainer, formContainer)
-  
-  // Use event delegation for form submissions
-  newFormContainer.addEventListener('submit', async (e) => {
-    e.preventDefault()
-    console.log('💾 Form submit intercepted')
-    
-    // Small delay to let family-chart update its internal state
-    setTimeout(async () => {
-      await saveTreeToDatabase()
-    }, 100)
+  // Use event delegation on document level to catch all form submissions
+  document.addEventListener('submit', async (e) => {
+    // Check if this is the family form
+    if (e.target.id === 'familyForm') {
+      e.preventDefault()
+      console.log('💾 Form submit intercepted')
+      
+      // Get relationship type if it's a spouse form
+      let relationshipType = 'married' // default
+      const relTypeSelect = e.target.querySelector('.relationship-type-select')
+      if (relTypeSelect) {
+        relationshipType = relTypeSelect.value
+      }
+      
+      // Store for later use in save
+      window.lastRelationshipType = relationshipType
+      
+      // Small delay to let family-chart update its internal state
+      setTimeout(async () => {
+        await saveTreeToDatabase()
+      }, 100)
+    }
   }, true)
   
   // Listen for delete button clicks
-  newFormContainer.addEventListener('click', async (e) => {
+  document.addEventListener('click', async (e) => {
     if (e.target.classList.contains('f3-delete-btn')) {
       console.log('🗑️ Delete button clicked')
       
@@ -327,8 +377,6 @@ async function saveTreeToDatabase() {
   
   isSaving = true
   console.log('💾 Saving tree to database...')
-  
-  const beforeState = captureState()
   
   try {
     const currentChartData = f3Chart.store.getData()
@@ -365,7 +413,7 @@ async function saveTreeToDatabase() {
       await deleteFamilyMember(deletedId)
     }
     
-    // STEP 2: Create all new members FIRST (before creating relationships)
+    // STEP 2: Create all new members FIRST
     const newMembersData = []
     for (const newId of newMemberIds) {
       const datum = currentChartData.find(d => d.id === newId)
@@ -420,7 +468,7 @@ async function saveTreeToDatabase() {
       }
     }
     
-    // STEP 4: Now create relationships for new members
+    // STEP 4: Create relationships for new members
     for (const { id, rels } of newMembersData) {
       await syncRelationshipsForMember(rels, id)
     }
@@ -434,9 +482,6 @@ async function saveTreeToDatabase() {
     
     // STEP 6: Auto-create spousal relationships for parents
     await autoCreateParentSpouseRelationships(currentChartData)
-    
-    const afterState = await reloadStateFromDatabase()
-    addToHistory('save', beforeState, afterState)
     
     showSuccess('Changes saved')
     
@@ -453,16 +498,14 @@ async function saveTreeToDatabase() {
   }
 }
 
-// Auto-create spousal relationships between parents of same child
+// Auto-create spousal relationships between parents
 async function autoCreateParentSpouseRelationships(chartData) {
   console.log('💑 Auto-creating parent spouse relationships...')
   
-  // Find all children with both father and mother
   for (const person of chartData) {
     const { father, mother } = person.rels || {}
     
     if (father && mother) {
-      // Check if spousal relationship exists
       const existingSpouseRel = allSpousalRels.find(r =>
         (r.person1_id === father && r.person2_id === mother) ||
         (r.person1_id === mother && r.person2_id === father)
@@ -470,27 +513,19 @@ async function autoCreateParentSpouseRelationships(chartData) {
       
       if (!existingSpouseRel) {
         console.log('💑 Creating spouse relationship between parents')
-        const result = await createSpousalRelationship(currentTreeId, father, mother, 'married')
+        
+        // Use the relationship type from the form if available
+        const relType = window.lastRelationshipType || 'married'
+        
+        const result = await createSpousalRelationship(currentTreeId, father, mother, relType)
         if (result.success && result.data) {
           allSpousalRels.push(result.data)
         }
+        
+        // Clear the stored relationship type
+        window.lastRelationshipType = null
       }
     }
-  }
-}
-
-// Reload state from database (for history)
-async function reloadStateFromDatabase() {
-  const [membersResult, parentChildResult, spousalResult] = await Promise.all([
-    getFamilyMembers(currentTreeId),
-    getParentChildRelationships(currentTreeId),
-    getSpousalRelationships(currentTreeId)
-  ])
-  
-  return {
-    members: membersResult.data,
-    parentChildRels: parentChildResult.data,
-    spousalRels: spousalResult.data
   }
 }
 
@@ -567,7 +602,10 @@ async function syncRelationshipsForMember(rels, memberId) {
         )
         
         if (!existing) {
-          const result = await createSpousalRelationship(currentTreeId, memberId, spouseId, 'married')
+          // Use the relationship type from form or default to married
+          const relType = window.lastRelationshipType || 'married'
+          
+          const result = await createSpousalRelationship(currentTreeId, memberId, spouseId, relType)
           if (result.success && result.data) {
             allSpousalRels.push(result.data)
           }
@@ -588,191 +626,6 @@ async function syncRelationshipsForMember(rels, memberId) {
     
   } catch (error) {
     console.error('Error syncing relationships:', error)
-  }
-}
-
-// Show modal to change relationship type
-function showRelationshipTypeModal(person1Id, person2Id) {
-  const rel = allSpousalRels.find(r => 
-    (r.person1_id === person1Id && r.person2_id === person2Id) ||
-    (r.person1_id === person2Id && r.person2_id === person1Id)
-  )
-  
-  if (!rel) return
-  
-  const currentType = rel.relationship_type
-  
-  const modal = document.createElement('div')
-  modal.className = 'relationship-modal'
-  modal.innerHTML = `
-    <div class="relationship-modal-content">
-      <h3>Relationship Type</h3>
-      <div class="relationship-types">
-        <button class="rel-type-btn ${currentType === 'married' ? 'active' : ''}" data-type="married">
-          💍 Married
-        </button>
-        <button class="rel-type-btn ${currentType === 'divorced' ? 'active' : ''}" data-type="divorced">
-          💔 Divorced
-        </button>
-        <button class="rel-type-btn ${currentType === 'partner' ? 'active' : ''}" data-type="partner">
-          🤝 Partner
-        </button>
-        <button class="rel-type-btn ${currentType === 'separated' ? 'active' : ''}" data-type="separated">
-          ↔️ Separated
-        </button>
-      </div>
-      <button class="close-modal-btn">Close</button>
-    </div>
-  `
-  
-  document.body.appendChild(modal)
-  
-  modal.querySelectorAll('.rel-type-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const newType = btn.dataset.type
-      await updateRelationshipType(rel.id, newType)
-      modal.remove()
-    })
-  })
-  
-  modal.querySelector('.close-modal-btn').addEventListener('click', () => {
-    modal.remove()
-  })
-  
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) {
-      modal.remove()
-    }
-  })
-}
-
-async function updateRelationshipType(relationshipId, newType) {
-  try {
-    const beforeState = captureState()
-    
-    const result = await updateSpousalRelationship(relationshipId, newType)
-    
-    if (result.success) {
-      const rel = allSpousalRels.find(r => r.id === relationshipId)
-      if (rel) {
-        rel.relationship_type = newType
-      }
-      
-      await loadTreeData()
-      
-      addToHistory('update_relationship', beforeState, captureState())
-      showSuccess('Relationship type updated')
-    }
-  } catch (error) {
-    console.error('Error updating relationship type:', error)
-    showError('Failed to update relationship type')
-  }
-}
-
-// UNDO/REDO FUNCTIONALITY
-function captureState() {
-  return {
-    members: JSON.parse(JSON.stringify(allMembers)),
-    parentChildRels: JSON.parse(JSON.stringify(allParentChildRels)),
-    spousalRels: JSON.parse(JSON.stringify(allSpousalRels))
-  }
-}
-
-function addToHistory(action, beforeState, afterState) {
-  operationHistory = operationHistory.slice(0, currentHistoryIndex + 1)
-  
-  operationHistory.push({
-    action,
-    before: beforeState,
-    after: afterState,
-    timestamp: Date.now()
-  })
-  
-  if (operationHistory.length > MAX_HISTORY) {
-    operationHistory.shift()
-  } else {
-    currentHistoryIndex++
-  }
-  
-  updateUndoRedoButtons()
-}
-
-async function undo() {
-  if (currentHistoryIndex < 0) {
-    showError('Nothing to undo')
-    return
-  }
-  
-  const operation = operationHistory[currentHistoryIndex]
-  console.log('⏪ Undoing:', operation.action)
-  
-  await restoreState(operation.before)
-  currentHistoryIndex--
-  updateUndoRedoButtons()
-  showSuccess('Undo successful')
-}
-
-async function redo() {
-  if (currentHistoryIndex >= operationHistory.length - 1) {
-    showError('Nothing to redo')
-    return
-  }
-  
-  currentHistoryIndex++
-  const operation = operationHistory[currentHistoryIndex]
-  console.log('⏩ Redoing:', operation.action)
-  
-  await restoreState(operation.after)
-  updateUndoRedoButtons()
-  showSuccess('Redo successful')
-}
-
-async function restoreState(state) {
-  allMembers = state.members
-  allParentChildRels = state.parentChildRels
-  allSpousalRels = state.spousalRels
-  
-  const familyChartData = transformDatabaseToFamilyChart(
-    allMembers,
-    allParentChildRels,
-    allSpousalRels
-  )
-  
-  f3Chart.updateData(familyChartData)
-  f3Chart.updateTree({ initial: false })
-}
-
-function setupUndoRedoUI() {
-  const undoBtn = document.getElementById('undoBtn')
-  const redoBtn = document.getElementById('redoBtn')
-  
-  if (undoBtn) {
-    undoBtn.addEventListener('click', undo)
-  }
-  
-  if (redoBtn) {
-    redoBtn.addEventListener('click', redo)
-  }
-  
-  updateUndoRedoButtons()
-}
-
-function updateUndoRedoButtons() {
-  const undoBtn = document.getElementById('undoBtn')
-  const redoBtn = document.getElementById('redoBtn')
-  
-  if (undoBtn) {
-    undoBtn.disabled = currentHistoryIndex < 0
-    undoBtn.title = currentHistoryIndex >= 0 ? 
-      `Undo ${operationHistory[currentHistoryIndex]?.action}` : 
-      'Nothing to undo'
-  }
-  
-  if (redoBtn) {
-    redoBtn.disabled = currentHistoryIndex >= operationHistory.length - 1
-    redoBtn.title = currentHistoryIndex < operationHistory.length - 1 ? 
-      `Redo ${operationHistory[currentHistoryIndex + 1]?.action}` : 
-      'Nothing to redo'
   }
 }
 
