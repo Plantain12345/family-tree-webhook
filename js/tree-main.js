@@ -146,7 +146,7 @@ function createChart(data) {
       .setCardDisplay([["first name", "last name"], ["birthday"]])
     
     const f3EditTree = f3Chart.editTree()
-      .setFields(["first name", "last name", "birthday", "death", "gender"])
+      .setFields(["first name", "last name", "birthday"])
       .setEditFirst(true)
       .setCardClickOpen(f3Card)
     
@@ -208,13 +208,19 @@ async function saveTreeToDatabase() {
     for (const datum of currentChartData) {
       const dbId = chartToDbIdMap.get(datum.id)
       
+      // Get gender from the datum (family-chart stores it)
+      let genderValue = null
+      if (datum.data && datum.data.gender) {
+        genderValue = datum.data.gender
+      }
+      
       const memberData = {
         tree_id: currentTreeId,
         first_name: datum.data['first name'] || '',
         last_name: datum.data['last name'] || '',
         birthday: datum.data['birthday'] ? parseInt(datum.data['birthday']) : null,
-        death: datum.data['death'] ? parseInt(datum.data['death']) : null,
-        gender: datum.data['gender'] || null,
+        death: null, // We're not using death field for now
+        gender: genderValue,
         is_main: false
       }
       
