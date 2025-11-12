@@ -13,45 +13,6 @@
       padding: 0; 
     }
     
-    /* Undo/Redo Buttons */
-    .undo-redo-controls {
-      position: absolute;
-      top: 15px;
-      right: 250px;
-      z-index: 101;
-      display: flex;
-      gap: 10px;
-    }
-    
-    .undo-redo-btn {
-      background-color: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.3);
-      color: #fff;
-      padding: 8px 15px;
-      border-radius: 5px;
-      cursor: pointer;
-      font-size: 14px;
-      transition: all 0.3s ease;
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-    
-    .undo-redo-btn:hover:not(:disabled) {
-      background-color: rgba(255, 255, 255, 0.2);
-      border-color: #87CEEB;
-      transform: translateY(-2px);
-    }
-    
-    .undo-redo-btn:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-    
-    .undo-redo-btn:active:not(:disabled) {
-      transform: translateY(0);
-    }
-    
     /* Relationship Modal */
     .relationship-modal {
       position: fixed;
@@ -181,6 +142,29 @@
     .link-married {
       stroke-width: 2px;
     }
+    
+    /* Relationship type selector in form */
+    .relationship-type-selector {
+      margin: 15px 0;
+    }
+    
+    .relationship-type-selector label {
+      font-weight: bold;
+      font-size: 12px;
+      display: block;
+      opacity: 0.8;
+      margin-bottom: 5px;
+    }
+    
+    .relationship-type-select {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: var(--background-color);
+      color: currentColor;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
@@ -193,18 +177,6 @@
         <span id="treeCodeDisplay" class="tree-code"></span>
         <button id="copyCodeBtn" class="copy-btn" title="Copy code">📋</button>
       </div>
-    </div>
-    
-    <!-- Undo/Redo Controls -->
-    <div class="undo-redo-controls">
-      <button id="undoBtn" class="undo-redo-btn" title="Undo (Ctrl+Z)">
-        <span>⎌</span>
-        <span>Undo</span>
-      </button>
-      <button id="redoBtn" class="undo-redo-btn" title="Redo (Ctrl+Y)">
-        <span>⎌</span>
-        <span>Redo</span>
-      </button>
     </div>
   </div>
 
