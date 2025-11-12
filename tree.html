@@ -6,7 +6,182 @@
   <title>Family Tree</title>
   <link rel="stylesheet" href="css/family-chart.css">
   <link rel="stylesheet" href="css/tree.css">
-  <style> body { font-family: 'Arial', sans-serif; margin: 0; padding: 0; } </style>
+  <style>
+    body { 
+      font-family: 'Arial', sans-serif; 
+      margin: 0; 
+      padding: 0; 
+    }
+    
+    /* Undo/Redo Buttons */
+    .undo-redo-controls {
+      position: absolute;
+      top: 15px;
+      right: 250px;
+      z-index: 101;
+      display: flex;
+      gap: 10px;
+    }
+    
+    .undo-redo-btn {
+      background-color: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      color: #fff;
+      padding: 8px 15px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.3s ease;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    
+    .undo-redo-btn:hover:not(:disabled) {
+      background-color: rgba(255, 255, 255, 0.2);
+      border-color: #87CEEB;
+      transform: translateY(-2px);
+    }
+    
+    .undo-redo-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    
+    .undo-redo-btn:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    
+    /* Relationship Modal */
+    .relationship-modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.7);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: fadeIn 0.3s ease;
+    }
+    
+    .relationship-modal-content {
+      background-color: rgb(33, 33, 33);
+      padding: 30px;
+      border-radius: 10px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+      min-width: 300px;
+      color: #fff;
+    }
+    
+    .relationship-modal-content h3 {
+      margin: 0 0 20px 0;
+      color: #87CEEB;
+      text-align: center;
+    }
+    
+    .relationship-types {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    
+    .rel-type-btn {
+      padding: 12px 20px;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      background-color: rgba(255, 255, 255, 0.05);
+      color: #fff;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: all 0.3s ease;
+      text-align: left;
+    }
+    
+    .rel-type-btn:hover {
+      background-color: rgba(255, 255, 255, 0.1);
+      border-color: #87CEEB;
+      transform: translateX(5px);
+    }
+    
+    .rel-type-btn.active {
+      background-color: #87CEEB;
+      color: #1e3c72;
+      border-color: #87CEEB;
+    }
+    
+    .close-modal-btn {
+      width: 100%;
+      padding: 10px;
+      background-color: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      color: #fff;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    
+    .close-modal-btn:hover {
+      background-color: rgba(255, 255, 255, 0.1);
+    }
+    
+    /* Notifications */
+    .notification {
+      position: fixed;
+      top: 80px;
+      right: 20px;
+      padding: 15px 25px;
+      border-radius: 5px;
+      color: #fff;
+      font-weight: bold;
+      z-index: 10001;
+      box-shadow: 0 5px 20px rgba(0, 0, 0, 0.3);
+      transform: translateX(400px);
+      transition: transform 0.3s ease;
+    }
+    
+    .notification.show {
+      transform: translateX(0);
+    }
+    
+    .notification-success {
+      background-color: #4CAF50;
+    }
+    
+    .notification-error {
+      background-color: #f44336;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    
+    /* Relationship link styling */
+    .link-divorced {
+      stroke: #f44336 !important;
+      stroke-dasharray: 8, 4;
+      stroke-width: 2px;
+    }
+    
+    .link-partner {
+      stroke-dasharray: 2, 2;
+      stroke-width: 2px;
+    }
+    
+    .link-separated {
+      stroke: #ff9800 !important;
+      stroke-dasharray: 8, 4;
+      stroke-width: 2px;
+    }
+    
+    .link-married {
+      stroke-width: 2px;
+    }
+  </style>
 </head>
 <body>
   <!-- Tree Info Header -->
@@ -18,6 +193,18 @@
         <span id="treeCodeDisplay" class="tree-code"></span>
         <button id="copyCodeBtn" class="copy-btn" title="Copy code">📋</button>
       </div>
+    </div>
+    
+    <!-- Undo/Redo Controls -->
+    <div class="undo-redo-controls">
+      <button id="undoBtn" class="undo-redo-btn" title="Undo (Ctrl+Z)">
+        <span>⎌</span>
+        <span>Undo</span>
+      </button>
+      <button id="redoBtn" class="undo-redo-btn" title="Redo (Ctrl+Y)">
+        <span>⎌</span>
+        <span>Redo</span>
+      </button>
     </div>
   </div>
 
