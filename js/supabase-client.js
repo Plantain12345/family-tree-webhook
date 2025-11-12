@@ -79,6 +79,8 @@ export async function getFamilyMembers(treeId) {
 
 /**
  * Create a new family member
+ * IMPORTANT: If memberData includes an 'id', it will be used as the database ID
+ * This allows us to use the same IDs for chart and database
  */
 export async function createFamilyMember(memberData) {
   try {
@@ -188,7 +190,14 @@ export async function createParentChildRelationship(treeId, parentId, childId) {
       .select()
       .single()
     
-    if (error) throw error
+    if (error) {
+      // If duplicate, just return success (relationship already exists)
+      if (error.code === '23505') {
+        console.log('Relationship already exists, skipping...')
+        return { success: true, data: null }
+      }
+      throw error
+    }
     
     return { success: true, data }
   } catch (error) {
@@ -213,7 +222,14 @@ export async function createSpousalRelationship(treeId, person1Id, person2Id, re
       .select()
       .single()
     
-    if (error) throw error
+    if (error) {
+      // If duplicate, just return success (relationship already exists)
+      if (error.code === '23505') {
+        console.log('Spousal relationship already exists, skipping...')
+        return { success: true, data: null }
+      }
+      throw error
+    }
     
     return { success: true, data }
   } catch (error) {
