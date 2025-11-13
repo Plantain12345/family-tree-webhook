@@ -116,9 +116,19 @@ function createChart(data) {
     .setCardXSpacing(250)
     .setCardYSpacing(150)
   
-  // Use standard card display (not custom template)
+  // Use standard card display with dash between years
   const f3Card = f3Chart.setCardHtml()
-    .setCardDisplay([["first name", "last name"], ["birthday", "death"]])
+    .setCardDisplay([
+      ["first name", "last name"], 
+      (d) => {
+        const birth = d.data['birthday'] || ''
+        const death = d.data['death'] || ''
+        if (birth && death) return `${birth} - ${death}`
+        if (birth) return birth
+        if (death) return `- ${death}`
+        return ''
+      }
+    ])
   
   // Setup edit tree - setEditFirst(false) makes add buttons appear on click
   f3Chart.editTree()
@@ -196,8 +206,8 @@ function validateYearFields(form) {
       return false
     }
     const yearNum = parseInt(year)
-    if (yearNum < 1000 || yearNum > new Date().getFullYear()) {
-      alert(`Year of birth must be between 1000 and ${new Date().getFullYear()}`)
+    if (yearNum < 1000 || yearNum > 9999) {
+      alert('Year of birth must be between 1000 and 9999')
       birthdayInput.focus()
       return false
     }
@@ -211,8 +221,8 @@ function validateYearFields(form) {
       return false
     }
     const yearNum = parseInt(year)
-    if (yearNum < 1000 || yearNum > new Date().getFullYear()) {
-      alert(`Year of death must be between 1000 and ${new Date().getFullYear()}`)
+    if (yearNum < 1000 || yearNum > 9999) {
+      alert('Year of death must be between 1000 and 9999')
       deathInput.focus()
       return false
     }
@@ -482,12 +492,15 @@ function addRelationshipTypeSelector(form) {
 
 function changeAddLabels() {
   // Change "Add Father/Mother" to "Add Parent", etc.
-  document.querySelectorAll('.card, svg text, [data-rel-type]').forEach(element => {
+  document.querySelectorAll('.card_add_relative, svg text, [data-rel-type]').forEach(element => {
     const replaceText = (node) => {
       if (node.nodeType === Node.TEXT_NODE) {
         let text = node.textContent
-        text = text.replace(/Add (Father|Mother)/gi, 'Add Parent')
-        text = text.replace(/Add (Son|Daughter)/gi, 'Add Child')
+        // More specific replacements
+        text = text.replace(/Add Father/gi, 'Add Parent')
+        text = text.replace(/Add Mother/gi, 'Add Parent')
+        text = text.replace(/Add Son/gi, 'Add Child')
+        text = text.replace(/Add Daughter/gi, 'Add Child')
         text = text.replace(/Add Spouse/gi, 'Add Partner')
         node.textContent = text
       } else if (node.nodeType === Node.ELEMENT_NODE) {
@@ -495,5 +508,16 @@ function changeAddLabels() {
       }
     }
     replaceText(element)
+  })
+  
+  // Also check for title attributes
+  document.querySelectorAll('[title*="Add Father"], [title*="Add Mother"], [title*="Add Son"], [title*="Add Daughter"], [title*="Add Spouse"]').forEach(el => {
+    let title = el.getAttribute('title')
+    title = title.replace(/Add Father/gi, 'Add Parent')
+    title = title.replace(/Add Mother/gi, 'Add Parent')
+    title = title.replace(/Add Son/gi, 'Add Child')
+    title = title.replace(/Add Daughter/gi, 'Add Child')
+    title = title.replace(/Add Spouse/gi, 'Add Partner')
+    el.setAttribute('title', title)
   })
 }
