@@ -105,17 +105,21 @@ async function loadTreeData() {
 }
 
 function createChart(data) {
+  // Create chart
   f3Chart = window.f3.createChart('#FamilyChart', data)
     .setTransitionTime(1000)
     .setCardXSpacing(250)
     .setCardYSpacing(150)
   
-  f3Chart.setCardHtml()
+  // Setup card display
+  const f3Card = f3Chart.setCardHtml()
     .setCardDisplay([["first name", "last name"], ["birthday", "death"]])
   
+  // Setup edit tree with card click functionality
   f3Chart.editTree()
     .setFields(["first name", "last name", "birthday", "death"])
     .setEditFirst(true)
+    .setCardClickOpen(f3Card)  // THIS LINE IS CRITICAL - enables clicking on cards
   
   const mainId = findMainPersonId(allMembers)
   if (mainId) f3Chart.updateMainId(mainId)
@@ -131,25 +135,32 @@ function createChart(data) {
 }
 
 function setupListeners() {
+  // Listen for form submissions
   document.addEventListener('submit', (e) => {
     if (e.target.id === 'familyForm') {
       e.preventDefault()
       
+      // Capture relationship type if present
       const relSelect = e.target.querySelector('.relationship-type-select')
-      if (relSelect) window.lastRelationshipType = relSelect.value
+      if (relSelect) {
+        window.lastRelationshipType = relSelect.value
+      }
       
-      setTimeout(() => scheduleSave(), 200)
+      // Let family-chart process the form, then save after a delay
+      setTimeout(() => scheduleSave(), 300)
     }
   }, true)
   
+  // Listen for delete button clicks
   document.addEventListener('click', (e) => {
     if (e.target.matches('.f3-delete-btn')) {
-      setTimeout(() => scheduleSave(), 200)
+      setTimeout(() => scheduleSave(), 300)
     }
   }, true)
 }
 
 function scheduleSave() {
+  // Debounce: wait 1 second after last change before saving
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => syncToDatabase(), 1000)
 }
@@ -159,7 +170,10 @@ async function syncToDatabase() {
   isSaving = true
   
   try {
+    // Get current state from family-chart (source of truth)
     const chartData = f3Chart.store.getData()
+    
+    // Compare chart state to database state
     const chartIds = new Set(chartData.map(d => d.id))
     const dbIds = new Set(allMembers.map(m => m.id))
     
@@ -167,67 +181,83 @@ async function syncToDatabase() {
     const delIds = [...dbIds].filter(id => !chartIds.has(id))
     const existIds = [...chartIds].filter(id => dbIds.has(id))
     
-    // Delete removed members
+    console.log('Syncing:', { new: newIds.length, deleted: delIds.length, existing: existIds.length })
+    
+    // PHASE 1: Delete removed members and their relationships
     for (const id of delIds) {
       const pRels = allParentChildRels.filter(r => r.parent_id === id || r.child_id === id)
       const sRels = allSpousalRels.filter(r => r.person1_id === id || r.person2_id === id)
       
-      for (const r of pRels) await deleteParentChildRelationship(r.parent_id, r.child_id)
-      for (const r of sRels) await deleteSpousalRelationship(r.person1_id, r.person2_id)
+      for (const r of pRels) {
+        await deleteParentChildRelationship(r.parent_id, r.child_id)
+      }
+      
+      for (const r of sRels) {
+        await deleteSpousalRelationship(r.person1_id, r.person2_id)
+      }
       
       await deleteFamilyMember(id)
     }
     
-    // Create new members (all at once, before relationships)
+    // PHASE 2: Create ALL new members first (before relationships)
     for (const id of newIds) {
-      const p = chartData.find(d => d.id === id)
-      if (!p) continue
+      const person = chartData.find(d => d.id === id)
+      if (!person) continue
       
       await createFamilyMember({
-        id: id,
+        id: id, // Use family-chart's UUID directly
         tree_id: currentTreeId,
-        first_name: p.data['first name'] || '',
-        last_name: p.data['last name'] || '',
-        birthday: p.data['birthday'] ? parseInt(p.data['birthday']) : null,
-        death: p.data['death'] ? parseInt(p.data['death']) : null,
-        gender: p.data['gender'] || null,
+        first_name: person.data['first name'] || '',
+        last_name: person.data['last name'] || '',
+        birthday: person.data['birthday'] ? parseInt(person.data['birthday']) : null,
+        death: person.data['death'] ? parseInt(person.data['death']) : null,
+        gender: person.data['gender'] || null,
         is_main: false
       })
     }
     
-    // Update existing members
+    // PHASE 3: Update existing members
     for (const id of existIds) {
-      const cp = chartData.find(d => d.id === id)
-      const dp = allMembers.find(m => m.id === id)
-      if (!cp || !dp) continue
+      const chartPerson = chartData.find(d => d.id === id)
+      const dbPerson = allMembers.find(m => m.id === id)
+      if (!chartPerson || !dbPerson) continue
       
-      const u = {
-        first_name: cp.data['first name'] || '',
-        last_name: cp.data['last name'] || '',
-        birthday: cp.data['birthday'] ? parseInt(cp.data['birthday']) : null,
-        death: cp.data['death'] ? parseInt(cp.data['death']) : null,
-        gender: cp.data['gender'] || null
+      const updates = {
+        first_name: chartPerson.data['first name'] || '',
+        last_name: chartPerson.data['last name'] || '',
+        birthday: chartPerson.data['birthday'] ? parseInt(chartPerson.data['birthday']) : null,
+        death: chartPerson.data['death'] ? parseInt(chartPerson.data['death']) : null,
+        gender: chartPerson.data['gender'] || null
       }
       
-      if (u.first_name !== dp.first_name || u.last_name !== dp.last_name || 
-          u.birthday !== dp.birthday || u.death !== dp.death || u.gender !== dp.gender) {
-        await updateFamilyMember(id, u)
+      // Only update if something changed
+      const changed = 
+        updates.first_name !== dbPerson.first_name ||
+        updates.last_name !== dbPerson.last_name ||
+        updates.birthday !== dbPerson.birthday ||
+        updates.death !== dbPerson.death ||
+        updates.gender !== dbPerson.gender
+      
+      if (changed) {
+        await updateFamilyMember(id, updates)
       }
     }
     
-    // Refresh member list
+    // PHASE 4: Refresh member list to ensure all IDs exist
     const mResult = await getFamilyMembers(currentTreeId)
     if (mResult.success) allMembers = mResult.data
     
-    // Now sync relationships
+    // PHASE 5: Now sync relationships (all members exist in DB now)
     await syncRelationships(chartData)
     
-    // Refresh relationships
+    // PHASE 6: Refresh relationships
     const pcResult = await getParentChildRelationships(currentTreeId)
     if (pcResult.success) allParentChildRels = pcResult.data
     
     const sResult = await getSpousalRelationships(currentTreeId)
     if (sResult.success) allSpousalRels = sResult.data
+    
+    console.log('Sync complete')
     
   } catch (error) {
     console.error('Sync error:', error)
@@ -237,63 +267,94 @@ async function syncToDatabase() {
 }
 
 async function syncRelationships(chartData) {
-  const targetPC = []
-  const targetS = []
+  // Build target relationship state from family-chart
+  const targetParentChild = []
+  const targetSpousal = []
   
-  for (const p of chartData) {
-    const { father, mother, spouses } = p.rels || {}
+  for (const person of chartData) {
+    const { father, mother, spouses } = person.rels || {}
     
-    if (father) targetPC.push({ parent_id: father, child_id: p.id })
-    if (mother) targetPC.push({ parent_id: mother, child_id: p.id })
+    if (father) {
+      targetParentChild.push({ parent_id: father, child_id: person.id })
+    }
     
+    if (mother) {
+      targetParentChild.push({ parent_id: mother, child_id: person.id })
+    }
+    
+    // For spousal relationships, only add once per pair
     if (spouses) {
-      for (const sid of spouses) {
-        if (p.id < sid) targetS.push({ p1: p.id, p2: sid })
+      for (const spouseId of spouses) {
+        // Use ID comparison to avoid creating duplicate entries
+        if (person.id < spouseId) {
+          targetSpousal.push({ p1: person.id, p2: spouseId })
+        }
       }
     }
   }
   
-  // Create missing parent-child rels
-  for (const t of targetPC) {
+  // Sync parent-child relationships
+  // Create missing ones
+  for (const target of targetParentChild) {
     const exists = allParentChildRels.find(r => 
-      r.parent_id === t.parent_id && r.child_id === t.child_id
+      r.parent_id === target.parent_id && r.child_id === target.child_id
     )
+    
     if (!exists) {
-      const res = await createParentChildRelationship(currentTreeId, t.parent_id, t.child_id)
-      if (res.success && res.data) allParentChildRels.push(res.data)
+      const result = await createParentChildRelationship(
+        currentTreeId,
+        target.parent_id,
+        target.child_id
+      )
+      if (result.success && result.data) {
+        allParentChildRels.push(result.data)
+      }
     }
   }
   
-  // Delete extra parent-child rels
-  for (const r of allParentChildRels) {
-    const still = targetPC.find(t => t.parent_id === r.parent_id && t.child_id === r.child_id)
-    if (!still) {
-      await deleteParentChildRelationship(r.parent_id, r.child_id)
+  // Delete ones that shouldn't exist anymore
+  for (const existing of allParentChildRels) {
+    const shouldExist = targetParentChild.find(t => 
+      t.parent_id === existing.parent_id && t.child_id === existing.child_id
+    )
+    
+    if (!shouldExist) {
+      await deleteParentChildRelationship(existing.parent_id, existing.child_id)
     }
   }
   
-  // Create missing spousal rels
-  for (const t of targetS) {
+  // Sync spousal relationships
+  // Create missing ones
+  for (const target of targetSpousal) {
     const exists = allSpousalRels.find(r => 
-      (r.person1_id === t.p1 && r.person2_id === t.p2) ||
-      (r.person1_id === t.p2 && r.person2_id === t.p1)
+      (r.person1_id === target.p1 && r.person2_id === target.p2) ||
+      (r.person1_id === target.p2 && r.person2_id === target.p1)
     )
+    
     if (!exists) {
-      const type = window.lastRelationshipType || 'married'
-      const res = await createSpousalRelationship(currentTreeId, t.p1, t.p2, type)
-      if (res.success && res.data) allSpousalRels.push(res.data)
+      const relType = window.lastRelationshipType || 'married'
+      const result = await createSpousalRelationship(
+        currentTreeId,
+        target.p1,
+        target.p2,
+        relType
+      )
+      if (result.success && result.data) {
+        allSpousalRels.push(result.data)
+      }
       window.lastRelationshipType = null
     }
   }
   
-  // Delete extra spousal rels
-  for (const r of allSpousalRels) {
-    const still = targetS.find(t => 
-      (t.p1 === r.person1_id && t.p2 === r.person2_id) ||
-      (t.p1 === r.person2_id && t.p2 === r.person1_id)
+  // Delete ones that shouldn't exist anymore
+  for (const existing of allSpousalRels) {
+    const shouldExist = targetSpousal.find(t => 
+      (t.p1 === existing.person1_id && t.p2 === existing.person2_id) ||
+      (t.p1 === existing.person2_id && t.p2 === existing.person1_id)
     )
-    if (!still) {
-      await deleteSpousalRelationship(r.person1_id, r.person2_id)
+    
+    if (!shouldExist) {
+      await deleteSpousalRelationship(existing.person1_id, existing.person2_id)
     }
   }
 }
@@ -301,60 +362,53 @@ async function syncRelationships(chartData) {
 function customizeUI() {
   const form = document.querySelector('#familyForm')
   if (form) {
-    // Change labels
-    form.querySelectorAll('label').forEach(l => {
-      if (l.textContent.trim().toLowerCase() === 'birthday') l.textContent = 'Year of birth'
-      if (l.textContent.trim().toLowerCase() === 'death') l.textContent = 'Year of death'
+    // Change field labels
+    form.querySelectorAll('label').forEach(label => {
+      const text = label.textContent.trim().toLowerCase()
+      if (text === 'birthday') label.textContent = 'Year of birth'
+      if (text === 'death') label.textContent = 'Year of death'
     })
     
-    // Hide gender text field
-    const gInput = form.querySelector('input[name="gender"][type="text"]')
-    if (gInput) {
-      const field = gInput.closest('.f3-form-field')
-      if (field) field.style.display = 'none'
+    // Hide gender text input (keep radio buttons)
+    const genderInput = form.querySelector('input[name="gender"][type="text"]')
+    if (genderInput) {
+      const genderField = genderInput.closest('.f3-form-field')
+      if (genderField) genderField.style.display = 'none'
       
-      // Link radio to hidden field
-      form.querySelectorAll('input[name="gender"][type="radio"]').forEach(r => {
-        r.addEventListener('change', () => gInput.value = r.value)
+      // Link radio buttons to hidden text field
+      form.querySelectorAll('input[name="gender"][type="radio"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+          genderInput.value = radio.value
+        })
       })
     }
     
-    // Hide remove relation button
+    // Hide "Remove Relation" button
     const removeBtn = form.querySelector('.f3-remove-relative-btn')
     if (removeBtn) removeBtn.style.display = 'none'
     
-    // Add relationship type selector for partners
-    addRelTypeSelector(form)
+    // Add relationship type selector for partner forms
+    addRelationshipTypeSelector(form)
   }
   
-  // Change Add labels
-  document.querySelectorAll('.card, svg text').forEach(el => {
-    const replace = (node) => {
-      if (node.nodeType === 3) {
-        let txt = node.textContent
-        txt = txt.replace(/Add (Father|Mother)/g, 'Add Parent')
-        txt = txt.replace(/Add (Son|Daughter)/g, 'Add Child')
-        txt = txt.replace(/Add Spouse/g, 'Add Partner')
-        node.textContent = txt
-      } else {
-        Array.from(node.childNodes).forEach(replace)
-      }
-    }
-    replace(el)
-  })
+  // Change "Add" button labels
+  changeAddLabels()
 }
 
-function addRelTypeSelector(form) {
-  const title = form.querySelector('.f3-form-title')
-  if (!title) return
+function addRelationshipTypeSelector(form) {
+  const formTitle = form.querySelector('.f3-form-title')
+  if (!formTitle) return
   
-  const txt = title.textContent.toLowerCase()
-  if (!txt.includes('partner') && !txt.includes('spouse')) return
+  const titleText = formTitle.textContent.toLowerCase()
+  const isPartnerForm = titleText.includes('partner') || titleText.includes('spouse')
+  if (!isPartnerForm) return
+  
+  // Don't add if already exists
   if (form.querySelector('.relationship-type-selector')) return
   
-  const div = document.createElement('div')
-  div.className = 'f3-form-field relationship-type-selector'
-  div.innerHTML = `
+  const relTypeDiv = document.createElement('div')
+  relTypeDiv.className = 'f3-form-field relationship-type-selector'
+  relTypeDiv.innerHTML = `
     <label>Relationship Type</label>
     <select name="relationship_type" class="relationship-type-select">
       <option value="married">Married</option>
@@ -364,11 +418,32 @@ function addRelTypeSelector(form) {
     </select>
   `
   
-  const gField = form.querySelector('.f3-radio-group')
-  if (gField?.parentNode) {
-    gField.parentNode.insertBefore(div, gField.nextSibling)
-    div.querySelector('select').addEventListener('change', (e) => {
-      window.lastRelationshipType = e.target.value
+  const genderRadioGroup = form.querySelector('.f3-radio-group')
+  if (genderRadioGroup && genderRadioGroup.parentNode) {
+    genderRadioGroup.parentNode.insertBefore(relTypeDiv, genderRadioGroup.nextSibling)
+    
+    // Listen for changes
+    const select = relTypeDiv.querySelector('select')
+    select.addEventListener('change', () => {
+      window.lastRelationshipType = select.value
     })
   }
+}
+
+function changeAddLabels() {
+  // Change all "Add Father/Mother" to "Add Parent", etc.
+  document.querySelectorAll('.card, svg text').forEach(element => {
+    const replaceText = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        let text = node.textContent
+        text = text.replace(/Add (Father|Mother)/g, 'Add Parent')
+        text = text.replace(/Add (Son|Daughter)/g, 'Add Child')
+        text = text.replace(/Add Spouse/g, 'Add Partner')
+        node.textContent = text
+      } else {
+        Array.from(node.childNodes).forEach(replaceText)
+      }
+    }
+    replaceText(element)
+  })
 }
