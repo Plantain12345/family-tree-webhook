@@ -90,7 +90,11 @@ async function loadTreeData() {
     allParentChildRels = pc.data || []
     allSpousalRels = s.data || []
     
+    console.log('Loaded members:', allMembers.length)
+    
     const data = transformDatabaseToFamilyChart(allMembers, allParentChildRels, allSpousalRels)
+    
+    console.log('Transformed data:', data.length)
     
     if (!f3Chart) {
       createChart(data)
@@ -105,42 +109,29 @@ async function loadTreeData() {
 }
 
 function createChart(data) {
+  console.log('Creating chart with data:', data)
+  
   f3Chart = window.f3.createChart('#FamilyChart', data)
     .setTransitionTime(1000)
     .setCardXSpacing(250)
     .setCardYSpacing(150)
   
-  // Custom card template with dash between birth and death
+  // Use standard card display (not custom template)
   const f3Card = f3Chart.setCardHtml()
-    .setCardTemplate((d) => {
-      const firstName = d.data['first name'] || ''
-      const lastName = d.data['last name'] || ''
-      const birth = d.data['birthday'] || ''
-      const death = d.data['death'] || ''
-      
-      const fullName = [firstName, lastName].filter(n => n).join(' ')
-      const dates = birth && death ? `${birth} - ${death}` : birth
-      
-      return `
-        <div class="card-inner">
-          <div class="card-label">
-            ${fullName ? `<div>${fullName}</div>` : ''}
-            ${dates ? `<div style="font-size: 0.9em; opacity: 0.9;">${dates}</div>` : ''}
-          </div>
-        </div>
-      `
-    })
+    .setCardDisplay([["first name", "last name"], ["birthday", "death"]])
   
-  // Setup edit tree - setEditFirst(false) makes add buttons appear immediately
+  // Setup edit tree - setEditFirst(false) makes add buttons appear on click
   f3Chart.editTree()
     .setFields(["first name", "last name", "birthday", "death"])
-    .setEditFirst(false)  // Changed to false - show add buttons on click
+    .setEditFirst(false)
     .setCardClickOpen(f3Card)
   
   const mainId = findMainPersonId(allMembers)
   if (mainId) f3Chart.updateMainId(mainId)
   
   f3Chart.updateTree({ initial: true })
+  
+  console.log('Chart created, setting up UI...')
   
   setTimeout(() => {
     customizeUI()
@@ -151,6 +142,8 @@ function createChart(data) {
 }
 
 function setupListeners() {
+  console.log('Setting up listeners...')
+  
   // Listen for form submissions
   document.addEventListener('submit', (e) => {
     if (e.target.id === 'familyForm') {
@@ -181,10 +174,10 @@ function setupListeners() {
   // Close form when clicking outside
   document.addEventListener('click', (e) => {
     const formCont = document.querySelector('.f3-form-cont.opened')
-    const card = e.target.closest('.card, .card_add_relative, [data-rel-type]')
+    const clickedOnCard = e.target.closest('.card, .card_add_relative, [data-rel-type]')
+    const clickedInForm = formCont && formCont.contains(e.target)
     
-    if (formCont && !formCont.contains(e.target) && !card) {
-      // Clicked outside form and not on a card - close form
+    if (formCont && !clickedInForm && !clickedOnCard) {
       const closeBtn = formCont.querySelector('.f3-close-btn')
       if (closeBtn) closeBtn.click()
     }
@@ -255,6 +248,8 @@ async function syncToDatabase() {
     const newIds = [...chartIds].filter(id => !dbIds.has(id))
     const delIds = [...dbIds].filter(id => !chartIds.has(id))
     const existIds = [...chartIds].filter(id => dbIds.has(id))
+    
+    console.log('Syncing:', { new: newIds.length, del: delIds.length, exist: existIds.length })
     
     // Delete removed members
     for (const id of delIds) {
@@ -394,9 +389,11 @@ async function syncRelationships(chartData) {
 }
 
 function customizeUI() {
+  console.log('Customizing UI...')
+  
   const form = document.querySelector('#familyForm')
   if (form) {
-    // Change labels
+    // Change labels to "Year of birth" and "Year of death"
     form.querySelectorAll('label').forEach(label => {
       const text = label.textContent.trim().toLowerCase()
       if (text === 'birthday') label.textContent = 'Year of birth'
@@ -484,6 +481,7 @@ function addRelationshipTypeSelector(form) {
 }
 
 function changeAddLabels() {
+  // Change "Add Father/Mother" to "Add Parent", etc.
   document.querySelectorAll('.card, svg text, [data-rel-type]').forEach(element => {
     const replaceText = (node) => {
       if (node.nodeType === Node.TEXT_NODE) {
@@ -493,16 +491,6 @@ function changeAddLabels() {
         text = text.replace(/Add Spouse/gi, 'Add Partner')
         node.textContent = text
       } else if (node.nodeType === Node.ELEMENT_NODE) {
-        // Check data attributes
-        if (node.hasAttribute('data-rel-type')) {
-          const relType = node.getAttribute('data-rel-type')
-          if (relType === 'father' || relType === 'mother') {
-            // Find text nodes within and replace
-            Array.from(node.childNodes).forEach(replaceText)
-          } else if (relType === 'son' || relType === 'daughter') {
-            Array.from(node.childNodes).forEach(replaceText)
-          }
-        }
         Array.from(node.childNodes).forEach(replaceText)
       }
     }
