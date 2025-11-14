@@ -101,7 +101,7 @@ async function loadTreeData() {
     } else {
       f3Chart.updateData(data)
       f3Chart.updateTree({ initial: false })
-      setTimeout(() => customizeUI(), 500)
+      setTimeout(() => fixAllLabels(), 500)
     }
   } catch (error) {
     console.error('Load error:', error)
@@ -130,11 +130,11 @@ function createChart(data) {
       }
     ])
   
-  // Setup edit tree - setEditFirst(false) makes add buttons appear on click
+  // CRITICAL: Do NOT use setCardClickOpen - it prevents + buttons from showing
+  // Setup edit tree WITHOUT opening form on card click
   f3Chart.editTree()
     .setFields(["first name", "last name", "birthday", "death"])
-    .setEditFirst(false)
-    .setCardClickOpen(f3Card)
+    .setEditFirst(false)  // This makes + buttons appear on card click
   
   const mainId = findMainPersonId(allMembers)
   if (mainId) f3Chart.updateMainId(mainId)
@@ -144,8 +144,9 @@ function createChart(data) {
   console.log('Chart created, setting up UI...')
   
   setTimeout(() => {
-    customizeUI()
     setupListeners()
+    fixAllLabels()
+    console.log('+ buttons available:', document.querySelectorAll('.card_add_relative').length)
   }, 500)
   
   window.f3Chart = f3Chart
@@ -181,17 +182,159 @@ function setupListeners() {
     }
   }, true)
   
-  // Close form when clicking outside
+  // Close form when clicking outside (but not on cards or + buttons)
   document.addEventListener('click', (e) => {
     const formCont = document.querySelector('.f3-form-cont.opened')
-    const clickedOnCard = e.target.closest('.card, .card_add_relative, [data-rel-type]')
+    const clickedOnCard = e.target.closest('.card')
+    const clickedOnAddBtn = e.target.closest('.card_add_relative')
     const clickedInForm = formCont && formCont.contains(e.target)
     
-    if (formCont && !clickedInForm && !clickedOnCard) {
+    if (formCont && !clickedInForm && !clickedOnCard && !clickedOnAddBtn) {
       const closeBtn = formCont.querySelector('.f3-close-btn')
       if (closeBtn) closeBtn.click()
     }
   }, true)
+  
+  // Fix labels whenever form opens
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.addedNodes.length > 0) {
+        setTimeout(() => fixAllLabels(), 50)
+        break
+      }
+    }
+  })
+  
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  })
+  
+  // Fix labels when clicking cards (to update + button labels)
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.card')) {
+      setTimeout(() => fixAllLabels(), 100)
+    }
+  }, true)
+}
+
+function fixAllLabels() {
+  // Fix form labels from "Birthday" to "Year of birth"
+  document.querySelectorAll('.f3-form-field label').forEach(label => {
+    if (label.textContent.toLowerCase().includes('birthday')) {
+      label.textContent = 'Year of birth'
+    }
+    if (label.textContent.toLowerCase() === 'death') {
+      label.textContent = 'Year of death'
+    }
+  })
+  
+  // Fix + button labels
+  const replacements = {
+    'Add Father': 'Add Parent',
+    'Add Mother': 'Add Parent',
+    'Add Son': 'Add Child',
+    'Add Daughter': 'Add Child',
+    'Add Spouse': 'Add Partner'
+  }
+  
+  // Fix text content in SVG and HTML elements
+  document.querySelectorAll('text, title, [data-rel-type]').forEach(el => {
+    if (el.textContent) {
+      let newText = el.textContent
+      Object.keys(replacements).forEach(old => {
+        newText = newText.replace(new RegExp(old, 'gi'), replacements[old])
+      })
+      if (newText !== el.textContent) {
+        el.textContent = newText
+      }
+    }
+  })
+  
+  // Also customize UI after fixing labels
+  customizeFormInputs()
+}
+
+function customizeFormInputs() {
+  const form = document.querySelector('#familyForm')
+  if (!form) return
+  
+  // Add input restrictions for year fields
+  const birthdayInput = form.querySelector('input[name="birthday"]')
+  const deathInput = form.querySelector('input[name="death"]')
+  
+  [birthdayInput, deathInput].forEach(input => {
+    if (input && !input.dataset.customized) {
+      input.dataset.customized = 'true'
+      input.type = 'text'
+      input.maxLength = 4
+      input.placeholder = 'YYYY'
+      input.pattern = '[0-9]{4}'
+      
+      // Only allow numbers
+      input.addEventListener('input', (e) => {
+        e.target.value = e.target.value.replace(/[^0-9]/g, '')
+      })
+      
+      input.addEventListener('keypress', (e) => {
+        if (!/[0-9]/.test(e.key)) {
+          e.preventDefault()
+        }
+      })
+    }
+  })
+  
+  // Hide gender text input (we use radio buttons)
+  const genderInput = form.querySelector('input[name="gender"][type="text"]')
+  if (genderInput) {
+    const genderField = genderInput.closest('.f3-form-field')
+    if (genderField) genderField.style.display = 'none'
+    
+    form.querySelectorAll('input[name="gender"][type="radio"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        genderInput.value = radio.value
+      })
+    })
+  }
+  
+  // Hide remove relation button
+  const removeBtn = form.querySelector('.f3-remove-relative-btn')
+  if (removeBtn) removeBtn.style.display = 'none'
+  
+  addRelationshipTypeSelector(form)
+}
+
+function addRelationshipTypeSelector(form) {
+  const formTitle = form.querySelector('.f3-form-title')
+  if (!formTitle) return
+  
+  const titleText = formTitle.textContent.toLowerCase()
+  const isPartnerForm = titleText.includes('partner') || titleText.includes('spouse')
+  if (!isPartnerForm) return
+  
+  if (form.querySelector('.relationship-type-selector')) return
+  
+  const relTypeDiv = document.createElement('div')
+  relTypeDiv.className = 'f3-form-field relationship-type-selector'
+  relTypeDiv.innerHTML = `
+    <label>Relationship Type</label>
+    <select name="relationship_type" class="relationship-type-select">
+      <option value="married">Married</option>
+      <option value="partner">Partner</option>
+      <option value="divorced">Divorced</option>
+      <option value="separated">Separated</option>
+    </select>
+  `
+  
+  const genderRadioGroup = form.querySelector('.f3-radio-group')
+  if (genderRadioGroup && genderRadioGroup.parentNode) {
+    genderRadioGroup.parentNode.insertBefore(relTypeDiv, genderRadioGroup.nextSibling)
+    
+    const select = relTypeDiv.querySelector('select')
+    select.addEventListener('change', () => {
+      window.lastRelationshipType = select.value
+    })
+  }
 }
 
 function validateYearFields(form) {
@@ -396,128 +539,4 @@ async function syncRelationships(chartData) {
       await deleteSpousalRelationship(existing.person1_id, existing.person2_id)
     }
   }
-}
-
-function customizeUI() {
-  console.log('Customizing UI...')
-  
-  const form = document.querySelector('#familyForm')
-  if (form) {
-    // Change labels to "Year of birth" and "Year of death"
-    form.querySelectorAll('label').forEach(label => {
-      const text = label.textContent.trim().toLowerCase()
-      if (text === 'birthday') label.textContent = 'Year of birth'
-      if (text === 'death') label.textContent = 'Year of death'
-    })
-    
-    // Add input restrictions for year fields
-    const birthdayInput = form.querySelector('input[name="birthday"]')
-    const deathInput = form.querySelector('input[name="death"]')
-    
-    [birthdayInput, deathInput].forEach(input => {
-      if (input) {
-        input.type = 'text'
-        input.maxLength = 4
-        input.placeholder = 'YYYY'
-        input.pattern = '[0-9]{4}'
-        
-        // Only allow numbers
-        input.addEventListener('input', (e) => {
-          e.target.value = e.target.value.replace(/[^0-9]/g, '')
-        })
-        
-        input.addEventListener('keypress', (e) => {
-          if (!/[0-9]/.test(e.key)) {
-            e.preventDefault()
-          }
-        })
-      }
-    })
-    
-    // Hide gender text input
-    const genderInput = form.querySelector('input[name="gender"][type="text"]')
-    if (genderInput) {
-      const genderField = genderInput.closest('.f3-form-field')
-      if (genderField) genderField.style.display = 'none'
-      
-      form.querySelectorAll('input[name="gender"][type="radio"]').forEach(radio => {
-        radio.addEventListener('change', () => {
-          genderInput.value = radio.value
-        })
-      })
-    }
-    
-    // Hide remove relation button
-    const removeBtn = form.querySelector('.f3-remove-relative-btn')
-    if (removeBtn) removeBtn.style.display = 'none'
-    
-    addRelationshipTypeSelector(form)
-  }
-  
-  changeAddLabels()
-}
-
-function addRelationshipTypeSelector(form) {
-  const formTitle = form.querySelector('.f3-form-title')
-  if (!formTitle) return
-  
-  const titleText = formTitle.textContent.toLowerCase()
-  const isPartnerForm = titleText.includes('partner') || titleText.includes('spouse')
-  if (!isPartnerForm) return
-  
-  if (form.querySelector('.relationship-type-selector')) return
-  
-  const relTypeDiv = document.createElement('div')
-  relTypeDiv.className = 'f3-form-field relationship-type-selector'
-  relTypeDiv.innerHTML = `
-    <label>Relationship Type</label>
-    <select name="relationship_type" class="relationship-type-select">
-      <option value="married">Married</option>
-      <option value="partner">Partner</option>
-      <option value="divorced">Divorced</option>
-      <option value="separated">Separated</option>
-    </select>
-  `
-  
-  const genderRadioGroup = form.querySelector('.f3-radio-group')
-  if (genderRadioGroup && genderRadioGroup.parentNode) {
-    genderRadioGroup.parentNode.insertBefore(relTypeDiv, genderRadioGroup.nextSibling)
-    
-    const select = relTypeDiv.querySelector('select')
-    select.addEventListener('change', () => {
-      window.lastRelationshipType = select.value
-    })
-  }
-}
-
-function changeAddLabels() {
-  // Change "Add Father/Mother" to "Add Parent", etc.
-  document.querySelectorAll('.card_add_relative, svg text, [data-rel-type]').forEach(element => {
-    const replaceText = (node) => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        let text = node.textContent
-        // More specific replacements
-        text = text.replace(/Add Father/gi, 'Add Parent')
-        text = text.replace(/Add Mother/gi, 'Add Parent')
-        text = text.replace(/Add Son/gi, 'Add Child')
-        text = text.replace(/Add Daughter/gi, 'Add Child')
-        text = text.replace(/Add Spouse/gi, 'Add Partner')
-        node.textContent = text
-      } else if (node.nodeType === Node.ELEMENT_NODE) {
-        Array.from(node.childNodes).forEach(replaceText)
-      }
-    }
-    replaceText(element)
-  })
-  
-  // Also check for title attributes
-  document.querySelectorAll('[title*="Add Father"], [title*="Add Mother"], [title*="Add Son"], [title*="Add Daughter"], [title*="Add Spouse"]').forEach(el => {
-    let title = el.getAttribute('title')
-    title = title.replace(/Add Father/gi, 'Add Parent')
-    title = title.replace(/Add Mother/gi, 'Add Parent')
-    title = title.replace(/Add Son/gi, 'Add Child')
-    title = title.replace(/Add Daughter/gi, 'Add Child')
-    title = title.replace(/Add Spouse/gi, 'Add Partner')
-    el.setAttribute('title', title)
-  })
 }
