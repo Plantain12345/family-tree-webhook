@@ -196,7 +196,7 @@ function createChart(chartData) {
       }
       
       // Handle new relationship type
-      const newRelSelect = form.querySelector('.relationship-type-select-new select');
+      const newRelSelect = form.querySelector('.relationship-type-selector-new select');
       if (newRelSelect) {
         window.lastRelationshipType = newRelSelect.value;
       }
@@ -353,8 +353,8 @@ function ensureRelationshipTypeSelector(form) {
   
   // *** FIX for BUG #1 ***
   // Find a stable anchor point. The gender radio group is not always present,
-  // but the <hr> tag before the delete button is.
-  const anchorElement = form.querySelector('hr');
+  // but the button container is.
+  const anchorElement = form.querySelector('.f3-form-buttons');
   if (!anchorElement?.parentNode) return; // Can't add if anchor is missing
 
   // Check if this form is for a *new* partner
