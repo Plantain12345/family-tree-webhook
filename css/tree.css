@@ -101,51 +101,70 @@
   color: #87CEEB;
 }
 
-/* Make Add Relative Buttons More Visible */
+/* CRITICAL: Make Add Relative Buttons Visible and Prominent */
 .f3 .card_add_relative {
-  cursor: pointer;
-  width: 35px;
-  height: 35px;
-  margin-right: 5px;
-  display: inline-block;
-  transition: transform 0.2s ease, opacity 0.2s ease;
-  opacity: 0.9;
+  cursor: pointer !important;
+  width: 40px !important;
+  height: 40px !important;
+  display: inline-block !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  pointer-events: auto !important;
+  transition: transform 0.2s ease, opacity 0.2s ease !important;
 }
 
 .f3 .card_add_relative:hover {
-  transform: scale(1.2);
-  opacity: 1;
+  transform: scale(1.3) !important;
 }
 
 .f3 .card_add_relative circle {
-  fill: rgba(135, 206, 235, 0.3);
-  stroke: #87CEEB;
-  stroke-width: 2;
-  transition: fill 0.2s ease;
+  fill: rgba(135, 206, 235, 0.4) !important;
+  stroke: #87CEEB !important;
+  stroke-width: 3 !important;
+  transition: fill 0.2s ease !important;
 }
 
 .f3 .card_add_relative:hover circle {
-  fill: rgba(135, 206, 235, 0.6);
+  fill: rgba(135, 206, 235, 0.8) !important;
+  stroke: #ffffff !important;
 }
 
 .f3 .card_add_relative text {
-  font-size: 28px;
-  font-weight: bold;
-  fill: #87CEEB;
+  font-size: 32px !important;
+  font-weight: bold !important;
+  fill: #87CEEB !important;
+  pointer-events: none !important;
+}
+
+.f3 .card_add_relative:hover text {
+  fill: #ffffff !important;
 }
 
 /* Add pulse animation to make buttons more noticeable */
-@keyframes pulse {
-  0%, 100% { opacity: 0.8; }
-  50% { opacity: 1; }
+@keyframes pulse-add-button {
+  0%, 100% { 
+    opacity: 0.8;
+    transform: scale(1);
+  }
+  50% { 
+    opacity: 1;
+    transform: scale(1.05);
+  }
 }
 
 .f3 .card_add_relative {
-  animation: pulse 2s infinite;
+  animation: pulse-add-button 2s infinite !important;
 }
 
 .f3 .card_add_relative:hover {
-  animation: none;
+  animation: none !important;
+}
+
+/* Ensure + buttons are not hidden by any parent elements */
+.f3 g[data-rel-type] {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
 }
 
 /* Relationship type styling for links */
@@ -189,5 +208,11 @@
   
   .tree-code {
     font-size: 16px;
+  }
+  
+  /* Make + buttons slightly smaller on mobile */
+  .f3 .card_add_relative {
+    width: 35px !important;
+    height: 35px !important;
   }
 }
