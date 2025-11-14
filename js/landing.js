@@ -122,7 +122,7 @@ confirmCreateBtn.addEventListener('click', async () => {
       last_name: '',
       birthday: null,
       death: null,
-      gender: null,
+      gender: 'M', // <-- REQUIREMENT #2: Set default gender to 'M'
       is_main: true
     })
     
