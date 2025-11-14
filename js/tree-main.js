@@ -10,13 +10,13 @@ import {
   createSpousalRelationship,
   deleteParentChildRelationship,
   deleteSpousalRelationship,
-  updateSpousalRelationship // Ensure this is imported
+  updateSpousalRelationship
 } from './supabase-client.js'
 
 import {
   transformDatabaseToFamilyChart,
   findMainPersonId,
-  getRelationshipType // Ensure this is imported
+  getRelationshipType
 } from './tree-data.js'
 
 import { setupRealtimeSync } from './tree-sync.js'
@@ -27,7 +27,6 @@ import { setupRealtimeSync } from './tree-sync.js'
 
 const FIRST_PERSON_DEFAULT_GENDER = 'M'
 
-// REQUIREMENT #1: Define permanent labels
 const ADD_LABELS = {
   parent: 'Add Parent',
   child: 'Add Child',
@@ -35,7 +34,7 @@ const ADD_LABELS = {
 }
 
 const SELECTORS = {
-  form: '#familyForm', // REQUIREMENT #5: Use stable form ID
+  form: '#familyForm',
   formDeleteButton: '.f3-delete-btn',
   relationshipTypeSelect: '.relationship-type-select'
 }
@@ -169,16 +168,14 @@ function createChart(chartData) {
   // Setup edit functionality
   state.editApi = chart.editTree()
     .setFields(['first name', 'last name', 'birthday', 'death'])
-    // REQUIREMENT #3: Open form and show + bubbles on card click
-    .setEditFirst(true)
-    // REQUIREMENT #3 & #4: Use library's click handler
-    .setCardClickOpen(f3Card)
-    // REQUIREMENT #1 & #5: Hook into form creation
+    .setEditFirst(true) // This makes .open() open the form
+    // We are NOT using .setCardClickOpen() anymore
+    // We will set our own custom click handler
     .setOnFormCreation((props) => {
       const { cont } = props; // 'cont' is the form container element
       const form = cont.querySelector('form');
       if (form) {
-        form.id = SELECTORS.form.substring(1); // REQUIREMENT #5
+        form.id = SELECTORS.form.substring(1); // Set stable form ID
         
         // Run all form configuration functions
         configureForm(form);
@@ -209,8 +206,22 @@ function createChart(chartData) {
       scheduleSave(); // Schedule a save to database
     });
 
-  // REQUIREMENT #1: Apply permanent labels via the API
+  // Apply permanent labels via the API
   applyAddButtonLabels(state.editApi);
+
+  // *** REQUIREMENT #1: Custom Card Click Handler ***
+  f3Card.setOnCardClick((e, d) => {
+    // If user clicks a new "+ Add" card, just open the form
+    if (d.data._new_rel_data) {
+      state.editApi.open(d.data);
+      return;
+    }
+
+    // If user clicks a real person
+    state.editApi.open(d.data);           // 1. Open the form
+    state.editApi.addRelative(d.data);  // 2. Show the bubbles
+    f3Card.onCardClickDefault(e, d);    // 3. Set as main person & update view
+  });
 
   // Set initial main person
   const mainId = findMainPersonId(state.members);
@@ -219,16 +230,48 @@ function createChart(chartData) {
   // Render the tree
   chart.updateTree({ initial: true });
 
+  // *** REQUIREMENT #2: Canvas Click Handler ***
+  setupCanvasClickListener(chart, state.editApi);
+
   return chart;
 }
 
 /**
- * REQUIREMENT #1: Apply permanent labels using the library's API
+ * REQUIREMENT #2: Add click listener to the canvas background
+ */
+function setupCanvasClickListener(chart, editApi) {
+  if (!chart || !editApi) return;
+
+  // The main SVG element acts as the "canvas"
+  chart.svg.addEventListener('click', (e) => {
+    const target = e.target;
+    
+    // Check if the click was directly on the SVG or its background rect
+    const isBackgroundClick = target.matches('svg.main_svg') || target.matches('svg.main_svg > rect');
+
+    if (isBackgroundClick) {
+      // Check if we are in "add relative" mode
+      if (editApi.isAddingRelative()) {
+        // Manually perform the "cancel" logic from the library
+        // We do this to avoid the default cancelCallback which re-opens the form
+        editApi.addRelativeInstance.is_active = false;
+        chart.store.state.one_level_rels = false;
+        editApi.addRelativeInstance.cleanUp();
+        chart.updateTree({}); // Redraw tree to remove "+ add" cards
+      }
+      
+      // Close the form
+      editApi.closeForm();
+    }
+  });
+}
+
+/**
+ * Apply permanent labels using the library's API
  */
 function applyAddButtonLabels(editApi) {
   if (!editApi) return;
 
-  // This is the primary API method
   if (typeof editApi.setAddRelLabels === 'function') {
     editApi.setAddRelLabels({
       father: ADD_LABELS.parent,
@@ -238,7 +281,7 @@ function applyAddButtonLabels(editApi) {
       spouse: ADD_LABELS.partner
     });
   } else {
-    // Fallbacks just in case (as in your original code)
+    // Fallbacks
     if (typeof editApi.setAddParentLabel === 'function') {
       editApi.setAddParentLabel(ADD_LABELS.parent);
     }
@@ -255,9 +298,6 @@ function applyAddButtonLabels(editApi) {
 // Form preparation & validation (Called by .setOnFormCreation)
 // -----------------------------------------------------------------------------
 
-/**
- * Main function to configure the form when it's created by the library
- */
 function configureForm(form) {
   if (!form || form.dataset.prepared) return;
 
@@ -266,7 +306,7 @@ function configureForm(form) {
   hideRemoveRelationship(form);
   ensureRelationshipTypeSelector(form);
   renameYearLabels(form);
-  applyDefaultGenderIfNeeded(form); // REQUIREMENT #2
+  applyDefaultGenderIfNeeded(form); // For first person
 
   form.dataset.prepared = 'true';
 }
@@ -306,8 +346,6 @@ function configureGenderField(form) {
 }
 
 function hideRemoveRelationship(form) {
-  // This button is for removing a *specific* relationship, not deleting a person.
-  // We handle deletion via the .f3-delete-btn, so we hide this.
   const removeBtn = form.querySelector('.f3-remove-relative-btn');
   if (removeBtn) removeBtn.style.display = 'none';
 }
@@ -318,11 +356,9 @@ function ensureRelationshipTypeSelector(form) {
 
   const isPartnerForm = /partner|spouse/i.test(title.textContent);
   
-  // Find the person ID from the form creator data (stored by the library)
   const formCont = form.closest('.f3-form-cont');
   const datum = formCont?.__f3_form_creator__?.datum;
 
-  // Check if it's an *existing* partner
   const isExistingPartner = datum && state.members.find(m => m.id === datum.id) &&
                             (datum.rels?.spouses?.length > 0 || /partner|spouse/i.test(datum._new_rel_data?.rel_type));
 
@@ -347,7 +383,6 @@ function ensureRelationshipTypeSelector(form) {
     }
   }
 
-  // Pre-select the current relationship type if editing an existing relationship
   if (datum && !datum._new_rel_data) {
     const mainPerson = state.chart.store.getMainDatum();
     const relType = getRelationshipType(datum, mainPerson, state.spousalRels);
@@ -371,11 +406,7 @@ function setFieldLabel(form, fieldName, labelText) {
   if (label) label.textContent = labelText;
 }
 
-/**
- * REQUIREMENT #2: Apply default gender if this is the very first person.
- */
 function applyDefaultGenderIfNeeded(form) {
-  // This logic runs if the tree is loaded with 0 members.
   if (state.members.length > 0) return;
 
   const maleRadio = form.querySelector('input[name="gender"][type="radio"][value="M"]');
@@ -395,39 +426,44 @@ function validateYearFields(form) {
 
   if (birthdayInput && birthdayInput.value) {
     const year = birthdayInput.value.trim();
-    if (!/^\d{4}$/.test(year)) {
+    if (year && !/^\d{4}$/.test(year)) {
       alert('Year of birth must be exactly 4 digits (e.g., 1990)');
       birthdayInput.focus();
       return false;
     }
-    const yearNum = Number.parseInt(year, 10);
-    if (yearNum < 1000 || yearNum > 9999) {
-      alert('Year of birth must be between 1000 and 9999');
-      birthdayInput.focus();
-      return false;
+    if(year) {
+      const yearNum = Number.parseInt(year, 10);
+      if (yearNum < 1000 || yearNum > 9999) {
+        alert('Year of birth must be between 1000 and 9999');
+        birthdayInput.focus();
+        return false;
+      }
     }
   }
 
   if (deathInput && deathInput.value) {
     const year = deathInput.value.trim();
-    if (!/^\d{4}$/.test(year)) {
+    if (year && !/^\d{4}$/.test(year)) {
       alert('Year of death must be exactly 4 digits (e.g., 2020)');
       deathInput.focus();
       return false;
     }
-    const yearNum = Number.parseInt(year, 10);
-    if (yearNum < 1000 || yearNum > 9999) {
-      alert('Year of death must be between 1000 and 9999');
-      deathInput.focus();
-      return false;
-    }
-
-    if (birthdayInput && birthdayInput.value) {
-      const birthYear = Number.parseInt(birthdayInput.value, 10);
-      if (yearNum < birthYear) {
-        alert('Year of death cannot be before year of birth');
+    
+    if(year) {
+      const yearNum = Number.parseInt(year, 10);
+      if (yearNum < 1000 || yearNum > 9999) {
+        alert('Year of death must be between 1000 and 9999');
         deathInput.focus();
         return false;
+      }
+
+      if (birthdayInput && birthdayInput.value) {
+        const birthYear = Number.parseInt(birthdayInput.value, 10);
+        if (yearNum < birthYear) {
+          alert('Year of death cannot be before year of birth');
+          deathInput.focus();
+          return false;
+        }
       }
     }
   }
@@ -460,7 +496,6 @@ async function syncToDatabase() {
 
     // 1. Delete members
     for (const id of deletedIds) {
-      // Must delete relationships first due to foreign key constraints
       const relatedParents = state.parentChildRels.filter(rel => rel.parent_id === id || rel.child_id === id);
       const relatedSpouses = state.spousalRels.filter(rel => rel.person1_id === id || rel.person2_id === id);
 
@@ -470,7 +505,7 @@ async function syncToDatabase() {
       for (const rel of relatedSpouses) {
         await deleteSpousalRelationship(rel.person1_id, rel.person2_id);
       }
-
+      
       await deleteFamilyMember(id);
     }
 
@@ -487,7 +522,7 @@ async function syncToDatabase() {
         birthday: person.data['birthday'] ? Number.parseInt(person.data['birthday'], 10) : null,
         death: person.data['death'] ? Number.parseInt(person.data['death'], 10) : null,
         gender: person.data['gender'] || null,
-        is_main: false // We don't track 'is_main' this way anymore
+        is_main: false
       });
     }
 
@@ -517,7 +552,7 @@ async function syncToDatabase() {
       }
     }
 
-    // 4. Reload members from DB (to have correct state for relationship sync)
+    // 4. Reload members from DB
     const membersResult = await getFamilyMembers(state.treeId);
     if (membersResult.success) state.members = membersResult.data;
 
@@ -541,25 +576,27 @@ async function syncToDatabase() {
 
 async function syncRelationships(chartData) {
   const targetParentChild = [];
-  const targetSpousal = [];
-  const chartSpousalRels = new Map(); // Store rel types
+  const chartSpousalRels = new Map(); // Use Map to store rel types
 
   for (const person of chartData) {
-    // Use the 'parents' array from the new library format
     const { parents, spouses } = person.rels || {};
 
     if (parents) {
       for (const parentId of parents) {
-        targetParentChild.push({ parent_id: parentId, child_id: person.id });
+        if (parentId) { // Ensure parentId is not null/undefined
+          targetParentChild.push({ parent_id: parentId, child_id: person.id });
+        }
       }
     }
 
     if (spouses) {
       for (const spouseId of spouses) {
-        if (person.id < spouseId) {
-          const key = `${person.id}-${spouseId}`;
-          targetSpousal.push({ p1: person.id, p2: spouseId });
-          
+        if (!spouseId) continue; // Skip null/undefined spouse IDs
+        
+        // Create a consistent key
+        const key = person.id < spouseId ? `${person.id}-${spouseId}` : `${spouseId}-${person.id}`;
+        
+        if (!chartSpousalRels.has(key)) {
           // Determine relationship type
           let relType = 'married'; // Default
           if (window.lastRelationshipType) {
@@ -567,9 +604,15 @@ async function syncRelationships(chartData) {
             window.lastRelationshipType = null; // Consume it
           } else {
             // Check existing DB state
-            relType = getRelationshipType(person, { id: spouseId }, state.spousalRels);
+            const existingRel = state.spousalRels.find(r => 
+              (r.person1_id === person.id && r.person2_id === spouseId) ||
+              (r.person1_id === spouseId && r.person2_id === person.id)
+            );
+            if (existingRel) {
+              relType = existingRel.relationship_type;
+            }
           }
-          chartSpousalRels.set(key, relType);
+          chartSpousalRels.set(key, { p1: person.id, p2: spouseId, type: relType });
         }
       }
     }
@@ -598,26 +641,27 @@ async function syncRelationships(chartData) {
     const key = rel.person1_id < rel.person2_id ? `${rel.person1_id}-${rel.person2_id}` : `${rel.person2_id}-${rel.person1_id}`;
     return [key, rel];
   }));
-  const chartSpousal = new Set(targetSpousal.map(rel => `${rel.p1}-${rel.p2}`));
 
   // Create new / update existing Spousal rels
-  for (const rel of targetSpousal) {
-    const key = `${rel.p1}-${rel.p2}`;
-    const chartRelType = chartSpousalRels.get(key) || 'married';
+  for (const [key, chartRel] of chartSpousalRels.entries()) {
     const dbRel = dbSpousal.get(key);
+    
+    // Ensure p1 and p2 are ordered consistently for DB
+    const p1Id = chartRel.p1 < chartRel.p2 ? chartRel.p1 : chartRel.p2;
+    const p2Id = chartRel.p1 < chartRel.p2 ? chartRel.p2 : chartRel.p1;
 
     if (!dbRel) {
       // Create new
-      await createSpousalRelationship(state.treeId, rel.p1, rel.p2, chartRelType);
-    } else if (dbRel.relationship_type !== chartRelType) {
+      await createSpousalRelationship(state.treeId, p1Id, p2Id, chartRel.type);
+    } else if (dbRel.relationship_type !== chartRel.type) {
       // Update existing
-      await updateSpousalRelationship(dbRel.id, chartRelType);
+      await updateSpousalRelationship(dbRel.id, chartRel.type);
     }
   }
 
   // Delete old Spousal rels
   for (const [key, dbRel] of dbSpousal.entries()) {
-    if (!chartSpousal.has(key)) {
+    if (!chartSpousalRels.has(key)) {
       await deleteSpousalRelationship(dbRel.person1_id, dbRel.person2_id);
     }
   }
