@@ -27,7 +27,6 @@ import { setupRealtimeSync } from './tree-sync.js'
 
 const FIRST_PERSON_DEFAULT_GENDER = 'M'
 
-// REQUIREMENT #1: Define permanent labels
 const ADD_LABELS = {
   parent: 'Add Parent',
   child: 'Add Child',
@@ -35,7 +34,7 @@ const ADD_LABELS = {
 }
 
 const SELECTORS = {
-  form: '#familyForm', // REQUIREMENT #5: Use stable form ID
+  form: '#familyForm',
   formDeleteButton: '.f3-delete-btn',
   relationshipTypeSelect: '.relationship-type-select'
 }
@@ -68,7 +67,6 @@ function initializePage() {
   }
 
   document.getElementById('copyCodeBtn')?.addEventListener('click', handleCopyTreeCode)
-  // Add listener for the new button
   document.getElementById('showFullTreeBtn')?.addEventListener('click', handleShowFullTree);
 
   window.addEventListener('load', () => {
@@ -139,7 +137,6 @@ function renderTree(chartData) {
     state.chart = createChart(chartData)
     window.f3Chart = state.chart // For debugging
   } else {
-    // On data refresh, update data and main ID, then redraw
     state.chart.updateData(chartData)
     const mainId = findMainPersonId(state.members)
     if (mainId) state.chart.updateMainId(mainId)
@@ -153,7 +150,6 @@ function createChart(chartData) {
     .setCardXSpacing(250)
     .setCardYSpacing(150)
 
-  // Set card rendering
   const f3Card = chart
     .setCardHtml()
     .setCardDisplay([
@@ -168,80 +164,73 @@ function createChart(chartData) {
       }
     ])
 
-  // Setup edit functionality
   state.editApi = chart.editTree()
     .setFields(['first name', 'last name', 'birthday', 'death'])
-    .setEditFirst(true) // This makes .open() open the form
-    // We are NOT using .setCardClickOpen() anymore
-    // We will set our own custom click handler
+    .setEditFirst(true) 
     .setOnFormCreation((props) => {
-      const { cont } = props; // 'cont' is the form container element
+      const { cont } = props; 
       const form = cont.querySelector('form');
       if (form) {
-        form.id = SELECTORS.form.substring(1); // Set stable form ID
-        
-        // Run all form configuration functions
-        configureForm(form);
+        form.id = SELECTORS.form.substring(1);
+        configureForm(form); // Configure all inputs, including new relationship editors
       }
     })
-    // Hook into form submission for validation and saving
-    .setOnSubmit((e, datum, applyChanges, postSubmit) => {
+    .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
       e.preventDefault(); 
       const form = e.target;
       
-      if (!validateYearFields(form)) return; // Custom validation
+      if (!validateYearFields(form)) return;
 
-      // Store last selected relationship type
+      // === NEW LOGIC FOR REQUIREMENT #3 ===
+      // Handle relationship type updates BEFORE submitting
+      const relSelects = form.querySelectorAll('.relationship-type-select-existing');
+      for (const select of relSelects) {
+        const relId = select.dataset.relId;
+        const newType = select.value;
+        const dbRel = state.spousalRels.find(r => r.id === relId);
+        
+        if (dbRel && dbRel.relationship_type !== newType) {
+          console.log(`Updating relationship ${relId} to ${newType}`);
+          await updateSpousalRelationship(relId, newType);
+        }
+      }
+      
       const relationshipSelect = form.querySelector(SELECTORS.relationshipTypeSelect);
       if (relationshipSelect) {
         window.lastRelationshipType = relationshipSelect.value;
       }
 
-      applyChanges(); // Apply changes to library's internal store
-      postSubmit();   // Run library's post-submit logic (closes form, updates history)
-      
-      scheduleSave(); // Schedule a save to database
+      applyChanges(); 
+      postSubmit();   
+      scheduleSave(); 
     })
-    // Hook into person deletion for saving
     .setOnDelete((datum, deletePerson, postSubmit) => {
-      deletePerson(); // Tell library to delete
-      postSubmit({ delete: true }); // Run library's post-delete logic
-      scheduleSave(); // Schedule a save to database
+      deletePerson(); 
+      postSubmit({ delete: true }); 
+      scheduleSave(); 
     });
 
-  // Apply permanent labels via the API
   applyAddButtonLabels(state.editApi);
 
-  // *** REQUIREMENT #1: Custom Card Click Handler ***
   f3Card.setOnCardClick((e, d) => {
-    // If user clicks a new "+ Add" card, just open the form
     if (d.data._new_rel_data) {
       state.editApi.open(d.data);
       return;
     }
 
-    // If user clicks a real person
-    state.editApi.open(d.data);           // 1. Open the form
-    state.editApi.addRelative(d.data);  // 2. Show the bubbles
-    f3Card.onCardClickDefault(e, d);    // 3. Set as main person & update view
+    state.editApi.open(d.data);
+    state.editApi.addRelative(d.data);
+    f3Card.onCardClickDefault(e, d);
   });
 
-  // Set initial main person
   const mainId = findMainPersonId(state.members);
   if (mainId) chart.updateMainId(mainId);
 
-  // Render the tree
   chart.updateTree({ initial: true });
-
-  // *** REQUIREMENT #2: Canvas Click Handler (REMOVED) ***
-  // We no longer set up a canvas click listener, as it conflicts with D3 zoom/pan.
 
   return chart;
 }
 
-/**
- * Apply permanent labels using the library's API
- */
 function applyAddButtonLabels(editApi) {
   if (!editApi) return;
 
@@ -254,7 +243,6 @@ function applyAddButtonLabels(editApi) {
       spouse: ADD_LABELS.partner
     });
   } else {
-    // Fallbacks
     if (typeof editApi.setAddParentLabel === 'function') {
       editApi.setAddParentLabel(ADD_LABELS.parent);
     }
@@ -274,33 +262,55 @@ function applyAddButtonLabels(editApi) {
 function configureForm(form) {
   if (!form || form.dataset.prepared) return;
 
-  configureYearInputs(form);
+  configureFormInputs(form); // Renamed to handle all inputs
   configureGenderField(form);
   hideRemoveRelationship(form);
-  ensureRelationshipTypeSelector(form);
+  
+  // This function now handles *both* new and existing partners
+  ensureRelationshipTypeSelector(form); 
+  
   renameYearLabels(form);
-  applyDefaultGenderIfNeeded(form); // For first person
+  applyDefaultGenderIfNeeded(form);
 
   form.dataset.prepared = 'true';
 }
 
-function configureYearInputs(form) {
-  ['birthday', 'death'].forEach(name => {
-    const input = form.querySelector(`input[name="${name}"]`);
-    if (!input) return;
+/**
+ * REQUIREMENT #1: "Enter" to Submit
+ * Configures year inputs and adds 'Enter' key listener to all inputs.
+ */
+function configureFormInputs(form) {
+  // Find the submit button to click programmatically
+  const submitButton = form.querySelector('button[type="submit"]');
+  if (!submitButton) return;
 
-    input.type = 'text';
-    input.maxLength = 4;
-    input.placeholder = 'YYYY';
-    input.pattern = '[0-9]{4}';
+  const inputs = form.querySelectorAll('input[type="text"], select');
 
-    input.addEventListener('input', (event) => {
-      event.target.value = event.target.value.replace(/[^0-9]/g, '');
+  inputs.forEach(input => {
+    // Add keydown listener for "Enter"
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault(); // Stop default "Enter" behavior
+        submitButton.click();   // Trigger form submission
+      }
     });
 
-    input.addEventListener('keypress', (event) => {
-      if (!/[0-9]/.test(event.key)) event.preventDefault();
-    });
+    // Specific logic for year inputs
+    const name = input.getAttribute('name');
+    if (name === 'birthday' || name === 'death') {
+      input.type = 'text';
+      input.maxLength = 4;
+      input.placeholder = 'YYYY';
+      input.pattern = '[0-9]{4}';
+
+      input.addEventListener('input', (event) => {
+        event.target.value = event.target.value.replace(/[^0-9]/g, '');
+      });
+
+      input.addEventListener('keypress', (event) => {
+        if (!/[0-9]/.test(event.key)) event.preventDefault();
+      });
+    }
   });
 }
 
@@ -323,46 +333,103 @@ function hideRemoveRelationship(form) {
   if (removeBtn) removeBtn.style.display = 'none';
 }
 
+/**
+ * REQUIREMENT #3: Edit Relationship Type
+ * This function now also adds dropdowns for *existing* spouses.
+ */
 function ensureRelationshipTypeSelector(form) {
   const title = form.querySelector('.f3-form-title');
   if (!title) return;
-
-  const isPartnerForm = /partner|spouse/i.test(title.textContent);
   
   const formCont = form.closest('.f3-form-cont');
   const datum = formCont?.__f3_form_creator__?.datum;
+  if (!datum) return;
 
-  const isExistingPartner = datum && state.members.find(m => m.id === datum.id) &&
-                            (datum.rels?.spouses?.length > 0 || /partner|spouse/i.test(datum._new_rel_data?.rel_type));
+  const radioGroup = form.querySelector('.f3-radio-group');
+  if (!radioGroup?.parentNode) return;
 
-  if (!isPartnerForm && !isExistingPartner) return;
-
-  if (!form.querySelector('.relationship-type-selector')) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'f3-form-field relationship-type-selector';
-    wrapper.innerHTML = `
-      <label>Relationship Type</label>
-      <select name="relationship_type" class="relationship-type-select">
-        <option value="married">Married</option>
-        <option value="partner">Partner</option>
-        <option value="divorced">Divorced</option>
-        <option value="separated">Separated</option>
-      </select>
-    `;
-
-    const radioGroup = form.querySelector('.f3-radio-group');
-    if (radioGroup?.parentNode) {
+  // Check if this form is for a *new* partner
+  const isPartnerForm = /partner|spouse/i.test(title.textContent);
+  if (isPartnerForm) {
+    // This is for a NEW partner
+    if (!form.querySelector('.relationship-type-selector-new')) {
+      const wrapper = createRelationshipDropdown(
+        'relationship-type-selector-new', 
+        'relationship_type', 
+        'New Relationship Type', 
+        null
+      );
       radioGroup.parentNode.insertBefore(wrapper, radioGroup.nextSibling);
     }
+    return; // Stop here if it's a new partner form
   }
 
-  if (datum && !datum._new_rel_data) {
-    const mainPerson = state.chart.store.getMainDatum();
-    const relType = getRelationshipType(datum, mainPerson, state.spousalRels);
-    const select = form.querySelector(SELECTORS.relationshipTypeSelect);
-    if (select) select.value = relType;
+  // --- Logic for EXISTING partners ---
+  const spouseIds = datum.rels?.spouses || [];
+  if (spouseIds.length === 0 || datum._new_rel_data) {
+    return; // Not a new partner, but also no existing partners
   }
+
+  // Loop through all existing spouses and add a dropdown for each one
+  spouseIds.forEach(spouseId => {
+    const spouse = state.members.find(m => m.id === spouseId);
+    if (!spouse) return;
+
+    const rel = state.spousalRels.find(r =>
+      (r.person1_id === datum.id && r.person2_id === spouseId) ||
+      (r.person1_id === spouseId && r.person2_id === datum.id)
+    );
+    
+    // Only add dropdown if the relationship exists in the DB
+    if (!rel) return; 
+
+    const selectorClass = `relationship-type-selector-existing`;
+    const selectorId = `rel_type_${spouseId}`;
+    
+    // Check if dropdown for this spouse already exists
+    if (form.querySelector(`select[name="${selectorId}"]`)) return;
+
+    const spouseName = `${spouse.first_name || ''} ${spouse.last_name || ''}`.trim();
+    const label = `Relationship with ${spouseName || 'Spouse'}`;
+    
+    const wrapper = createRelationshipDropdown(
+      selectorClass,
+      selectorId,
+      label,
+      rel
+    );
+    
+    // Add data attributes to find this specific relationship later
+    const select = wrapper.querySelector('select');
+    if (select) {
+      select.setAttribute('data-spouse-id', spouseId);
+      select.setAttribute('data-rel-id', rel.id);
+    }
+    
+    radioGroup.parentNode.insertBefore(wrapper, radioGroup.nextSibling);
+  });
 }
+
+/**
+ * Helper function to create the HTML for a relationship dropdown
+ */
+function createRelationshipDropdown(wrapperClass, name, label, dbRel) {
+  const currentType = dbRel ? dbRel.relationship_type : 'married';
+  
+  const wrapper = document.createElement('div');
+  wrapper.className = `f3-form-field ${wrapperClass}`;
+  wrapper.innerHTML = `
+    <label>${label}</label>
+    <select name="${name}" class="relationship-type-select">
+      <option value="married" ${currentType === 'married' ? 'selected' : ''}>Married</option>
+      <option value="partner" ${currentType === 'partner' ? 'selected' : ''}>Partner</option>
+      <option value="divorced" ${currentType === 'divorced' ? 'selected' : ''}>Divorced</option>
+      <option value="separated" ${currentType === 'separated' ? 'selected' : ''}>Separated</option>
+    </select>
+  `;
+  return wrapper;
+}
+
 
 function renameYearLabels(form) {
   setFieldLabel(form, 'birthday', 'Year of birth');
@@ -509,7 +576,7 @@ async function syncToDatabase() {
         first_name: chartPerson.data['first name'] || '',
         last_name: chartPerson.data['last name'] || '',
         birthday: chartPerson.data['birthday'] ? Number.parseInt(chartPerson.data['birthday'], 10) : null,
-        death: chartPerson.data['death'] ? Number.parseInt(person.data['death'], 10) : null,
+        death: chartPerson.data['death'] ? Number.parseInt(chartPerson.data['death'], 10) : null, // Fixed bug here
         gender: chartPerson.data['gender'] || null
       };
 
