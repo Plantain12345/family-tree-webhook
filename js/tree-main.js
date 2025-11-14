@@ -1,4 +1,4 @@
-import { 
+import {
   getFamilyTreeByCode,
   getFamilyMembers,
   getParentChildRelationships,
@@ -12,114 +12,158 @@ import {
   deleteSpousalRelationship
 } from './supabase-client.js'
 
-import { 
+import {
   transformDatabaseToFamilyChart,
   findMainPersonId
 } from './tree-data.js'
 
 import { setupRealtimeSync } from './tree-sync.js'
 
-let currentTreeId = null
-let currentTreeCode = null
-let f3Chart = null
-let allMembers = []
-let allParentChildRels = []
-let allSpousalRels = []
-let isSaving = false
-let saveTimer = null
+// -----------------------------------------------------------------------------
+// Constants & shared state
+// -----------------------------------------------------------------------------
 
-const urlParams = new URLSearchParams(window.location.search)
-const treeCode = urlParams.get('code')
+const FIRST_PERSON_DEFAULT_GENDER = 'M'
 
-if (!treeCode) {
-  window.location.href = 'index.html'
-} else {
+const ADD_LABELS = {
+  parent: 'Add Parent',
+  child: 'Add Child',
+  partner: 'Add Partner'
+}
+
+const SELECTORS = {
+  card: '.card',
+  addBubble: '.card_add_relative',
+  addCard: '.card_add',
+  editButton: '.card_edit',
+  formContainer: '.f3-form-cont.opened',
+  form: 'form',
+  formDeleteButton: '.f3-delete-btn',
+  formCloseButton: '.f3-close-btn',
+  relationshipTypeSelect: '.relationship-type-select'
+}
+
+const state = {
+  treeId: null,
+  treeCode: null,
+  chart: null,
+  editApi: null,
+  members: [],
+  parentChildRels: [],
+  spousalRels: [],
+  isSaving: false,
+  saveTimer: null,
+  listenersRegistered: false,
+  activeCardElement: null
+}
+
+initializePage()
+
+// -----------------------------------------------------------------------------
+// Initialisation & data loading
+// -----------------------------------------------------------------------------
+
+function initializePage() {
+  const params = new URLSearchParams(window.location.search)
+  const code = params.get('code')
+
+  if (!code) {
+    window.location.href = 'index.html'
+    return
+  }
+
+  document.getElementById('copyCodeBtn')?.addEventListener('click', handleCopyTreeCode)
+
   window.addEventListener('load', () => {
-    setTimeout(() => {
-      if (window.f3) initializeTree(treeCode)
-      else alert('Error loading library. Please refresh.')
-    }, 300)
+    if (window.f3) initializeTree(code)
+    else alert('Error loading library. Please refresh.')
   })
 }
 
-document.getElementById('copyCodeBtn')?.addEventListener('click', () => {
-  navigator.clipboard.writeText(currentTreeCode)
-  const btn = document.getElementById('copyCodeBtn')
-  const orig = btn.textContent
-  btn.textContent = '✓'
-  setTimeout(() => btn.textContent = orig, 2000)
-})
-
 async function initializeTree(code) {
   try {
-    document.getElementById('loadingOverlay').classList.remove('hidden')
-    
+    toggleLoading(true)
+
     const result = await getFamilyTreeByCode(code)
     if (!result.success) {
       alert('Tree not found!')
       window.location.href = 'index.html'
       return
     }
-    
+
     const tree = result.data
-    currentTreeId = tree.id
-    currentTreeCode = tree.tree_code
-    
+    state.treeId = tree.id
+    state.treeCode = tree.tree_code
+
     document.getElementById('treeName').textContent = tree.tree_name
     document.getElementById('treeCodeDisplay').textContent = tree.tree_code
-    
+
     await loadTreeData()
-    setupRealtimeSync(currentTreeId, () => { if (!isSaving) loadTreeData() })
-    
-    document.getElementById('loadingOverlay').classList.add('hidden')
+    setupRealtimeSync(state.treeId, () => {
+      if (!state.isSaving) loadTreeData()
+    })
   } catch (error) {
     console.error('Init error:', error)
-    document.getElementById('loadingOverlay').classList.add('hidden')
+  } finally {
+    toggleLoading(false)
   }
 }
 
 async function loadTreeData() {
   try {
-    const [m, pc, s] = await Promise.all([
-      getFamilyMembers(currentTreeId),
-      getParentChildRelationships(currentTreeId),
-      getSpousalRelationships(currentTreeId)
+    const [memberRes, pcRes, spRes] = await Promise.all([
+      getFamilyMembers(state.treeId),
+      getParentChildRelationships(state.treeId),
+      getSpousalRelationships(state.treeId)
     ])
-    
-    allMembers = m.data || []
-    allParentChildRels = pc.data || []
-    allSpousalRels = s.data || []
-    
-    console.log('Loaded members:', allMembers.length)
-    
-    const data = transformDatabaseToFamilyChart(allMembers, allParentChildRels, allSpousalRels)
-    
-    console.log('Transformed data:', data.length)
-    
-    if (!f3Chart) {
-      createChart(data)
-    } else {
-      f3Chart.updateData(data)
-      f3Chart.updateTree({ initial: false })
-      setTimeout(() => fixAllLabels(), 500)
-    }
+
+    state.members = memberRes.data || []
+    state.parentChildRels = pcRes.data || []
+    state.spousalRels = spRes.data || []
+
+    const chartData = transformDatabaseToFamilyChart(
+      state.members,
+      state.parentChildRels,
+      state.spousalRels
+    )
+
+    renderTree(chartData)
   } catch (error) {
     console.error('Load error:', error)
   }
 }
 
-function createChart(data) {
-  console.log('Creating chart with data:', data)
-  
-  f3Chart = window.f3.createChart('#FamilyChart', data)
+// -----------------------------------------------------------------------------
+// Chart creation & updates
+// -----------------------------------------------------------------------------
+
+function renderTree(chartData) {
+  if (!state.chart) {
+    state.chart = createChart(chartData)
+    window.f3Chart = state.chart
+  } else {
+    configureGlobalAddLabels()
+    exitAddMode()
+    state.chart.updateData(chartData)
+    const mainId = findMainPersonId(state.members)
+    if (mainId) state.chart.updateMainId(mainId)
+    state.chart.updateTree({ initial: false })
+    hideAllAddButtons()
+  }
+}
+
+function createChart(chartData) {
+  configureGlobalAddLabels()
+
+  const chart = window.f3.createChart('#FamilyChart', chartData)
     .setTransitionTime(1000)
     .setCardXSpacing(250)
     .setCardYSpacing(150)
-  
-  // Use standard card display with dash between years
-  const f3Card = f3Chart.setCardHtml()
+
+  chart
+    .setCardHtml()
     .setCardDisplay([
-      ["first name", "last name"], 
+      ['first name', 'last name'],
       (d) => {
         const birth = d.data['birthday'] || ''
         const death = d.data['death'] || ''
@@ -129,218 +173,347 @@ function createChart(data) {
         return ''
       }
     ])
-  
-  // CRITICAL: Do NOT use setCardClickOpen - it prevents + buttons from showing
-  // Setup edit tree WITHOUT opening form on card click
-  f3Chart.editTree()
-    .setFields(["first name", "last name", "birthday", "death"])
-    .setEditFirst(false)  // This makes + buttons appear on card click
-  
-  const mainId = findMainPersonId(allMembers)
-  if (mainId) f3Chart.updateMainId(mainId)
-  
-  f3Chart.updateTree({ initial: true })
-  
-  console.log('Chart created, setting up UI...')
-  
-  setTimeout(() => {
-    setupListeners()
-    fixAllLabels()
-    console.log('+ buttons available:', document.querySelectorAll('.card_add_relative').length)
-  }, 500)
-  
-  window.f3Chart = f3Chart
+
+  state.editApi = chart.editTree()
+    .setFields(['first name', 'last name', 'birthday', 'death'])
+    .setEditFirst(false)
+
+  applyAddButtonLabels(state.editApi)
+
+  const mainId = findMainPersonId(state.members)
+  if (mainId) chart.updateMainId(mainId)
+
+  chart.updateTree({ initial: true })
+  hideAllAddButtons()
+  setupGlobalHandlers()
+
+  return chart
 }
 
-function setupListeners() {
-  console.log('Setting up listeners...')
-  
-  // Listen for form submissions
-  document.addEventListener('submit', (e) => {
-    if (e.target.id === 'familyForm') {
-      e.preventDefault()
-      
-      // Validate year fields
-      if (!validateYearFields(e.target)) {
-        return
-      }
-      
-      // Capture relationship type
-      const relSelect = e.target.querySelector('.relationship-type-select')
-      if (relSelect) {
-        window.lastRelationshipType = relSelect.value
-      }
-      
-      setTimeout(() => scheduleSave(), 300)
-    }
-  }, true)
-  
-  // Listen for delete button clicks
-  document.addEventListener('click', (e) => {
-    if (e.target.matches('.f3-delete-btn')) {
-      setTimeout(() => scheduleSave(), 300)
-    }
-  }, true)
-  
-  // Close form when clicking outside (but not on cards or + buttons)
-  document.addEventListener('click', (e) => {
-    const formCont = document.querySelector('.f3-form-cont.opened')
-    const clickedOnCard = e.target.closest('.card')
-    const clickedOnAddBtn = e.target.closest('.card_add_relative')
-    const clickedInForm = formCont && formCont.contains(e.target)
-    
-    if (formCont && !clickedInForm && !clickedOnCard && !clickedOnAddBtn) {
-      const closeBtn = formCont.querySelector('.f3-close-btn')
-      if (closeBtn) closeBtn.click()
-    }
-  }, true)
-  
-  // Fix labels whenever form opens
-  const observer = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.addedNodes.length > 0) {
-        setTimeout(() => fixAllLabels(), 50)
-        break
-      }
-    }
-  })
-  
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
-  })
-  
-  // Fix labels when clicking cards (to update + button labels)
-  document.addEventListener('click', (e) => {
-    if (e.target.closest('.card')) {
-      setTimeout(() => fixAllLabels(), 100)
-    }
-  }, true)
-}
+function applyAddButtonLabels(editApi) {
+  if (!editApi) return
 
-function fixAllLabels() {
-  // Fix form labels from "Birthday" to "Year of birth"
-  document.querySelectorAll('.f3-form-field label').forEach(label => {
-    if (label.textContent.toLowerCase().includes('birthday')) {
-      label.textContent = 'Year of birth'
-    }
-    if (label.textContent.toLowerCase() === 'death') {
-      label.textContent = 'Year of death'
-    }
-  })
-  
-  // Fix + button labels
-  const replacements = {
-    'Add Father': 'Add Parent',
-    'Add Mother': 'Add Parent',
-    'Add Son': 'Add Child',
-    'Add Daughter': 'Add Child',
-    'Add Spouse': 'Add Partner'
-  }
-  
-  // Fix text content in SVG and HTML elements
-  document.querySelectorAll('text, title, [data-rel-type]').forEach(el => {
-    if (el.textContent) {
-      let newText = el.textContent
-      Object.keys(replacements).forEach(old => {
-        newText = newText.replace(new RegExp(old, 'gi'), replacements[old])
-      })
-      if (newText !== el.textContent) {
-        el.textContent = newText
-      }
-    }
-  })
-  
-  // Also customize UI after fixing labels
-  customizeFormInputs()
-}
-
-function customizeFormInputs() {
-  const form = document.querySelector('#familyForm')
-  if (!form) return
-  
-  // Add input restrictions for year fields
-  const birthdayInput = form.querySelector('input[name="birthday"]')
-  const deathInput = form.querySelector('input[name="death"]')
-  
-  [birthdayInput, deathInput].forEach(input => {
-    if (input && !input.dataset.customized) {
-      input.dataset.customized = 'true'
-      input.type = 'text'
-      input.maxLength = 4
-      input.placeholder = 'YYYY'
-      input.pattern = '[0-9]{4}'
-      
-      // Only allow numbers
-      input.addEventListener('input', (e) => {
-        e.target.value = e.target.value.replace(/[^0-9]/g, '')
-      })
-      
-      input.addEventListener('keypress', (e) => {
-        if (!/[0-9]/.test(e.key)) {
-          e.preventDefault()
-        }
-      })
-    }
-  })
-  
-  // Hide gender text input (we use radio buttons)
-  const genderInput = form.querySelector('input[name="gender"][type="text"]')
-  if (genderInput) {
-    const genderField = genderInput.closest('.f3-form-field')
-    if (genderField) genderField.style.display = 'none'
-    
-    form.querySelectorAll('input[name="gender"][type="radio"]').forEach(radio => {
-      radio.addEventListener('change', () => {
-        genderInput.value = radio.value
-      })
+  if (typeof editApi.setAddLabels === 'function') {
+    editApi.setAddLabels({
+      father: ADD_LABELS.parent,
+      mother: ADD_LABELS.parent,
+      son: ADD_LABELS.child,
+      daughter: ADD_LABELS.child,
+      spouse: ADD_LABELS.partner
     })
   }
-  
-  // Hide remove relation button
-  const removeBtn = form.querySelector('.f3-remove-relative-btn')
-  if (removeBtn) removeBtn.style.display = 'none'
-  
-  addRelationshipTypeSelector(form)
+
+  if (typeof editApi.setAddParentLabel === 'function') {
+    editApi.setAddParentLabel(ADD_LABELS.parent)
+  }
+  if (typeof editApi.setAddChildLabel === 'function') {
+    editApi.setAddChildLabel(ADD_LABELS.child)
+  }
+  if (typeof editApi.setAddSpouseLabel === 'function') {
+    editApi.setAddSpouseLabel(ADD_LABELS.partner)
+  }
 }
 
-function addRelationshipTypeSelector(form) {
-  const formTitle = form.querySelector('.f3-form-title')
-  if (!formTitle) return
-  
-  const titleText = formTitle.textContent.toLowerCase()
-  const isPartnerForm = titleText.includes('partner') || titleText.includes('spouse')
+function configureGlobalAddLabels() {
+  const dictionaries = [
+    window.f3?.strings,
+    window.f3?.language?.strings,
+    window.f3?.edit?.strings
+  ].filter(Boolean)
+
+  if (dictionaries.length === 0) return
+
+  const replacements = [
+    ['addFather', ADD_LABELS.parent],
+    ['addMother', ADD_LABELS.parent],
+    ['addSon', ADD_LABELS.child],
+    ['addDaughter', ADD_LABELS.child],
+    ['addSpouse', ADD_LABELS.partner],
+    ['Add Father', ADD_LABELS.parent],
+    ['Add Mother', ADD_LABELS.parent],
+    ['Add Son', ADD_LABELS.child],
+    ['Add Daughter', ADD_LABELS.child],
+    ['Add Spouse', ADD_LABELS.partner]
+  ]
+
+  dictionaries.forEach(dict => {
+    replacements.forEach(([key, value]) => {
+      if (dict[key] !== undefined) dict[key] = value
+    })
+  })
+}
+
+// -----------------------------------------------------------------------------
+// Interaction handling
+// -----------------------------------------------------------------------------
+
+function setupGlobalHandlers() {
+  if (state.listenersRegistered) return
+  state.listenersRegistered = true
+
+  const chartContainer = document.getElementById('FamilyChart')
+  if (chartContainer) {
+    chartContainer.addEventListener('click', handleChartClick)
+  }
+
+  document.addEventListener('click', handleDocumentClick, true)
+  document.addEventListener('submit', handleFormSubmit, true)
+  document.addEventListener('click', handleFormOpenTriggers, true)
+}
+
+function handleChartClick(event) {
+  const addBubble = event.target.closest(SELECTORS.addBubble)
+  if (addBubble) {
+    queueMicrotask(prepareActiveForm)
+    return
+  }
+
+  const card = event.target.closest(SELECTORS.card)
+  if (!card) return
+
+  event.stopPropagation()
+  enterAddMode(card)
+  openFormForCard(card)
+}
+
+function handleFormOpenTriggers(event) {
+  if (
+    event.target.closest(SELECTORS.addCard) ||
+    event.target.closest(SELECTORS.addBubble) ||
+    event.target.closest(SELECTORS.editButton)
+  ) {
+    queueMicrotask(prepareActiveForm)
+  }
+}
+
+function handleDocumentClick(event) {
+  if (event.target.matches(SELECTORS.formDeleteButton)) {
+    queueMicrotask(scheduleSave)
+    return
+  }
+
+  if (event.target.matches(SELECTORS.formCloseButton)) {
+    queueMicrotask(exitAddMode)
+    return
+  }
+
+  const clickedCard = event.target.closest(SELECTORS.card)
+  const clickedForm = event.target.closest('.f3-form-cont')
+  const clickedAddBubble = event.target.closest(SELECTORS.addBubble)
+  const clickedAddCard = event.target.closest(SELECTORS.addCard)
+
+  if (!clickedCard && !clickedForm && !clickedAddBubble && !clickedAddCard) {
+    exitAddMode()
+  }
+}
+
+function enterAddMode(card) {
+  if (!card) return
+
+  if (state.activeCardElement === card) {
+    toggleRelativeButtons(card, true)
+    return
+  }
+
+  exitAddMode()
+  state.activeCardElement = card
+  card.classList.add('f3-card-active')
+  toggleRelativeButtons(card, true)
+}
+
+function exitAddMode() {
+  if (state.activeCardElement) {
+    toggleRelativeButtons(state.activeCardElement, false)
+    state.activeCardElement.classList.remove('f3-card-active')
+    state.activeCardElement = null
+  }
+  hideAllAddButtons()
+  closeOpenForm()
+}
+
+function hideAllAddButtons() {
+  document.querySelectorAll(SELECTORS.addBubble).forEach(btn => {
+    btn.style.opacity = '0'
+    btn.style.pointerEvents = 'none'
+  })
+}
+
+function toggleRelativeButtons(card, show) {
+  card.querySelectorAll(SELECTORS.addBubble).forEach(btn => {
+    btn.style.opacity = show ? '1' : '0'
+    btn.style.pointerEvents = show ? 'auto' : 'none'
+  })
+}
+
+function openFormForCard(card) {
+  const editButton = card.querySelector(SELECTORS.editButton)
+  if (!editButton) return
+
+  editButton.dispatchEvent(new Event('click', { bubbles: true }))
+  queueMicrotask(prepareActiveForm)
+}
+
+function closeOpenForm() {
+  const formContainer = document.querySelector(SELECTORS.formContainer)
+  if (!formContainer) return
+  const closeBtn = formContainer.querySelector(SELECTORS.formCloseButton)
+  if (closeBtn) closeBtn.click()
+}
+
+// -----------------------------------------------------------------------------
+// Form preparation & validation
+// -----------------------------------------------------------------------------
+
+function handleFormSubmit(event) {
+  if (event.target.id !== 'familyForm') return
+
+  event.preventDefault()
+  if (!validateYearFields(event.target)) return
+
+  const relationshipSelect = event.target.querySelector(SELECTORS.relationshipTypeSelect)
+  if (relationshipSelect) {
+    window.lastRelationshipType = relationshipSelect.value
+  }
+
+  queueMicrotask(scheduleSave)
+}
+
+function prepareActiveForm() {
+  const formContainer = document.querySelector(SELECTORS.formContainer)
+  if (!formContainer) return
+
+  const form = formContainer.querySelector(SELECTORS.form)
+  if (!form) return
+
+  form.id = 'familyForm'
+
+  if (!form.dataset.prepared) {
+    configureYearInputs(form)
+    configureGenderField(form)
+    hideRemoveRelationship(form)
+    form.dataset.prepared = 'true'
+  }
+
+  ensureRelationshipTypeSelector(form)
+  renameYearLabels(form)
+  applyDefaultGenderIfNeeded(form)
+}
+
+function configureYearInputs(form) {
+  ['birthday', 'death'].forEach(name => {
+    const input = form.querySelector(`input[name="${name}"]`)
+    if (!input || input.dataset.prepared) return
+
+    input.dataset.prepared = 'true'
+    input.type = 'text'
+    input.maxLength = 4
+    input.placeholder = 'YYYY'
+    input.pattern = '[0-9]{4}'
+
+    input.addEventListener('input', (event) => {
+      event.target.value = event.target.value.replace(/[^0-9]/g, '')
+    })
+
+    input.addEventListener('keypress', (event) => {
+      if (!/[0-9]/.test(event.key)) event.preventDefault()
+    })
+  })
+}
+
+function configureGenderField(form) {
+  const textInput = form.querySelector('input[name="gender"][type="text"]')
+  if (!textInput) return
+
+  const genderField = textInput.closest('.f3-form-field')
+  if (genderField) genderField.style.display = 'none'
+
+  form.querySelectorAll('input[name="gender"][type="radio"]').forEach(radio => {
+    if (radio.dataset.bound) return
+    radio.dataset.bound = 'true'
+    radio.addEventListener('change', () => {
+      textInput.value = radio.value
+    })
+  })
+}
+
+function hideRemoveRelationship(form) {
+  const removeBtn = form.querySelector('.f3-remove-relative-btn')
+  if (removeBtn) removeBtn.style.display = 'none'
+}
+
+function ensureRelationshipTypeSelector(form) {
+  const title = form.querySelector('.f3-form-title')
+  if (!title) return
+
+  const isPartnerForm = /partner|spouse/i.test(title.textContent)
   if (!isPartnerForm) return
-  
-  if (form.querySelector('.relationship-type-selector')) return
-  
-  const relTypeDiv = document.createElement('div')
-  relTypeDiv.className = 'f3-form-field relationship-type-selector'
-  relTypeDiv.innerHTML = `
-    <label>Relationship Type</label>
-    <select name="relationship_type" class="relationship-type-select">
-      <option value="married">Married</option>
-      <option value="partner">Partner</option>
-      <option value="divorced">Divorced</option>
-      <option value="separated">Separated</option>
-    </select>
-  `
-  
-  const genderRadioGroup = form.querySelector('.f3-radio-group')
-  if (genderRadioGroup && genderRadioGroup.parentNode) {
-    genderRadioGroup.parentNode.insertBefore(relTypeDiv, genderRadioGroup.nextSibling)
-    
-    const select = relTypeDiv.querySelector('select')
+
+  if (!form.querySelector('.relationship-type-selector')) {
+    const wrapper = document.createElement('div')
+    wrapper.className = 'f3-form-field relationship-type-selector'
+    wrapper.innerHTML = `
+      <label>Relationship Type</label>
+      <select name="relationship_type" class="relationship-type-select">
+        <option value="married">Married</option>
+        <option value="partner">Partner</option>
+        <option value="divorced">Divorced</option>
+        <option value="separated">Separated</option>
+      </select>
+    `
+
+    const radioGroup = form.querySelector('.f3-radio-group')
+    if (radioGroup?.parentNode) {
+      radioGroup.parentNode.insertBefore(wrapper, radioGroup.nextSibling)
+    }
+  }
+
+  const select = form.querySelector(SELECTORS.relationshipTypeSelect)
+  if (select && !select.dataset.bound) {
+    select.dataset.bound = 'true'
     select.addEventListener('change', () => {
       window.lastRelationshipType = select.value
     })
   }
+
+  if (select && window.lastRelationshipType) {
+    select.value = window.lastRelationshipType
+  }
+}
+
+function renameYearLabels(form) {
+  setFieldLabel(form, 'birthday', 'Year of birth')
+  setFieldLabel(form, 'death', 'Year of death')
+}
+
+function setFieldLabel(form, fieldName, labelText) {
+  const input = form.querySelector(`input[name="${fieldName}"]`)
+  if (!input) return
+
+  const label = form.querySelector(`label[for="${input.id}"]`) ||
+    input.closest('.f3-form-field')?.querySelector('label')
+
+  if (label) label.textContent = labelText
+}
+
+function applyDefaultGenderIfNeeded(form) {
+  if (state.members.length > 0) return
+
+  const maleRadio = form.querySelector('input[name="gender"][type="radio"][value="M"]')
+  const genderText = form.querySelector('input[name="gender"][type="text"]')
+  if (!maleRadio) return
+
+  if (!maleRadio.checked) {
+    maleRadio.checked = true
+    maleRadio.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  if (genderText) genderText.value = FIRST_PERSON_DEFAULT_GENDER
 }
 
 function validateYearFields(form) {
   const birthdayInput = form.querySelector('input[name="birthday"]')
   const deathInput = form.querySelector('input[name="death"]')
-  
+
   if (birthdayInput && birthdayInput.value) {
     const year = birthdayInput.value.trim()
     if (!/^\d{4}$/.test(year)) {
@@ -348,14 +521,14 @@ function validateYearFields(form) {
       birthdayInput.focus()
       return false
     }
-    const yearNum = parseInt(year)
+    const yearNum = Number.parseInt(year, 10)
     if (yearNum < 1000 || yearNum > 9999) {
       alert('Year of birth must be between 1000 and 9999')
       birthdayInput.focus()
       return false
     }
   }
-  
+
   if (deathInput && deathInput.value) {
     const year = deathInput.value.trim()
     if (!/^\d{4}$/.test(year)) {
@@ -363,16 +536,15 @@ function validateYearFields(form) {
       deathInput.focus()
       return false
     }
-    const yearNum = parseInt(year)
+    const yearNum = Number.parseInt(year, 10)
     if (yearNum < 1000 || yearNum > 9999) {
       alert('Year of death must be between 1000 and 9999')
       deathInput.focus()
       return false
     }
-    
-    // Check death after birth
+
     if (birthdayInput && birthdayInput.value) {
-      const birthYear = parseInt(birthdayInput.value)
+      const birthYear = Number.parseInt(birthdayInput.value, 10)
       if (yearNum < birthYear) {
         alert('Year of death cannot be before year of birth')
         deathInput.focus()
@@ -380,111 +552,114 @@ function validateYearFields(form) {
       }
     }
   }
-  
+
   return true
 }
 
+// -----------------------------------------------------------------------------
+// Persistence
+// -----------------------------------------------------------------------------
+
 function scheduleSave() {
-  if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => syncToDatabase(), 1000)
+  if (state.saveTimer) clearTimeout(state.saveTimer)
+  state.saveTimer = setTimeout(() => syncToDatabase(), 1000)
 }
 
 async function syncToDatabase() {
-  if (isSaving) return
-  isSaving = true
-  
+  if (state.isSaving) return
+  state.isSaving = true
+
   try {
-    const chartData = f3Chart.store.getData()
-    const chartIds = new Set(chartData.map(d => d.id))
-    const dbIds = new Set(allMembers.map(m => m.id))
-    
+    const chartData = state.chart.store.getData()
+    const chartIds = new Set(chartData.map(item => item.id))
+    const dbIds = new Set(state.members.map(member => member.id))
+
     const newIds = [...chartIds].filter(id => !dbIds.has(id))
-    const delIds = [...dbIds].filter(id => !chartIds.has(id))
-    const existIds = [...chartIds].filter(id => dbIds.has(id))
-    
-    console.log('Syncing:', { new: newIds.length, del: delIds.length, exist: existIds.length })
-    
-    // Delete removed members
-    for (const id of delIds) {
-      const pRels = allParentChildRels.filter(r => r.parent_id === id || r.child_id === id)
-      const sRels = allSpousalRels.filter(r => r.person1_id === id || r.person2_id === id)
-      
-      for (const r of pRels) await deleteParentChildRelationship(r.parent_id, r.child_id)
-      for (const r of sRels) await deleteSpousalRelationship(r.person1_id, r.person2_id)
-      
+    const deletedIds = [...dbIds].filter(id => !chartIds.has(id))
+    const existingIds = [...chartIds].filter(id => dbIds.has(id))
+
+    for (const id of deletedIds) {
+      const relatedParents = state.parentChildRels.filter(rel => rel.parent_id === id || rel.child_id === id)
+      const relatedSpouses = state.spousalRels.filter(rel => rel.person1_id === id || rel.person2_id === id)
+
+      for (const rel of relatedParents) {
+        await deleteParentChildRelationship(rel.parent_id, rel.child_id)
+      }
+      for (const rel of relatedSpouses) {
+        await deleteSpousalRelationship(rel.person1_id, rel.person2_id)
+      }
+
       await deleteFamilyMember(id)
     }
-    
-    // Create all new members
+
     for (const id of newIds) {
-      const person = chartData.find(d => d.id === id)
+      const person = chartData.find(datum => datum.id === id)
       if (!person) continue
-      
+
       await createFamilyMember({
-        id: id,
-        tree_id: currentTreeId,
+        id,
+        tree_id: state.treeId,
         first_name: person.data['first name'] || '',
         last_name: person.data['last name'] || '',
-        birthday: person.data['birthday'] ? parseInt(person.data['birthday']) : null,
-        death: person.data['death'] ? parseInt(person.data['death']) : null,
+        birthday: person.data['birthday'] ? Number.parseInt(person.data['birthday'], 10) : null,
+        death: person.data['death'] ? Number.parseInt(person.data['death'], 10) : null,
         gender: person.data['gender'] || null,
         is_main: false
       })
     }
-    
-    // Update existing members
-    for (const id of existIds) {
-      const chartPerson = chartData.find(d => d.id === id)
-      const dbPerson = allMembers.find(m => m.id === id)
+
+    for (const id of existingIds) {
+      const chartPerson = chartData.find(datum => datum.id === id)
+      const dbPerson = state.members.find(member => member.id === id)
       if (!chartPerson || !dbPerson) continue
-      
+
       const updates = {
         first_name: chartPerson.data['first name'] || '',
         last_name: chartPerson.data['last name'] || '',
-        birthday: chartPerson.data['birthday'] ? parseInt(chartPerson.data['birthday']) : null,
-        death: chartPerson.data['death'] ? parseInt(chartPerson.data['death']) : null,
+        birthday: chartPerson.data['birthday'] ? Number.parseInt(chartPerson.data['birthday'], 10) : null,
+        death: chartPerson.data['death'] ? Number.parseInt(chartPerson.data['death'], 10) : null,
         gender: chartPerson.data['gender'] || null
       }
-      
-      const changed = 
+
+      const changed =
         updates.first_name !== dbPerson.first_name ||
         updates.last_name !== dbPerson.last_name ||
         updates.birthday !== dbPerson.birthday ||
         updates.death !== dbPerson.death ||
         updates.gender !== dbPerson.gender
-      
-      if (changed) await updateFamilyMember(id, updates)
+
+      if (changed) {
+        await updateFamilyMember(id, updates)
+      }
     }
-    
-    // Refresh and sync relationships
-    const mResult = await getFamilyMembers(currentTreeId)
-    if (mResult.success) allMembers = mResult.data
-    
+
+    const membersResult = await getFamilyMembers(state.treeId)
+    if (membersResult.success) state.members = membersResult.data
+
     await syncRelationships(chartData)
-    
-    const pcResult = await getParentChildRelationships(currentTreeId)
-    if (pcResult.success) allParentChildRels = pcResult.data
-    
-    const sResult = await getSpousalRelationships(currentTreeId)
-    if (sResult.success) allSpousalRels = sResult.data
-    
+
+    const pcResult = await getParentChildRelationships(state.treeId)
+    if (pcResult.success) state.parentChildRels = pcResult.data
+
+    const spResult = await getSpousalRelationships(state.treeId)
+    if (spResult.success) state.spousalRels = spResult.data
   } catch (error) {
     console.error('Sync error:', error)
   } finally {
-    isSaving = false
+    state.isSaving = false
   }
 }
 
 async function syncRelationships(chartData) {
   const targetParentChild = []
   const targetSpousal = []
-  
+
   for (const person of chartData) {
     const { father, mother, spouses } = person.rels || {}
-    
+
     if (father) targetParentChild.push({ parent_id: father, child_id: person.id })
     if (mother) targetParentChild.push({ parent_id: mother, child_id: person.id })
-    
+
     if (spouses) {
       for (const spouseId of spouses) {
         if (person.id < spouseId) {
@@ -493,50 +668,70 @@ async function syncRelationships(chartData) {
       }
     }
   }
-  
-  // Create missing parent-child relationships
+
   for (const target of targetParentChild) {
-    const exists = allParentChildRels.find(r => 
-      r.parent_id === target.parent_id && r.child_id === target.child_id
+    const exists = state.parentChildRels.find(rel =>
+      rel.parent_id === target.parent_id && rel.child_id === target.child_id
     )
     if (!exists) {
-      const result = await createParentChildRelationship(currentTreeId, target.parent_id, target.child_id)
-      if (result.success && result.data) allParentChildRels.push(result.data)
+      const result = await createParentChildRelationship(state.treeId, target.parent_id, target.child_id)
+      if (result.success && result.data) state.parentChildRels.push(result.data)
     }
   }
-  
-  // Delete extra parent-child relationships
-  for (const existing of allParentChildRels) {
-    const shouldExist = targetParentChild.find(t => 
-      t.parent_id === existing.parent_id && t.child_id === existing.child_id
+
+  for (const existing of state.parentChildRels) {
+    const shouldExist = targetParentChild.find(target =>
+      target.parent_id === existing.parent_id && target.child_id === existing.child_id
     )
     if (!shouldExist) {
       await deleteParentChildRelationship(existing.parent_id, existing.child_id)
     }
   }
-  
-  // Create missing spousal relationships
+
   for (const target of targetSpousal) {
-    const exists = allSpousalRels.find(r => 
-      (r.person1_id === target.p1 && r.person2_id === target.p2) ||
-      (r.person1_id === target.p2 && r.person2_id === target.p1)
+    const exists = state.spousalRels.find(rel =>
+      (rel.person1_id === target.p1 && rel.person2_id === target.p2) ||
+      (rel.person1_id === target.p2 && rel.person2_id === target.p1)
     )
     if (!exists) {
       const relType = window.lastRelationshipType || 'married'
-      const result = await createSpousalRelationship(currentTreeId, target.p1, target.p2, relType)
-      if (result.success && result.data) allSpousalRels.push(result.data)
+      const result = await createSpousalRelationship(state.treeId, target.p1, target.p2, relType)
+      if (result.success && result.data) state.spousalRels.push(result.data)
       window.lastRelationshipType = null
     }
   }
-  
-  // Delete extra spousal relationships
-  for (const existing of allSpousalRels) {
-    const shouldExist = targetSpousal.find(t => 
-      (t.p1 === existing.person1_id && t.p2 === existing.person2_id) ||
-      (t.p1 === existing.person2_id && t.p2 === existing.person1_id)
+
+  for (const existing of state.spousalRels) {
+    const shouldExist = targetSpousal.find(target =>
+      (target.p1 === existing.person1_id && target.p2 === existing.person2_id) ||
+      (target.p1 === existing.person2_id && target.p2 === existing.person1_id)
     )
     if (!shouldExist) {
       await deleteSpousalRelationship(existing.person1_id, existing.person2_id)
     }
   }
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+function handleCopyTreeCode() {
+  if (!state.treeCode) return
+
+  navigator.clipboard.writeText(state.treeCode)
+  const btn = document.getElementById('copyCodeBtn')
+  if (!btn) return
+
+  const original = btn.textContent
+  btn.textContent = '✓'
+  setTimeout(() => {
+    btn.textContent = original
+  }, 2000)
+}
+
+function toggleLoading(show) {
+  const overlay = document.getElementById('loadingOverlay')
+  if (!overlay) return
+  overlay.classList.toggle('hidden', !show)
 }
