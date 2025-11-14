@@ -168,11 +168,11 @@ function createChart(chartData) {
     .setFields(['first name', 'last name', 'birthday', 'death'])
     .setEditFirst(true) 
     .setOnFormCreation((props) => {
-      const { cont } = props; 
+      const { cont, form_creator } = props; // *** BUGFIX: Get form_creator
       const form = cont.querySelector('form');
       if (form) {
         form.id = SELECTORS.form.substring(1);
-        configureForm(form); // Configure all inputs, including new relationship editors
+        configureForm(form, form_creator.datum_id); // *** BUGFIX: Pass datum_id
       }
     })
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
@@ -181,7 +181,6 @@ function createChart(chartData) {
       
       if (!validateYearFields(form)) return;
 
-      // === NEW LOGIC FOR REQUIREMENT #3 ===
       // Handle relationship type updates BEFORE submitting
       const relSelects = form.querySelectorAll('.relationship-type-select-existing');
       for (const select of relSelects) {
@@ -260,7 +259,8 @@ function applyAddButtonLabels(editApi) {
 // Form preparation & validation (Called by .setOnFormCreation)
 // -----------------------------------------------------------------------------
 
-function configureForm(form) {
+// *** BUGFIX: Function now accepts datumId ***
+function configureForm(form, datumId) {
   if (!form || form.dataset.prepared) return;
 
   configureFormInputs(form); // Renamed to handle all inputs
@@ -268,7 +268,7 @@ function configureForm(form) {
   hideRemoveRelationship(form);
   
   // This function now handles *both* new and existing partners
-  ensureRelationshipTypeSelector(form); 
+  ensureRelationshipTypeSelector(form, datumId); // *** BUGFIX: Pass datumId
   
   renameYearLabels(form);
   applyDefaultGenderIfNeeded(form);
@@ -343,19 +343,25 @@ function hideRemoveRelationship(form) {
  * REQUIREMENT #3: Edit Relationship Type
  * This function now also adds dropdowns for *existing* spouses.
  */
-function ensureRelationshipTypeSelector(form) {
+// *** BUGFIX: Function now accepts datumId ***
+function ensureRelationshipTypeSelector(form, datumId) {
+  
+  // *** BUGFIX: Get datum reliably from state using datumId ***
+  const datum = state.chart.store.getData().find(d => d.id === datumId);
+  if (!datum) {
+    console.error("Datum not found in ensureRelationshipTypeSelector");
+    return;
+  }
+
   const title = form.querySelector('.f3-form-title');
   if (!title) return;
   
-  const formCont = form.closest('.f3-form-cont');
-  const datum = formCont?.__f3_form_creator__?.datum;
-  if (!datum) return;
-  
-  // *** FIX for BUG #1 ***
-  // Find a stable anchor point. The gender radio group is not always present,
-  // but the button container is.
+  // *** BUGFIX: Find a stable anchor point. ***
   const anchorElement = form.querySelector('.f3-form-buttons');
-  if (!anchorElement?.parentNode) return; // Can't add if anchor is missing
+  if (!anchorElement?.parentNode) {
+    console.error("Form anchor .f3-form-buttons not found");
+    return; // Can't add if anchor is missing
+  }
 
   // Check if this form is for a *new* partner
   const isPartnerForm = /partner|spouse/i.test(title.textContent);
@@ -374,13 +380,14 @@ function ensureRelationshipTypeSelector(form) {
       // Re-run configureFormInputs to attach "Enter" listener to the new select
       configureFormInputs(form); 
     }
-    return; // Stop here if it's a new partner form
+    // We *don't* return here, because a person could be adding a new partner
+    // while already having an existing one. We want to show all dropdowns.
   }
 
   // --- Logic for EXISTING partners ---
   const spouseIds = datum.rels?.spouses || [];
   if (spouseIds.length === 0 || datum._new_rel_data) {
-    return; // Not a new partner, but also no existing partners
+    return; // No existing spouses to edit, or this datum is itself a new/temp card
   }
 
   // Loop through all existing spouses and add a dropdown for each one
