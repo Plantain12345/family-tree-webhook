@@ -243,11 +243,23 @@ function setupCanvasClickListener(chart, editApi) {
   if (!chart || !editApi) return;
 
   // The main SVG element acts as the "canvas"
-  chart.svg.addEventListener('click', (e) => {
+  // FIX: Attach to the parentNode (the div#f3Canvas) which holds the zoom listener
+  const canvasElement = chart.svg.parentNode;
+  if (!canvasElement) return;
+
+  // *** THE FIX: ***
+  // We MUST listen for 'mousedown' instead of 'click'.
+  // D3's zoom/pan library captures 'click' events, but 'mousedown'
+  // fires first, allowing us to run our logic.
+  canvasElement.addEventListener('mousedown', (e) => {
     const target = e.target;
     
     // Check if the click was directly on the SVG or its background rect
-    const isBackgroundClick = target.matches('svg.main_svg') || target.matches('svg.main_svg > rect');
+    // This is a more robust check for background clicks
+    const isBackgroundClick = 
+      target === canvasElement || // Click on div#f3Canvas
+      target === chart.svg ||     // Click on svg.main_svg
+      target.matches('svg.main_svg > rect'); // Click on the background rect
 
     if (isBackgroundClick) {
       // Check if we are in "add relative" mode
