@@ -195,9 +195,10 @@ function createChart(chartData) {
         }
       }
       
-      const relationshipSelect = form.querySelector(SELECTORS.relationshipTypeSelect);
-      if (relationshipSelect) {
-        window.lastRelationshipType = relationshipSelect.value;
+      // Handle new relationship type
+      const newRelSelect = form.querySelector('.relationship-type-select-new select');
+      if (newRelSelect) {
+        window.lastRelationshipType = newRelSelect.value;
       }
 
       applyChanges(); 
@@ -282,18 +283,23 @@ function configureForm(form) {
 function configureFormInputs(form) {
   // Find the submit button to click programmatically
   const submitButton = form.querySelector('button[type="submit"]');
-  if (!submitButton) return;
+  // Note: submitButton can be null if form is not editable, that's OK.
 
-  const inputs = form.querySelectorAll('input[type="text"], select');
+  const inputs = form.querySelectorAll('input, select');
 
   inputs.forEach(input => {
     // Add keydown listener for "Enter"
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault(); // Stop default "Enter" behavior
-        submitButton.click();   // Trigger form submission
-      }
-    });
+    if (submitButton) {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          // Don't submit on Enter if it's a textarea
+          if (event.target.tagName === 'TEXTAREA') return; 
+          
+          event.preventDefault(); // Stop default "Enter" behavior
+          submitButton.click();   // Trigger form submission
+        }
+      });
+    }
 
     // Specific logic for year inputs
     const name = input.getAttribute('name');
@@ -344,9 +350,12 @@ function ensureRelationshipTypeSelector(form) {
   const formCont = form.closest('.f3-form-cont');
   const datum = formCont?.__f3_form_creator__?.datum;
   if (!datum) return;
-
-  const radioGroup = form.querySelector('.f3-radio-group');
-  if (!radioGroup?.parentNode) return;
+  
+  // *** FIX for BUG #1 ***
+  // Find a stable anchor point. The gender radio group is not always present,
+  // but the <hr> tag before the delete button is.
+  const anchorElement = form.querySelector('hr');
+  if (!anchorElement?.parentNode) return; // Can't add if anchor is missing
 
   // Check if this form is for a *new* partner
   const isPartnerForm = /partner|spouse/i.test(title.textContent);
@@ -359,7 +368,11 @@ function ensureRelationshipTypeSelector(form) {
         'New Relationship Type', 
         null
       );
-      radioGroup.parentNode.insertBefore(wrapper, radioGroup.nextSibling);
+      // Insert before the anchor
+      anchorElement.parentNode.insertBefore(wrapper, anchorElement);
+      
+      // Re-run configureFormInputs to attach "Enter" listener to the new select
+      configureFormInputs(form); 
     }
     return; // Stop here if it's a new partner form
   }
@@ -384,7 +397,7 @@ function ensureRelationshipTypeSelector(form) {
     if (!rel) return; 
 
     const selectorClass = `relationship-type-selector-existing`;
-    const selectorId = `rel_type_${spouseId}`;
+    const selectorId = `rel_type_${rel.id}`; // Use the *relationship ID*
     
     // Check if dropdown for this spouse already exists
     if (form.querySelector(`select[name="${selectorId}"]`)) return;
@@ -403,11 +416,15 @@ function ensureRelationshipTypeSelector(form) {
     const select = wrapper.querySelector('select');
     if (select) {
       select.setAttribute('data-spouse-id', spouseId);
-      select.setAttribute('data-rel-id', rel.id);
+      select.setAttribute('data-rel-id', rel.id); // Store the actual relationship ID
     }
     
-    radioGroup.parentNode.insertBefore(wrapper, radioGroup.nextSibling);
+    // Insert before the anchor
+    anchorElement.parentNode.insertBefore(wrapper, anchorElement);
   });
+  
+  // Re-run configureFormInputs to attach "Enter" listener to all new selects
+  configureFormInputs(form);
 }
 
 /**
