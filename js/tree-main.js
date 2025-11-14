@@ -27,6 +27,7 @@ import { setupRealtimeSync } from './tree-sync.js'
 
 const FIRST_PERSON_DEFAULT_GENDER = 'M'
 
+// REQUIREMENT #1: Define permanent labels
 const ADD_LABELS = {
   parent: 'Add Parent',
   child: 'Add Child',
@@ -34,7 +35,7 @@ const ADD_LABELS = {
 }
 
 const SELECTORS = {
-  form: '#familyForm',
+  form: '#familyForm', // REQUIREMENT #5: Use stable form ID
   formDeleteButton: '.f3-delete-btn',
   relationshipTypeSelect: '.relationship-type-select'
 }
@@ -67,6 +68,8 @@ function initializePage() {
   }
 
   document.getElementById('copyCodeBtn')?.addEventListener('click', handleCopyTreeCode)
+  // Add listener for the new button
+  document.getElementById('showFullTreeBtn')?.addEventListener('click', handleShowFullTree);
 
   window.addEventListener('load', () => {
     if (window.f3) initializeTree(code)
@@ -230,52 +233,10 @@ function createChart(chartData) {
   // Render the tree
   chart.updateTree({ initial: true });
 
-  // *** REQUIREMENT #2: Canvas Click Handler ***
-  setupCanvasClickListener(chart, state.editApi);
+  // *** REQUIREMENT #2: Canvas Click Handler (REMOVED) ***
+  // We no longer set up a canvas click listener, as it conflicts with D3 zoom/pan.
 
   return chart;
-}
-
-/**
- * REQUIREMENT #2: Add click listener to the canvas background
- */
-function setupCanvasClickListener(chart, editApi) {
-  if (!chart || !editApi) return;
-
-  // The main SVG element acts as the "canvas"
-  // FIX: Attach to the parentNode (the div#f3Canvas) which holds the zoom listener
-  const canvasElement = chart.svg.parentNode;
-  if (!canvasElement) return;
-
-  // *** THE FIX: ***
-  // We MUST listen for 'mousedown' instead of 'click'.
-  // D3's zoom/pan library captures 'click' events, but 'mousedown'
-  // fires first, allowing us to run our logic.
-  canvasElement.addEventListener('mousedown', (e) => {
-    const target = e.target;
-    
-    // Check if the click was directly on the SVG or its background rect
-    // This is a more robust check for background clicks
-    const isBackgroundClick = 
-      target === canvasElement || // Click on div#f3Canvas
-      target === chart.svg ||     // Click on svg.main_svg
-      target.matches('svg.main_svg > rect'); // Click on the background rect
-
-    if (isBackgroundClick) {
-      // Check if we are in "add relative" mode
-      if (editApi.isAddingRelative()) {
-        // Manually perform the "cancel" logic from the library
-        // We do this to avoid the default cancelCallback which re-opens the form
-        editApi.addRelativeInstance.is_active = false;
-        chart.store.state.one_level_rels = false;
-        editApi.addRelativeInstance.cleanUp();
-        chart.updateTree({}); // Redraw tree to remove "+ add" cards
-      }
-      
-      // Close the form
-      editApi.closeForm();
-    }
-  });
 }
 
 /**
@@ -548,7 +509,7 @@ async function syncToDatabase() {
         first_name: chartPerson.data['first name'] || '',
         last_name: chartPerson.data['last name'] || '',
         birthday: chartPerson.data['birthday'] ? Number.parseInt(chartPerson.data['birthday'], 10) : null,
-        death: chartPerson.data['death'] ? Number.parseInt(chartPerson.data['death'], 10) : null,
+        death: chartPerson.data['death'] ? Number.parseInt(person.data['death'], 10) : null,
         gender: chartPerson.data['gender'] || null
       };
 
@@ -682,6 +643,30 @@ async function syncRelationships(chartData) {
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/**
+ * Handles the click event for the "Show Full Tree" button.
+ */
+function handleShowFullTree() {
+  if (!state.chart || !state.editApi) return;
+  console.log('Showing full tree...');
+
+  // 1. Check if "add relative" mode is active and cancel it
+  if (state.editApi.isAddingRelative()) {
+    // Manually perform the "cancel" logic
+    state.editApi.addRelativeInstance.is_active = false;
+    state.chart.store.state.one_level_rels = false;
+    state.editApi.addRelativeInstance.cleanUp();
+  }
+
+  // 2. Close the form
+  state.editApi.closeForm();
+
+  // 3. Re-fit the tree to show everything
+  // Using 'fit' and a transition time provides a smooth "zoom out" effect.
+  state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
+}
+
 
 function handleCopyTreeCode() {
   if (!state.treeCode) return;
