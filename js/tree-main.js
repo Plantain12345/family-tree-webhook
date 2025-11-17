@@ -256,9 +256,59 @@ function createChart(chartData) {
       scheduleSave(); 
     })
     .setOnDelete((datum, deletePerson, postSubmit) => {
-      deletePerson(); 
-      postSubmit({ delete: true }); 
-      scheduleSave(); 
+      // CUSTOM DELETE LOGIC: Force delete if no dependents
+      const hasChildren = datum.rels.children && datum.rels.children.length > 0;
+
+      if (!hasChildren) {
+        console.log('Force deleting person with no dependents:', datum.id);
+        
+        const store = state.chart.store;
+        const data = store.getData();
+        const id = datum.id;
+
+        // 1. Remove references to this person from everyone else
+        data.forEach(d => {
+          if (d.rels.parents) d.rels.parents = d.rels.parents.filter(pId => pId !== id);
+          if (d.rels.children) d.rels.children = d.rels.children.filter(cId => cId !== id);
+          if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(sId => sId !== id);
+          
+          // Clean up custom spouse_rels
+          if (d.data.spouse_rels && d.data.spouse_rels[id]) {
+            delete d.data.spouse_rels[id];
+          }
+        });
+
+        // 2. Remove the person object
+        const index = data.findIndex(d => d.id === id);
+        if (index !== -1) {
+          data.splice(index, 1);
+        }
+        
+        // 3. Clean up "Add Relative" placeholder cards (optional library helper)
+        if (window.f3.handlers && window.f3.handlers.removeToAddFromData) {
+           window.f3.handlers.removeToAddFromData(data);
+        }
+
+        // 4. Handle Main Person deletion logic
+        if (store.getMainId() === id) {
+           const newMain = data.length > 0 ? data[0].id : null;
+           if (newMain) store.updateMainId(newMain);
+        }
+        
+        // 5. Update UI immediately
+        store.updateTree({ initial: false });
+        
+        // 6. Trigger database sync
+        postSubmit({ delete: true }); 
+        scheduleSave();
+
+      } else {
+        // If they HAVE children, use the library's default safe delete
+        // (This creates an 'Unknown' card to keep the tree connected)
+        deletePerson(); 
+        postSubmit({ delete: true }); 
+        scheduleSave(); 
+      }
     });
 
   applyAddButtonLabels(state.editApi);
@@ -286,40 +336,25 @@ function createChart(chartData) {
  * This runs after every chart update.
  */
 function updateRelationshipStyles() {
-  // 1. Select the SVG container
   const svg = d3.select('#FamilyChart').select('svg.main_svg');
   const linksGroup = svg.select('.links_view');
   
-  // 2. Ensure we have a group for our custom markers (divorce slashes)
   let markerGroup = linksGroup.select('.relationship-markers');
   if (markerGroup.empty()) {
     markerGroup = linksGroup.append('g').attr('class', 'relationship-markers');
   }
 
-  // 3. Iterate through all existing link paths
   const links = linksGroup.selectAll('path.link');
-  
   const divorcedLinksData = [];
 
   links.each(function(d) {
-    // d is the link datum. d.source and d.target are the tree nodes.
-    // In family-chart, spouse links usually have `d.spouse = true`
-    // OR we can identify them because they connect a person to their spouse.
-    
-    // Clean up previous classes
     const linkEl = d3.select(this);
     linkEl.classed('link-married link-partner link-divorced link-separated', false);
 
-    let relType = 'married'; // Default
-
-    // Identify if this is a spouse link
-    // family-chart stores spouse info in d.data.spouse or check source/target IDs
-    // However, the datum structure for links in family-chart is: { source: node, target: node }
-    const sourceId = d.source.data ? d.source.data.id : d.source.id; // Handle different data structures
+    let relType = 'married';
+    const sourceId = d.source.data ? d.source.data.id : d.source.id;
     const targetId = d.target.data ? d.target.data.id : d.target.id;
     
-    // Check if we have a relationship record for this pair
-    // We check both directions A-B and B-A
     if (sourceId && targetId) {
       const rel = state.spousalRels.find(r => 
         (r.person1_id === sourceId && r.person2_id === targetId) ||
@@ -329,7 +364,6 @@ function updateRelationshipStyles() {
       if (rel) {
         relType = rel.relationship_type;
       } else {
-        // Check local data if DB sync hasn't happened yet
         const sourcePerson = state.chart.store.getData().find(p => p.id === sourceId);
         if (sourcePerson && sourcePerson.data.spouse_rels && sourcePerson.data.spouse_rels[targetId]) {
           relType = sourcePerson.data.spouse_rels[targetId];
@@ -337,12 +371,10 @@ function updateRelationshipStyles() {
       }
     }
 
-    // Apply class based on type
     if (relType === 'partner') linkEl.classed('link-partner', true);
     else if (relType === 'separated') linkEl.classed('link-separated', true);
     else if (relType === 'divorced') {
       linkEl.classed('link-divorced', true);
-      // Collect data to draw the slash marker later
       divorcedLinksData.push({ 
         pathNode: this, 
         id: `marker-${sourceId}-${targetId}` 
@@ -352,33 +384,23 @@ function updateRelationshipStyles() {
     }
   });
 
-  // 4. Render Divorce Markers (Slashes)
-  // We bind the 'divorcedLinksData' to line elements in our marker group
   const markers = markerGroup.selectAll('.divorce-marker')
     .data(divorcedLinksData, d => d.id);
 
-  // Remove old markers
   markers.exit().remove();
 
-  // Add new markers
   const markersEnter = markers.enter()
     .append('path')
     .attr('class', 'divorce-marker');
 
-  // Update all markers (new and existing)
   markers.merge(markersEnter).each(function(d) {
     const pathNode = d.pathNode;
     const totalLength = pathNode.getTotalLength();
     
     if (totalLength > 0) {
-      // Get the center point of the curve
       const point = pathNode.getPointAtLength(totalLength / 2);
-      
-      // Draw a small slash at that point
-      // Simple diagonal line logic: move -5,-5 to +5,+5 relative to center
       const size = 6;
       const dPath = `M ${point.x - size} ${point.y + size} L ${point.x + size} ${point.y - size}`;
-      
       d3.select(this).attr('d', dPath);
     }
   });
@@ -464,10 +486,6 @@ function hideRemoveRelationship(form) {
   if (removeBtn) removeBtn.style.display = 'none';
 }
 
-/**
- * Ensures the relationship dropdown appears for all spouses.
- * FIX: Removed check for 'title' existing, which was blocking edit forms.
- */
 function ensureRelationshipTypeSelector(form, datumId) {
   const chartData = state.chart.store.getData();
   const datum = chartData.find(d => d.id === datumId);
@@ -480,7 +498,7 @@ function ensureRelationshipTypeSelector(form, datumId) {
   const anchorElement = form.querySelector('.f3-form-buttons');
   if (!anchorElement?.parentNode) return;
 
-  // --- Logic for NEW partners (Adding a new spouse) ---
+  // --- Logic for NEW partners ---
   const isPartnerForm = /partner|spouse/i.test(titleText);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
@@ -659,6 +677,7 @@ async function syncToDatabase() {
     const deletedIds = [...dbIds].filter(id => !chartIds.has(id));
     const existingIds = [...chartIds].filter(id => dbIds.has(id));
 
+    // 1. Delete members
     for (const id of deletedIds) {
       const relatedParents = state.parentChildRels.filter(rel => rel.parent_id === id || rel.child_id === id);
       const relatedSpouses = state.spousalRels.filter(rel => rel.person1_id === id || rel.person2_id === id);
@@ -672,6 +691,7 @@ async function syncToDatabase() {
       await deleteFamilyMember(id);
     }
 
+    // 2. Create new members
     for (const id of newIds) {
       const person = chartData.find(datum => datum.id === id);
       if (!person) continue;
@@ -687,6 +707,7 @@ async function syncToDatabase() {
       });
     }
 
+    // 3. Update existing members
     for (const id of existingIds) {
       const chartPerson = chartData.find(datum => datum.id === id);
       const dbPerson = state.members.find(member => member.id === id);
@@ -710,11 +731,14 @@ async function syncToDatabase() {
       if (changed) await updateFamilyMember(id, updates);
     }
 
+    // 4. Reload members from DB
     const membersResult = await getFamilyMembers(state.treeId);
     if (membersResult.success) state.members = membersResult.data;
 
+    // 5. Sync relationships (Pass chartData to ensure we have latest Types)
     await syncRelationships(chartData);
 
+    // 6. Reload relationships from DB
     const pcResult = await getParentChildRelationships(state.treeId);
     if (pcResult.success) state.parentChildRels = pcResult.data;
 
@@ -772,6 +796,7 @@ async function syncRelationships(chartData) {
     }
   }
 
+  // Sync Parent-Child
   const dbParentChild = new Set(state.parentChildRels.map(rel => `${rel.parent_id}-${rel.child_id}`));
   const chartParentChildIds = new Set(targetParentChild.map(rel => `${rel.parent_id}-${rel.child_id}`));
 
@@ -787,6 +812,7 @@ async function syncRelationships(chartData) {
     }
   }
 
+  // Sync Spousal
   const dbSpousal = new Map(state.spousalRels.map(rel => {
     const key = rel.person1_id < rel.person2_id ? `${rel.person1_id}-${rel.person2_id}` : `${rel.person2_id}-${rel.person1_id}`;
     return [key, rel];
