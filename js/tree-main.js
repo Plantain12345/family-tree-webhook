@@ -162,7 +162,7 @@ function createChart(chartData) {
         if (death) return `- ${death}`
         return ''
       },
-      // Relationship Status Display on Card (Optional but helpful)
+      // Relationship Status Display on Card
       (d) => {
         const spouseRels = d.data['spouse_rels'];
         if (!spouseRels) return '';
@@ -188,7 +188,6 @@ function createChart(chartData) {
       const form = cont.querySelector('form');
       if (form) {
         form.id = SELECTORS.form.substring(1);
-        // Wait a tick to ensure DOM is ready, just in case
         setTimeout(() => configureForm(form, form_creator.datum_id), 0);
       }
     })
@@ -220,7 +219,6 @@ function createChart(chartData) {
         }
 
         // Update Database
-        // If we have a valid relationship ID, update it directly
         if (relId && relId !== 'undefined' && relId !== 'null') {
           const dbRel = state.spousalRels.find(r => r.id === relId);
           if (dbRel && dbRel.relationship_type !== newType) {
@@ -229,7 +227,7 @@ function createChart(chartData) {
             await updateSpousalRelationship(relId, newType);
           }
         } else {
-          // Fallback: If ID was missing but we have spouseId, try to find and update via IDs
+          // Fallback: try to find and update via IDs if ID was missing on render
           const existingRel = state.spousalRels.find(r => 
             (r.person1_id === datum.id && r.person2_id === spouseId) ||
             (r.person1_id === spouseId && r.person2_id === datum.id)
@@ -360,8 +358,7 @@ function hideRemoveRelationship(form) {
 
 /**
  * Ensures the relationship dropdown appears for all spouses.
- * CRITICAL FIX: Does NOT return early if DB record is missing.
- * Falls back to 'married' if needed to ensure UI visibility.
+ * FIX: Removed check for 'title' existing, which was blocking edit forms.
  */
 function ensureRelationshipTypeSelector(form, datumId) {
   const chartData = state.chart.store.getData();
@@ -369,19 +366,19 @@ function ensureRelationshipTypeSelector(form, datumId) {
   
   if (!datum) return;
 
-  const title = form.querySelector('.f3-form-title');
-  if (!title) return;
+  const titleEl = form.querySelector('.f3-form-title');
+  const titleText = titleEl ? titleEl.textContent : '';
   
   const anchorElement = form.querySelector('.f3-form-buttons');
   if (!anchorElement?.parentNode) return;
 
   // --- Logic for NEW partners (Adding a new spouse) ---
-  const isPartnerForm = /partner|spouse/i.test(title.textContent);
+  // Only run this if we actually have a title indicating we are adding
+  const isPartnerForm = /partner|spouse/i.test(titleText);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
       const originPerson = chartData.find(p => p.id === datum._new_rel_data.rel_id);
       const originName = (originPerson?.data['first name'] || '').trim() || 'Relative';
-      // Label format: "[Origin Name] and this person are"
       const label = `${originName} and this person are`;
 
       const wrapper = createRelationshipDropdown(
@@ -417,12 +414,13 @@ function ensureRelationshipTypeSelector(form, datumId) {
       (r.person1_id === spouseId && r.person2_id === datum.id)
     );
     
-    // 2. Determine current type (Priority: DB -> Local Data -> Default)
+    // 2. Determine current type (Priority: Memory -> DB -> Default)
+    // Using Memory first prevents reverting to old DB state before sync completes
     let currentType = 'married';
-    if (rel) {
-      currentType = rel.relationship_type;
-    } else if (datum.data.spouse_rels && datum.data.spouse_rels[spouseId]) {
+    if (datum.data.spouse_rels && datum.data.spouse_rels[spouseId]) {
       currentType = datum.data.spouse_rels[spouseId];
+    } else if (rel) {
+      currentType = rel.relationship_type;
     }
 
     // Names
@@ -457,7 +455,7 @@ function createRelationshipDropdown(wrapperClass, name, label, currentType, spou
   // Create select element
   const select = document.createElement('select');
   select.name = name;
-  select.className = 'relationship-type-select relationship-type-select-existing'; // Add existing class for submit handler
+  select.className = 'relationship-type-select relationship-type-select-existing'; 
   if (spouseId) select.setAttribute('data-spouse-id', spouseId);
   if (relId) select.setAttribute('data-rel-id', relId);
 
@@ -624,7 +622,7 @@ async function syncToDatabase() {
     const membersResult = await getFamilyMembers(state.treeId);
     if (membersResult.success) state.members = membersResult.data;
 
-    // 5. Sync relationships (Pass chartData to ensure we have latest Types)
+    // 5. Sync relationships
     await syncRelationships(chartData);
 
     // 6. Reload relationships from DB
@@ -662,7 +660,12 @@ async function syncRelationships(chartData) {
         const key = person.id < spouseId ? `${person.id}-${spouseId}` : `${spouseId}-${person.id}`;
         
         if (!chartSpousalRels.has(key)) {
-          // Determine relationship type
+          // Determine relationship type:
+          // Priority:
+          // 1. Local Chart Data (most recent edit)
+          // 2. New Relationship Window Variable
+          // 3. Existing DB Data
+          // 4. Default 'married'
           let relType = 'married';
           
           const personSpouseRel = person.data.spouse_rels ? person.data.spouse_rels[spouseId] : null;
