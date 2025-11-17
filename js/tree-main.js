@@ -162,32 +162,6 @@ function createChart(chartData) {
         if (birth) return birth
         if (death) return `- ${death}`
         return ''
-      },
-      // Relationship Status (Added Logic)
-      (d) => {
-        const spouseRels = d.data['spouse_rels'];
-        if (!spouseRels) return '';
-
-        const relationshipStrings = [];
-
-        // spouseRels is an object: { spouse_id: "married", spouse_id_2: "divorced" }
-        Object.entries(spouseRels).forEach(([spouseId, type]) => {
-          // Look up the spouse name from the global state members list
-          const spouse = state.members.find(m => m.id === spouseId);
-          if (spouse) {
-            const spouseName = `${spouse.first_name || ''} ${spouse.last_name || ''}`.trim();
-            if (type) {
-              // Capitalize the relationship type (e.g., "married" -> "Married")
-              const typeCap = type.charAt(0).toUpperCase() + type.slice(1);
-              relationshipStrings.push(`${typeCap} to ${spouseName}`);
-            }
-          }
-        });
-
-        if (relationshipStrings.length === 0) return '';
-        
-        // Return styled HTML for the card
-        return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2;">${relationshipStrings.join('<br>')}</div>`;
       }
     ])
 
@@ -364,13 +338,11 @@ function hideRemoveRelationship(form) {
 
 /**
  * Handles adding relationship dropdowns for both
- * NEW partners (e.g., "Relationship with John Doe")
- * and EXISTING partners (e.g., "Relationship with Jane Doe")
+ * NEW partners (e.g., "John and this person are [Married]")
+ * and EXISTING partners (e.g., "John and Jane are [Married]")
  */
 function ensureRelationshipTypeSelector(form, datumId) {
-  // *** BUGFIX ***
-  // Get data from the chart's store, which is the single source of truth
-  // for what is currently being rendered (including placeholder cards).
+  // Get data from the chart's store to ensure consistency
   const chartData = state.chart.store.getData();
   const datum = chartData.find(d => d.id === datumId);
   
@@ -388,15 +360,18 @@ function ensureRelationshipTypeSelector(form, datumId) {
     return; 
   }
 
-  // --- Logic for NEW partners ---
+  // --- Logic for NEW partners (Adding a new spouse) ---
   const isPartnerForm = /partner|spouse/i.test(title.textContent);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
       
-      // FEATURE: Find the name of the person we're adding a partner to
+      // Find the name of the person we're adding a partner TO (Person A)
       const originPerson = chartData.find(p => p.id === datum._new_rel_data.rel_id);
-      const originName = (originPerson?.data['first name'] || '').trim();
-      const label = originName ? `Relationship with ${originName}` : 'New Relationship Type';
+      const originName = (originPerson?.data['first name'] || '').trim() || 'Relative';
+      
+      // Format: "[Person A] and [Person B] are"
+      // Since Person B is being created, we use "this person"
+      const label = `${originName} and this person are`;
 
       const wrapper = createRelationshipDropdown(
         'relationship-type-selector-new', 
@@ -405,22 +380,22 @@ function ensureRelationshipTypeSelector(form, datumId) {
         null
       );
       anchorElement.parentNode.insertBefore(wrapper, anchorElement);
-      configureFormInputs(form); // Re-bind "Enter" key
+      configureFormInputs(form); 
     }
   }
 
-  // --- Logic for EXISTING partners ---
+  // --- Logic for EXISTING partners (Editing existing person) ---
   const spouseIds = datum.rels?.spouses || [];
   if (spouseIds.length === 0 || datum._new_rel_data) {
-    return; // No existing spouses to edit, or this datum is itself a new/temp card
+    return; 
   }
 
   spouseIds.forEach(spouseId => {
-    // *** BUGFIX ***
-    // Look for the spouse in the chart's data, not state.members
+    // Find the spouse (Person B) in the chart data
     const spouse = chartData.find(m => m.id === spouseId);
-    if (!spouse || spouse._new_rel_data) return; // Don't add for placeholder spouses
+    if (!spouse || spouse._new_rel_data) return;
 
+    // Find the specific relationship record from DB state
     const rel = state.spousalRels.find(r =>
       (r.person1_id === datum.id && r.person2_id === spouseId) ||
       (r.person1_id === spouseId && r.person2_id === datum.id)
@@ -433,8 +408,12 @@ function ensureRelationshipTypeSelector(form, datumId) {
     
     if (form.querySelector(`select[name="${selectorId}"]`)) return;
 
-    const spouseName = `${spouse.data['first name'] || ''} ${spouse.data['last name'] || ''}`.trim();
-    const label = `Relationship with ${spouseName || 'Spouse'}`;
+    // Get names for the label
+    const personAName = `${datum.data['first name'] || ''} ${datum.data['last name'] || ''}`.trim() || 'Unknown';
+    const personBName = `${spouse.data['first name'] || ''} ${spouse.data['last name'] || ''}`.trim() || 'Unknown';
+    
+    // Format: "[Person A] and [Person B] are"
+    const label = `${personAName} and ${personBName} are`;
     
     const wrapper = createRelationshipDropdown(
       selectorClass,
@@ -452,7 +431,7 @@ function ensureRelationshipTypeSelector(form, datumId) {
     anchorElement.parentNode.insertBefore(wrapper, anchorElement);
   });
   
-  configureFormInputs(form); // Re-bind "Enter" key
+  configureFormInputs(form); 
 }
 
 /**
