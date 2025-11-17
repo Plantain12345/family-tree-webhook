@@ -150,42 +150,6 @@
   opacity: 1 !important;
 }
 
-/* ==============================================
-   Relationship Link Styling
-   ============================================== */
-
-/* Default (Married) - Solid line */
-.f3 .link-married {
-  stroke-width: 2px;
-  /* Color defaults to library standard (usually white/grey), can override here if needed */
-}
-
-/* Partners - Dashed line */
-.f3 .link-partner {
-  stroke-dasharray: 6, 4; /* 6px line, 4px gap */
-  stroke-width: 2px;
-}
-
-/* Separated - Dotted/Dashed line */
-.f3 .link-separated {
-  stroke-dasharray: 3, 3; /* Tighter dots/dashes */
-  stroke-width: 2px;
-}
-
-/* Divorced - Solid line (we add the slash via JS) */
-.f3 .link-divorced {
-  stroke-width: 2px;
-  /* Optional: make the line itself slightly red to emphasize separation */
-  /* stroke: #ff6b6b !important; */ 
-}
-
-/* The Slash Marker for Divorces */
-.divorce-marker {
-  stroke: #ff4444; /* Red slash */
-  stroke-width: 3px;
-  fill: none;
-}
-
 /* Responsive adjustments */
 @media (max-width: 768px) {
   .tree-info-content {
