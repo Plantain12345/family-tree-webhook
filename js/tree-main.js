@@ -168,11 +168,11 @@ function createChart(chartData) {
     .setFields(['first name', 'last name', 'birthday', 'death'])
     .setEditFirst(true) 
     .setOnFormCreation((props) => {
-      const { cont, form_creator } = props; // *** BUGFIX: Get form_creator
+      const { cont, form_creator } = props; 
       const form = cont.querySelector('form');
       if (form) {
         form.id = SELECTORS.form.substring(1);
-        configureForm(form, form_creator.datum_id); // *** BUGFIX: Pass datum_id
+        configureForm(form, form_creator.datum_id); // Pass datum_id
       }
     })
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
@@ -213,11 +213,13 @@ function createChart(chartData) {
   applyAddButtonLabels(state.editApi);
 
   f3Card.setOnCardClick((e, d) => {
+    // When clicking a "Add Partner/Parent/Child" card
     if (d.data._new_rel_data) {
       state.editApi.open(d.data);
       return;
     }
 
+    // When clicking a real person
     state.editApi.open(d.data);
     state.editApi.addRelative(d.data);
     f3Card.onCardClickDefault(e, d);
@@ -243,6 +245,7 @@ function applyAddButtonLabels(editApi) {
       spouse: ADD_LABELS.partner
     });
   } else {
+    // Fallbacks
     if (typeof editApi.setAddParentLabel === 'function') {
       editApi.setAddParentLabel(ADD_LABELS.parent);
     }
@@ -259,16 +262,14 @@ function applyAddButtonLabels(editApi) {
 // Form preparation & validation (Called by .setOnFormCreation)
 // -----------------------------------------------------------------------------
 
-// *** BUGFIX: Function now accepts datumId ***
 function configureForm(form, datumId) {
   if (!form || form.dataset.prepared) return;
 
-  configureFormInputs(form); // Renamed to handle all inputs
+  configureFormInputs(form); // Adds "Enter-to-Submit"
   configureGenderField(form);
   hideRemoveRelationship(form);
   
-  // This function now handles *both* new and existing partners
-  ensureRelationshipTypeSelector(form, datumId); // *** BUGFIX: Pass datumId
+  ensureRelationshipTypeSelector(form, datumId); // Adds dropdowns for new and existing
   
   renameYearLabels(form);
   applyDefaultGenderIfNeeded(form);
@@ -277,31 +278,26 @@ function configureForm(form, datumId) {
 }
 
 /**
- * REQUIREMENT #1: "Enter" to Submit
- * Configures year inputs and adds 'Enter' key listener to all inputs.
+ * Configures all inputs (text, select) for "Enter-to-Submit"
+ * and sets up specific logic for year inputs.
  */
 function configureFormInputs(form) {
-  // Find the submit button to click programmatically
   const submitButton = form.querySelector('button[type="submit"]');
-  // Note: submitButton can be null if form is not editable, that's OK.
-
   const inputs = form.querySelectorAll('input, select');
 
   inputs.forEach(input => {
-    // Add keydown listener for "Enter"
+    // 1. "Enter-to-Submit" logic
     if (submitButton) {
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
-          // Don't submit on Enter if it's a textarea
           if (event.target.tagName === 'TEXTAREA') return; 
-          
-          event.preventDefault(); // Stop default "Enter" behavior
-          submitButton.click();   // Trigger form submission
+          event.preventDefault();
+          submitButton.click();
         }
       });
     }
 
-    // Specific logic for year inputs
+    // 2. Specific logic for year inputs
     const name = input.getAttribute('name');
     if (name === 'birthday' || name === 'death') {
       input.type = 'text';
@@ -340,48 +336,50 @@ function hideRemoveRelationship(form) {
 }
 
 /**
- * REQUIREMENT #3: Edit Relationship Type
- * This function now also adds dropdowns for *existing* spouses.
+ * Handles adding relationship dropdowns for both
+ * NEW partners (e.g., "Relationship with John Doe")
+ * and EXISTING partners (e.g., "Relationship with Jane Doe")
  */
-// *** BUGFIX: Function now accepts datumId ***
 function ensureRelationshipTypeSelector(form, datumId) {
+  // *** BUGFIX ***
+  // Get data from the chart's store, which is the single source of truth
+  // for what is currently being rendered (including placeholder cards).
+  const chartData = state.chart.store.getData();
+  const datum = chartData.find(d => d.id === datumId);
   
-  // *** BUGFIX: Get datum reliably from state using datumId ***
-  const datum = state.chart.store.getData().find(d => d.id === datumId);
   if (!datum) {
-    console.error("Datum not found in ensureRelationshipTypeSelector");
+    console.error("Datum not found in ensureRelationshipTypeSelector:", datumId);
     return;
   }
 
   const title = form.querySelector('.f3-form-title');
   if (!title) return;
   
-  // *** BUGFIX: Find a stable anchor point. ***
   const anchorElement = form.querySelector('.f3-form-buttons');
   if (!anchorElement?.parentNode) {
     console.error("Form anchor .f3-form-buttons not found");
-    return; // Can't add if anchor is missing
+    return; 
   }
 
-  // Check if this form is for a *new* partner
+  // --- Logic for NEW partners ---
   const isPartnerForm = /partner|spouse/i.test(title.textContent);
-  if (isPartnerForm) {
-    // This is for a NEW partner
+  if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
+      
+      // FEATURE: Find the name of the person we're adding a partner to
+      const originPerson = chartData.find(p => p.id === datum._new_rel_data.rel_id);
+      const originName = (originPerson?.data['first name'] || '').trim();
+      const label = originName ? `Relationship with ${originName}` : 'New Relationship Type';
+
       const wrapper = createRelationshipDropdown(
         'relationship-type-selector-new', 
         'relationship_type', 
-        'New Relationship Type', 
+        label, 
         null
       );
-      // Insert before the anchor
       anchorElement.parentNode.insertBefore(wrapper, anchorElement);
-      
-      // Re-run configureFormInputs to attach "Enter" listener to the new select
-      configureFormInputs(form); 
+      configureFormInputs(form); // Re-bind "Enter" key
     }
-    // We *don't* return here, because a person could be adding a new partner
-    // while already having an existing one. We want to show all dropdowns.
   }
 
   // --- Logic for EXISTING partners ---
@@ -390,26 +388,25 @@ function ensureRelationshipTypeSelector(form, datumId) {
     return; // No existing spouses to edit, or this datum is itself a new/temp card
   }
 
-  // Loop through all existing spouses and add a dropdown for each one
   spouseIds.forEach(spouseId => {
-    const spouse = state.members.find(m => m.id === spouseId);
-    if (!spouse) return;
+    // *** BUGFIX ***
+    // Look for the spouse in the chart's data, not state.members
+    const spouse = chartData.find(m => m.id === spouseId);
+    if (!spouse || spouse._new_rel_data) return; // Don't add for placeholder spouses
 
     const rel = state.spousalRels.find(r =>
       (r.person1_id === datum.id && r.person2_id === spouseId) ||
       (r.person1_id === spouseId && r.person2_id === datum.id)
     );
     
-    // Only add dropdown if the relationship exists in the DB
     if (!rel) return; 
 
     const selectorClass = `relationship-type-selector-existing`;
-    const selectorId = `rel_type_${rel.id}`; // Use the *relationship ID*
+    const selectorId = `rel_type_${rel.id}`; 
     
-    // Check if dropdown for this spouse already exists
     if (form.querySelector(`select[name="${selectorId}"]`)) return;
 
-    const spouseName = `${spouse.first_name || ''} ${spouse.last_name || ''}`.trim();
+    const spouseName = `${spouse.data['first name'] || ''} ${spouse.data['last name'] || ''}`.trim();
     const label = `Relationship with ${spouseName || 'Spouse'}`;
     
     const wrapper = createRelationshipDropdown(
@@ -419,19 +416,16 @@ function ensureRelationshipTypeSelector(form, datumId) {
       rel
     );
     
-    // Add data attributes to find this specific relationship later
     const select = wrapper.querySelector('select');
     if (select) {
       select.setAttribute('data-spouse-id', spouseId);
-      select.setAttribute('data-rel-id', rel.id); // Store the actual relationship ID
+      select.setAttribute('data-rel-id', rel.id); 
     }
     
-    // Insert before the anchor
     anchorElement.parentNode.insertBefore(wrapper, anchorElement);
   });
   
-  // Re-run configureFormInputs to attach "Enter" listener to all new selects
-  configureFormInputs(form);
+  configureFormInputs(form); // Re-bind "Enter" key
 }
 
 /**
