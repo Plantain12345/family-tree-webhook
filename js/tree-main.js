@@ -15,8 +15,7 @@ import {
 
 import {
   transformDatabaseToFamilyChart,
-  findMainPersonId,
-  getRelationshipType
+  findMainPersonId
 } from './tree-data.js'
 
 import { setupRealtimeSync } from './tree-sync.js'
@@ -173,7 +172,7 @@ function createChart(chartData) {
       const form = cont.querySelector('form');
       if (form) {
         form.id = SELECTORS.form.substring(1);
-        configureForm(form, form_creator.datum_id); // Pass datum_id
+        configureForm(form, form_creator.datum_id);
       }
     })
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
@@ -182,20 +181,40 @@ function createChart(chartData) {
       
       if (!validateYearFields(form)) return;
 
-      // Handle relationship type updates BEFORE submitting
+      // 1. Update In-Memory Chart Data for Relationship Types
       const relSelects = form.querySelectorAll('.relationship-type-select-existing');
+      const chartData = state.chart.store.getData();
+      const currentDatum = chartData.find(d => d.id === datum.id);
+
       for (const select of relSelects) {
         const relId = select.dataset.relId;
+        const spouseId = select.dataset.spouseId;
         const newType = select.value;
-        const dbRel = state.spousalRels.find(r => r.id === relId);
         
-        if (dbRel && dbRel.relationship_type !== newType) {
-          console.log(`Updating relationship ${relId} to ${newType}`);
-          await updateSpousalRelationship(relId, newType);
+        // Update Chart Data (Memory)
+        if (currentDatum) {
+          if (!currentDatum.data.spouse_rels) currentDatum.data.spouse_rels = {};
+          currentDatum.data.spouse_rels[spouseId] = newType;
+        }
+        const spouseDatum = chartData.find(d => d.id === spouseId);
+        if (spouseDatum) {
+          if (!spouseDatum.data.spouse_rels) spouseDatum.data.spouse_rels = {};
+          spouseDatum.data.spouse_rels[datum.id] = newType;
+        }
+
+        // Direct DB Update (Optimization)
+        if (relId && relId !== 'undefined') {
+          const dbRel = state.spousalRels.find(r => r.id === relId);
+          if (dbRel && dbRel.relationship_type !== newType) {
+            console.log(`Updating relationship ${relId} to ${newType}`);
+            // Optimistically update local state
+            dbRel.relationship_type = newType; 
+            await updateSpousalRelationship(relId, newType);
+          }
         }
       }
       
-      // Handle new relationship type
+      // Handle new relationship type (for brand new add)
       const newRelSelect = form.querySelector('.relationship-type-selector-new select');
       if (newRelSelect) {
         window.lastRelationshipType = newRelSelect.value;
@@ -214,13 +233,10 @@ function createChart(chartData) {
   applyAddButtonLabels(state.editApi);
 
   f3Card.setOnCardClick((e, d) => {
-    // When clicking a "Add Partner/Parent/Child" card
     if (d.data._new_rel_data) {
       state.editApi.open(d.data);
       return;
     }
-
-    // When clicking a real person
     state.editApi.open(d.data);
     state.editApi.addRelative(d.data);
     f3Card.onCardClickDefault(e, d);
@@ -245,32 +261,21 @@ function applyAddButtonLabels(editApi) {
       daughter: ADD_LABELS.child,
       spouse: ADD_LABELS.partner
     });
-  } else {
-    // Fallbacks
-    if (typeof editApi.setAddParentLabel === 'function') {
-      editApi.setAddParentLabel(ADD_LABELS.parent);
-    }
-    if (typeof editApi.setAddChildLabel === 'function') {
-      editApi.setAddChildLabel(ADD_LABELS.child);
-    }
-    if (typeof editApi.setAddSpouseLabel === 'function') {
-      editApi.setAddSpouseLabel(ADD_LABELS.partner);
-    }
   }
 }
 
 // -----------------------------------------------------------------------------
-// Form preparation & validation (Called by .setOnFormCreation)
+// Form preparation & validation
 // -----------------------------------------------------------------------------
 
 function configureForm(form, datumId) {
   if (!form || form.dataset.prepared) return;
 
-  configureFormInputs(form); // Adds "Enter-to-Submit"
+  configureFormInputs(form);
   configureGenderField(form);
   hideRemoveRelationship(form);
   
-  ensureRelationshipTypeSelector(form, datumId); // Adds dropdowns for new and existing
+  ensureRelationshipTypeSelector(form, datumId);
   
   renameYearLabels(form);
   applyDefaultGenderIfNeeded(form);
@@ -278,16 +283,11 @@ function configureForm(form, datumId) {
   form.dataset.prepared = 'true';
 }
 
-/**
- * Configures all inputs (text, select) for "Enter-to-Submit"
- * and sets up specific logic for year inputs.
- */
 function configureFormInputs(form) {
   const submitButton = form.querySelector('button[type="submit"]');
   const inputs = form.querySelectorAll('input, select');
 
   inputs.forEach(input => {
-    // 1. "Enter-to-Submit" logic
     if (submitButton) {
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -298,20 +298,14 @@ function configureFormInputs(form) {
       });
     }
 
-    // 2. Specific logic for year inputs
     const name = input.getAttribute('name');
     if (name === 'birthday' || name === 'death') {
       input.type = 'text';
       input.maxLength = 4;
       input.placeholder = 'YYYY';
       input.pattern = '[0-9]{4}';
-
       input.addEventListener('input', (event) => {
         event.target.value = event.target.value.replace(/[^0-9]/g, '');
-      });
-
-      input.addEventListener('keypress', (event) => {
-        if (!/[0-9]/.test(event.key)) event.preventDefault();
       });
     }
   });
@@ -337,40 +331,28 @@ function hideRemoveRelationship(form) {
 }
 
 /**
- * Handles adding relationship dropdowns for both
- * NEW partners (e.g., "John and this person are [Married]")
- * and EXISTING partners (e.g., "John and Jane are [Married]")
+ * Adds the relationship status dropdown.
+ * FIX: Now creates the dropdown even if the DB record is temporarily missing,
+ * ensuring the field never "disappears".
  */
 function ensureRelationshipTypeSelector(form, datumId) {
-  // Get data from the chart's store to ensure consistency
   const chartData = state.chart.store.getData();
   const datum = chartData.find(d => d.id === datumId);
   
-  if (!datum) {
-    console.error("Datum not found in ensureRelationshipTypeSelector:", datumId);
-    return;
-  }
+  if (!datum) return;
 
   const title = form.querySelector('.f3-form-title');
   if (!title) return;
   
   const anchorElement = form.querySelector('.f3-form-buttons');
-  if (!anchorElement?.parentNode) {
-    console.error("Form anchor .f3-form-buttons not found");
-    return; 
-  }
+  if (!anchorElement?.parentNode) return;
 
-  // --- Logic for NEW partners (Adding a new spouse) ---
+  // --- Logic for NEW partners ---
   const isPartnerForm = /partner|spouse/i.test(title.textContent);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
-      
-      // Find the name of the person we're adding a partner TO (Person A)
       const originPerson = chartData.find(p => p.id === datum._new_rel_data.rel_id);
       const originName = (originPerson?.data['first name'] || '').trim() || 'Relative';
-      
-      // Format: "[Person A] and [Person B] are"
-      // Since Person B is being created, we use "this person"
       const label = `${originName} and this person are`;
 
       const wrapper = createRelationshipDropdown(
@@ -384,40 +366,35 @@ function ensureRelationshipTypeSelector(form, datumId) {
     }
   }
 
-  // --- Logic for EXISTING partners (Editing existing person) ---
+  // --- Logic for EXISTING partners ---
   const spouseIds = datum.rels?.spouses || [];
-  if (spouseIds.length === 0 || datum._new_rel_data) {
-    return; 
-  }
+  if (spouseIds.length === 0 || datum._new_rel_data) return;
 
   spouseIds.forEach(spouseId => {
-    // Find the spouse (Person B) in the chart data
     const spouse = chartData.find(m => m.id === spouseId);
     if (!spouse || spouse._new_rel_data) return;
 
-    // Find the specific relationship record from DB state
+    const selectorClass = `relationship-type-selector-existing`;
+    // Create a stable ID based on the two person IDs
+    const pairId = datum.id < spouseId ? `${datum.id}_${spouseId}` : `${spouseId}_${datum.id}`;
+    const selectorName = `rel_type_${pairId}`; 
+    
+    if (form.querySelector(`select[name="${selectorName}"]`)) return;
+
+    // Try to find existing relationship in DB
     const rel = state.spousalRels.find(r =>
       (r.person1_id === datum.id && r.person2_id === spouseId) ||
       (r.person1_id === spouseId && r.person2_id === datum.id)
     );
     
-    if (!rel) return; 
-
-    const selectorClass = `relationship-type-selector-existing`;
-    const selectorId = `rel_type_${rel.id}`; 
-    
-    if (form.querySelector(`select[name="${selectorId}"]`)) return;
-
-    // Get names for the label
+    // Get names
     const personAName = `${datum.data['first name'] || ''} ${datum.data['last name'] || ''}`.trim() || 'Unknown';
     const personBName = `${spouse.data['first name'] || ''} ${spouse.data['last name'] || ''}`.trim() || 'Unknown';
-    
-    // Format: "[Person A] and [Person B] are"
     const label = `${personAName} and ${personBName} are`;
     
     const wrapper = createRelationshipDropdown(
       selectorClass,
-      selectorId,
+      selectorName,
       label,
       rel
     );
@@ -425,7 +402,7 @@ function ensureRelationshipTypeSelector(form, datumId) {
     const select = wrapper.querySelector('select');
     if (select) {
       select.setAttribute('data-spouse-id', spouseId);
-      select.setAttribute('data-rel-id', rel.id); 
+      select.setAttribute('data-rel-id', rel ? rel.id : 'undefined'); 
     }
     
     anchorElement.parentNode.insertBefore(wrapper, anchorElement);
@@ -434,9 +411,6 @@ function ensureRelationshipTypeSelector(form, datumId) {
   configureFormInputs(form); 
 }
 
-/**
- * Helper function to create the HTML for a relationship dropdown
- */
 function createRelationshipDropdown(wrapperClass, name, label, dbRel) {
   const currentType = dbRel ? dbRel.relationship_type : 'married';
   
@@ -454,7 +428,6 @@ function createRelationshipDropdown(wrapperClass, name, label, dbRel) {
   return wrapper;
 }
 
-
 function renameYearLabels(form) {
   setFieldLabel(form, 'birthday', 'Year of birth');
   setFieldLabel(form, 'death', 'Year of death');
@@ -462,12 +435,11 @@ function renameYearLabels(form) {
 
 function setFieldLabel(form, fieldName, labelText) {
   const input = form.querySelector(`input[name="${fieldName}"]`);
-  if (!input) return;
-
-  const label = form.querySelector(`label[for="${input.id}"]`) ||
-    input.closest('.f3-form-field')?.querySelector('label');
-
-  if (label) label.textContent = labelText;
+  if (input) {
+    const label = form.querySelector(`label[for="${input.id}"]`) ||
+      input.closest('.f3-form-field')?.querySelector('label');
+    if (label) label.textContent = labelText;
+  }
 }
 
 function applyDefaultGenderIfNeeded(form) {
@@ -488,55 +460,38 @@ function validateYearFields(form) {
   const birthdayInput = form.querySelector('input[name="birthday"]');
   const deathInput = form.querySelector('input[name="death"]');
 
-  if (birthdayInput && birthdayInput.value) {
-    const year = birthdayInput.value.trim();
-    if (year && !/^\d{4}$/.test(year)) {
-      alert('Year of birth must be exactly 4 digits (e.g., 1990)');
-      birthdayInput.focus();
+  const validate = (input, name) => {
+    if (!input || !input.value) return true;
+    const year = input.value.trim();
+    if (!/^\d{4}$/.test(year)) {
+      alert(`${name} must be exactly 4 digits`);
+      input.focus();
       return false;
     }
-    if(year) {
-      const yearNum = Number.parseInt(year, 10);
-      if (yearNum < 1000 || yearNum > 9999) {
-        alert('Year of birth must be between 1000 and 9999');
-        birthdayInput.focus();
-        return false;
-      }
+    const yearNum = parseInt(year, 10);
+    if (yearNum < 1000 || yearNum > 9999) {
+      alert(`${name} must be between 1000 and 9999`);
+      input.focus();
+      return false;
     }
-  }
+    return true;
+  };
 
-  if (deathInput && deathInput.value) {
-    const year = deathInput.value.trim();
-    if (year && !/^\d{4}$/.test(year)) {
-      alert('Year of death must be exactly 4 digits (e.g., 2020)');
+  if (!validate(birthdayInput, 'Year of birth')) return false;
+  if (!validate(deathInput, 'Year of death')) return false;
+
+  if (birthdayInput && birthdayInput.value && deathInput && deathInput.value) {
+    if (parseInt(deathInput.value, 10) < parseInt(birthdayInput.value, 10)) {
+      alert('Year of death cannot be before year of birth');
       deathInput.focus();
       return false;
     }
-    
-    if(year) {
-      const yearNum = Number.parseInt(year, 10);
-      if (yearNum < 1000 || yearNum > 9999) {
-        alert('Year of death must be between 1000 and 9999');
-        deathInput.focus();
-        return false;
-      }
-
-      if (birthdayInput && birthdayInput.value) {
-        const birthYear = Number.parseInt(birthdayInput.value, 10);
-        if (yearNum < birthYear) {
-          alert('Year of death cannot be before year of birth');
-          deathInput.focus();
-          return false;
-        }
-      }
-    }
   }
-
   return true;
 }
 
 // -----------------------------------------------------------------------------
-// Persistence (Scheduled from .setOnSubmit and .setOnDelete)
+// Persistence
 // -----------------------------------------------------------------------------
 
 function scheduleSave() {
@@ -569,7 +524,6 @@ async function syncToDatabase() {
       for (const rel of relatedSpouses) {
         await deleteSpousalRelationship(rel.person1_id, rel.person2_id);
       }
-      
       await deleteFamilyMember(id);
     }
 
@@ -577,14 +531,13 @@ async function syncToDatabase() {
     for (const id of newIds) {
       const person = chartData.find(datum => datum.id === id);
       if (!person) continue;
-
       await createFamilyMember({
         id,
         tree_id: state.treeId,
         first_name: person.data['first name'] || '',
         last_name: person.data['last name'] || '',
-        birthday: person.data['birthday'] ? Number.parseInt(person.data['birthday'], 10) : null,
-        death: person.data['death'] ? Number.parseInt(person.data['death'], 10) : null,
+        birthday: person.data['birthday'] ? parseInt(person.data['birthday'], 10) : null,
+        death: person.data['death'] ? parseInt(person.data['death'], 10) : null,
         gender: person.data['gender'] || null,
         is_main: false
       });
@@ -599,8 +552,8 @@ async function syncToDatabase() {
       const updates = {
         first_name: chartPerson.data['first name'] || '',
         last_name: chartPerson.data['last name'] || '',
-        birthday: chartPerson.data['birthday'] ? Number.parseInt(chartPerson.data['birthday'], 10) : null,
-        death: chartPerson.data['death'] ? Number.parseInt(chartPerson.data['death'], 10) : null, // Fixed bug here
+        birthday: chartPerson.data['birthday'] ? parseInt(chartPerson.data['birthday'], 10) : null,
+        death: chartPerson.data['death'] ? parseInt(chartPerson.data['death'], 10) : null,
         gender: chartPerson.data['gender'] || null
       };
 
@@ -611,16 +564,14 @@ async function syncToDatabase() {
         updates.death !== dbPerson.death ||
         updates.gender !== dbPerson.gender;
 
-      if (changed) {
-        await updateFamilyMember(id, updates);
-      }
+      if (changed) await updateFamilyMember(id, updates);
     }
 
     // 4. Reload members from DB
     const membersResult = await getFamilyMembers(state.treeId);
     if (membersResult.success) state.members = membersResult.data;
 
-    // 5. Sync relationships
+    // 5. Sync relationships (Pass chartData to ensure we have latest Types)
     await syncRelationships(chartData);
 
     // 6. Reload relationships from DB
@@ -640,90 +591,86 @@ async function syncToDatabase() {
 
 async function syncRelationships(chartData) {
   const targetParentChild = [];
-  const chartSpousalRels = new Map(); // Use Map to store rel types
+  const chartSpousalRels = new Map();
 
   for (const person of chartData) {
     const { parents, spouses } = person.rels || {};
 
     if (parents) {
       for (const parentId of parents) {
-        if (parentId) { // Ensure parentId is not null/undefined
-          targetParentChild.push({ parent_id: parentId, child_id: person.id });
-        }
+        if (parentId) targetParentChild.push({ parent_id: parentId, child_id: person.id });
       }
     }
 
     if (spouses) {
       for (const spouseId of spouses) {
-        if (!spouseId) continue; // Skip null/undefined spouse IDs
+        if (!spouseId) continue;
         
-        // Create a consistent key
         const key = person.id < spouseId ? `${person.id}-${spouseId}` : `${spouseId}-${person.id}`;
         
         if (!chartSpousalRels.has(key)) {
-          // Determine relationship type
-          let relType = 'married'; // Default
-          if (window.lastRelationshipType) {
+          // Determine relationship type:
+          // 1. Check Chart Data (updated by form)
+          // 2. Check New Rel Window Variable
+          // 3. Check Existing DB
+          // 4. Default to Married
+          let relType = 'married';
+          
+          const personSpouseRel = person.data.spouse_rels ? person.data.spouse_rels[spouseId] : null;
+          
+          if (personSpouseRel) {
+            relType = personSpouseRel;
+          } else if (window.lastRelationshipType) {
             relType = window.lastRelationshipType;
-            window.lastRelationshipType = null; // Consume it
+            window.lastRelationshipType = null; 
           } else {
-            // Check existing DB state
             const existingRel = state.spousalRels.find(r => 
               (r.person1_id === person.id && r.person2_id === spouseId) ||
               (r.person1_id === spouseId && r.person2_id === person.id)
             );
-            if (existingRel) {
-              relType = existingRel.relationship_type;
-            }
+            if (existingRel) relType = existingRel.relationship_type;
           }
+          
           chartSpousalRels.set(key, { p1: person.id, p2: spouseId, type: relType });
         }
       }
     }
   }
 
-  // Sync Parent-Child Relationships
+  // Sync Parent-Child
   const dbParentChild = new Set(state.parentChildRels.map(rel => `${rel.parent_id}-${rel.child_id}`));
-  const chartParentChild = new Set(targetParentChild.map(rel => `${rel.parent_id}-${rel.child_id}`));
+  const chartParentChildIds = new Set(targetParentChild.map(rel => `${rel.parent_id}-${rel.child_id}`));
 
-  // Create new PC rels
   for (const rel of targetParentChild) {
     if (!dbParentChild.has(`${rel.parent_id}-${rel.child_id}`)) {
       await createParentChildRelationship(state.treeId, rel.parent_id, rel.child_id);
     }
   }
 
-  // Delete old PC rels
   for (const rel of state.parentChildRels) {
-    if (!chartParentChild.has(`${rel.parent_id}-${rel.child_id}`)) {
+    if (!chartParentChildIds.has(`${rel.parent_id}-${rel.child_id}`)) {
       await deleteParentChildRelationship(rel.parent_id, rel.child_id);
     }
   }
 
-  // Sync Spousal Relationships
+  // Sync Spousal
   const dbSpousal = new Map(state.spousalRels.map(rel => {
     const key = rel.person1_id < rel.person2_id ? `${rel.person1_id}-${rel.person2_id}` : `${rel.person2_id}-${rel.person1_id}`;
     return [key, rel];
   }));
 
-  // Create new / update existing Spousal rels
   for (const [key, chartRel] of chartSpousalRels.entries()) {
     const dbRel = dbSpousal.get(key);
-    
-    // Ensure p1 and p2 are ordered consistently for DB
     const p1Id = chartRel.p1 < chartRel.p2 ? chartRel.p1 : chartRel.p2;
     const p2Id = chartRel.p1 < chartRel.p2 ? chartRel.p2 : chartRel.p1;
 
     if (!dbRel) {
-      // Create new
       await createSpousalRelationship(state.treeId, p1Id, p2Id, chartRel.type);
     } else if (dbRel.relationship_type !== chartRel.type) {
-      // Update existing
       await updateSpousalRelationship(dbRel.id, chartRel.type);
     }
   }
 
-  // Delete old Spousal rels
   for (const [key, dbRel] of dbSpousal.entries()) {
     if (!chartSpousalRels.has(key)) {
       await deleteSpousalRelationship(dbRel.person1_id, dbRel.person2_id);
@@ -735,42 +682,25 @@ async function syncRelationships(chartData) {
 // Utilities
 // -----------------------------------------------------------------------------
 
-/**
- * Handles the click event for the "Show Full Tree" button.
- */
 function handleShowFullTree() {
   if (!state.chart || !state.editApi) return;
-  console.log('Showing full tree...');
-
-  // 1. Check if "add relative" mode is active and cancel it
   if (state.editApi.isAddingRelative()) {
-    // Manually perform the "cancel" logic
     state.editApi.addRelativeInstance.is_active = false;
     state.chart.store.state.one_level_rels = false;
     state.editApi.addRelativeInstance.cleanUp();
   }
-
-  // 2. Close the form
   state.editApi.closeForm();
-
-  // 3. Re-fit the tree to show everything
-  // Using 'fit' and a transition time provides a smooth "zoom out" effect.
   state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
 }
 
-
 function handleCopyTreeCode() {
   if (!state.treeCode) return;
-
   navigator.clipboard.writeText(state.treeCode);
   const btn = document.getElementById('copyCodeBtn');
   if (!btn) return;
-
   const original = btn.textContent;
   btn.textContent = '✓';
-  setTimeout(() => {
-    btn.textContent = original;
-  }, 2000);
+  setTimeout(() => { btn.textContent = original; }, 2000);
 }
 
 function toggleLoading(show) {
