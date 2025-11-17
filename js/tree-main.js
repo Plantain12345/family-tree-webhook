@@ -149,6 +149,11 @@ function createChart(chartData) {
     .setCardXSpacing(250)
     .setCardYSpacing(150)
 
+  // Hook to render relationship styles after the tree updates
+  chart.setAfterUpdate(() => {
+    updateRelationshipStyles();
+  });
+
   const f3Card = chart
     .setCardHtml()
     .setCardDisplay([
@@ -276,6 +281,109 @@ function createChart(chartData) {
   return chart;
 }
 
+/**
+ * Apply CSS classes and SVG markers to links based on relationship status.
+ * This runs after every chart update.
+ */
+function updateRelationshipStyles() {
+  // 1. Select the SVG container
+  const svg = d3.select('#FamilyChart').select('svg.main_svg');
+  const linksGroup = svg.select('.links_view');
+  
+  // 2. Ensure we have a group for our custom markers (divorce slashes)
+  let markerGroup = linksGroup.select('.relationship-markers');
+  if (markerGroup.empty()) {
+    markerGroup = linksGroup.append('g').attr('class', 'relationship-markers');
+  }
+
+  // 3. Iterate through all existing link paths
+  const links = linksGroup.selectAll('path.link');
+  
+  const divorcedLinksData = [];
+
+  links.each(function(d) {
+    // d is the link datum. d.source and d.target are the tree nodes.
+    // In family-chart, spouse links usually have `d.spouse = true`
+    // OR we can identify them because they connect a person to their spouse.
+    
+    // Clean up previous classes
+    const linkEl = d3.select(this);
+    linkEl.classed('link-married link-partner link-divorced link-separated', false);
+
+    let relType = 'married'; // Default
+
+    // Identify if this is a spouse link
+    // family-chart stores spouse info in d.data.spouse or check source/target IDs
+    // However, the datum structure for links in family-chart is: { source: node, target: node }
+    const sourceId = d.source.data ? d.source.data.id : d.source.id; // Handle different data structures
+    const targetId = d.target.data ? d.target.data.id : d.target.id;
+    
+    // Check if we have a relationship record for this pair
+    // We check both directions A-B and B-A
+    if (sourceId && targetId) {
+      const rel = state.spousalRels.find(r => 
+        (r.person1_id === sourceId && r.person2_id === targetId) ||
+        (r.person1_id === targetId && r.person2_id === sourceId)
+      );
+
+      if (rel) {
+        relType = rel.relationship_type;
+      } else {
+        // Check local data if DB sync hasn't happened yet
+        const sourcePerson = state.chart.store.getData().find(p => p.id === sourceId);
+        if (sourcePerson && sourcePerson.data.spouse_rels && sourcePerson.data.spouse_rels[targetId]) {
+          relType = sourcePerson.data.spouse_rels[targetId];
+        }
+      }
+    }
+
+    // Apply class based on type
+    if (relType === 'partner') linkEl.classed('link-partner', true);
+    else if (relType === 'separated') linkEl.classed('link-separated', true);
+    else if (relType === 'divorced') {
+      linkEl.classed('link-divorced', true);
+      // Collect data to draw the slash marker later
+      divorcedLinksData.push({ 
+        pathNode: this, 
+        id: `marker-${sourceId}-${targetId}` 
+      });
+    } else {
+      linkEl.classed('link-married', true);
+    }
+  });
+
+  // 4. Render Divorce Markers (Slashes)
+  // We bind the 'divorcedLinksData' to line elements in our marker group
+  const markers = markerGroup.selectAll('.divorce-marker')
+    .data(divorcedLinksData, d => d.id);
+
+  // Remove old markers
+  markers.exit().remove();
+
+  // Add new markers
+  const markersEnter = markers.enter()
+    .append('path')
+    .attr('class', 'divorce-marker');
+
+  // Update all markers (new and existing)
+  markers.merge(markersEnter).each(function(d) {
+    const pathNode = d.pathNode;
+    const totalLength = pathNode.getTotalLength();
+    
+    if (totalLength > 0) {
+      // Get the center point of the curve
+      const point = pathNode.getPointAtLength(totalLength / 2);
+      
+      // Draw a small slash at that point
+      // Simple diagonal line logic: move -5,-5 to +5,+5 relative to center
+      const size = 6;
+      const dPath = `M ${point.x - size} ${point.y + size} L ${point.x + size} ${point.y - size}`;
+      
+      d3.select(this).attr('d', dPath);
+    }
+  });
+}
+
 function applyAddButtonLabels(editApi) {
   if (!editApi) return;
 
@@ -373,7 +481,6 @@ function ensureRelationshipTypeSelector(form, datumId) {
   if (!anchorElement?.parentNode) return;
 
   // --- Logic for NEW partners (Adding a new spouse) ---
-  // Only run this if we actually have a title indicating we are adding
   const isPartnerForm = /partner|spouse/i.test(titleText);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
@@ -402,20 +509,16 @@ function ensureRelationshipTypeSelector(form, datumId) {
     const spouse = chartData.find(m => m.id === spouseId);
     if (!spouse || spouse._new_rel_data) return;
 
-    // Create unique selector name
     const pairId = datum.id < spouseId ? `${datum.id}_${spouseId}` : `${spouseId}_${datum.id}`;
     const selectorName = `rel_type_${pairId}`; 
     
     if (form.querySelector(`select[name="${selectorName}"]`)) return;
 
-    // 1. Check DB for relationship
     const rel = state.spousalRels.find(r =>
       (r.person1_id === datum.id && r.person2_id === spouseId) ||
       (r.person1_id === spouseId && r.person2_id === datum.id)
     );
     
-    // 2. Determine current type (Priority: Memory -> DB -> Default)
-    // Using Memory first prevents reverting to old DB state before sync completes
     let currentType = 'married';
     if (datum.data.spouse_rels && datum.data.spouse_rels[spouseId]) {
       currentType = datum.data.spouse_rels[spouseId];
@@ -423,11 +526,9 @@ function ensureRelationshipTypeSelector(form, datumId) {
       currentType = rel.relationship_type;
     }
 
-    // Names
     const personAName = `${datum.data['first name'] || ''} ${datum.data['last name'] || ''}`.trim() || 'Unknown';
     const personBName = `${spouse.data['first name'] || ''} ${spouse.data['last name'] || ''}`.trim() || 'Unknown';
     
-    // Label format: "[Person A] and [Person B] are"
     const label = `${personAName} and ${personBName} are`;
     
     const wrapper = createRelationshipDropdown(
@@ -445,21 +546,16 @@ function ensureRelationshipTypeSelector(form, datumId) {
   configureFormInputs(form); 
 }
 
-/**
- * Creates the HTML for the dropdown.
- */
 function createRelationshipDropdown(wrapperClass, name, label, currentType, spouseId, relId) {
   const wrapper = document.createElement('div');
   wrapper.className = `f3-form-field ${wrapperClass}`;
   
-  // Create select element
   const select = document.createElement('select');
   select.name = name;
   select.className = 'relationship-type-select relationship-type-select-existing'; 
   if (spouseId) select.setAttribute('data-spouse-id', spouseId);
   if (relId) select.setAttribute('data-rel-id', relId);
 
-  // Options
   const options = ['married', 'partner', 'divorced', 'separated'];
   options.forEach(opt => {
     const option = document.createElement('option');
@@ -469,7 +565,6 @@ function createRelationshipDropdown(wrapperClass, name, label, currentType, spou
     select.appendChild(option);
   });
 
-  // Label
   const labelEl = document.createElement('label');
   labelEl.textContent = label;
 
@@ -564,7 +659,6 @@ async function syncToDatabase() {
     const deletedIds = [...dbIds].filter(id => !chartIds.has(id));
     const existingIds = [...chartIds].filter(id => dbIds.has(id));
 
-    // 1. Delete members
     for (const id of deletedIds) {
       const relatedParents = state.parentChildRels.filter(rel => rel.parent_id === id || rel.child_id === id);
       const relatedSpouses = state.spousalRels.filter(rel => rel.person1_id === id || rel.person2_id === id);
@@ -578,7 +672,6 @@ async function syncToDatabase() {
       await deleteFamilyMember(id);
     }
 
-    // 2. Create new members
     for (const id of newIds) {
       const person = chartData.find(datum => datum.id === id);
       if (!person) continue;
@@ -594,7 +687,6 @@ async function syncToDatabase() {
       });
     }
 
-    // 3. Update existing members
     for (const id of existingIds) {
       const chartPerson = chartData.find(datum => datum.id === id);
       const dbPerson = state.members.find(member => member.id === id);
@@ -618,14 +710,11 @@ async function syncToDatabase() {
       if (changed) await updateFamilyMember(id, updates);
     }
 
-    // 4. Reload members from DB
     const membersResult = await getFamilyMembers(state.treeId);
     if (membersResult.success) state.members = membersResult.data;
 
-    // 5. Sync relationships
     await syncRelationships(chartData);
 
-    // 6. Reload relationships from DB
     const pcResult = await getParentChildRelationships(state.treeId);
     if (pcResult.success) state.parentChildRels = pcResult.data;
 
@@ -660,12 +749,6 @@ async function syncRelationships(chartData) {
         const key = person.id < spouseId ? `${person.id}-${spouseId}` : `${spouseId}-${person.id}`;
         
         if (!chartSpousalRels.has(key)) {
-          // Determine relationship type:
-          // Priority:
-          // 1. Local Chart Data (most recent edit)
-          // 2. New Relationship Window Variable
-          // 3. Existing DB Data
-          // 4. Default 'married'
           let relType = 'married';
           
           const personSpouseRel = person.data.spouse_rels ? person.data.spouse_rels[spouseId] : null;
@@ -689,7 +772,6 @@ async function syncRelationships(chartData) {
     }
   }
 
-  // Sync Parent-Child
   const dbParentChild = new Set(state.parentChildRels.map(rel => `${rel.parent_id}-${rel.child_id}`));
   const chartParentChildIds = new Set(targetParentChild.map(rel => `${rel.parent_id}-${rel.child_id}`));
 
@@ -705,7 +787,6 @@ async function syncRelationships(chartData) {
     }
   }
 
-  // Sync Spousal
   const dbSpousal = new Map(state.spousalRels.map(rel => {
     const key = rel.person1_id < rel.person2_id ? `${rel.person1_id}-${rel.person2_id}` : `${rel.person2_id}-${rel.person1_id}`;
     return [key, rel];
