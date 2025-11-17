@@ -161,6 +161,22 @@ function createChart(chartData) {
         if (birth) return birth
         if (death) return `- ${death}`
         return ''
+      },
+      // Relationship Status Display on Card (Optional but helpful)
+      (d) => {
+        const spouseRels = d.data['spouse_rels'];
+        if (!spouseRels) return '';
+        const relationshipStrings = [];
+        Object.entries(spouseRels).forEach(([spouseId, type]) => {
+          const spouse = state.members.find(m => m.id === spouseId);
+          if (spouse && type) {
+            const spouseName = `${spouse.first_name || ''} ${spouse.last_name || ''}`.trim();
+            const typeCap = type.charAt(0).toUpperCase() + type.slice(1);
+            relationshipStrings.push(`${typeCap} to ${spouseName}`);
+          }
+        });
+        if (relationshipStrings.length === 0) return '';
+        return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2;">${relationshipStrings.join('<br>')}</div>`;
       }
     ])
 
@@ -172,7 +188,8 @@ function createChart(chartData) {
       const form = cont.querySelector('form');
       if (form) {
         form.id = SELECTORS.form.substring(1);
-        configureForm(form, form_creator.datum_id);
+        // Wait a tick to ensure DOM is ready, just in case
+        setTimeout(() => configureForm(form, form_creator.datum_id), 0);
       }
     })
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
@@ -202,14 +219,25 @@ function createChart(chartData) {
           spouseDatum.data.spouse_rels[datum.id] = newType;
         }
 
-        // Direct DB Update (Optimization)
-        if (relId && relId !== 'undefined') {
+        // Update Database
+        // If we have a valid relationship ID, update it directly
+        if (relId && relId !== 'undefined' && relId !== 'null') {
           const dbRel = state.spousalRels.find(r => r.id === relId);
           if (dbRel && dbRel.relationship_type !== newType) {
             console.log(`Updating relationship ${relId} to ${newType}`);
-            // Optimistically update local state
-            dbRel.relationship_type = newType; 
+            dbRel.relationship_type = newType; // Optimistic update
             await updateSpousalRelationship(relId, newType);
+          }
+        } else {
+          // Fallback: If ID was missing but we have spouseId, try to find and update via IDs
+          const existingRel = state.spousalRels.find(r => 
+            (r.person1_id === datum.id && r.person2_id === spouseId) ||
+            (r.person1_id === spouseId && r.person2_id === datum.id)
+          );
+          if (existingRel && existingRel.relationship_type !== newType) {
+            console.log(`Updating relationship (by ID lookup) to ${newType}`);
+            existingRel.relationship_type = newType;
+            await updateSpousalRelationship(existingRel.id, newType);
           }
         }
       }
@@ -331,9 +359,9 @@ function hideRemoveRelationship(form) {
 }
 
 /**
- * Adds the relationship status dropdown.
- * FIX: Now creates the dropdown even if the DB record is temporarily missing,
- * ensuring the field never "disappears".
+ * Ensures the relationship dropdown appears for all spouses.
+ * CRITICAL FIX: Does NOT return early if DB record is missing.
+ * Falls back to 'married' if needed to ensure UI visibility.
  */
 function ensureRelationshipTypeSelector(form, datumId) {
   const chartData = state.chart.store.getData();
@@ -347,18 +375,21 @@ function ensureRelationshipTypeSelector(form, datumId) {
   const anchorElement = form.querySelector('.f3-form-buttons');
   if (!anchorElement?.parentNode) return;
 
-  // --- Logic for NEW partners ---
+  // --- Logic for NEW partners (Adding a new spouse) ---
   const isPartnerForm = /partner|spouse/i.test(title.textContent);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
       const originPerson = chartData.find(p => p.id === datum._new_rel_data.rel_id);
       const originName = (originPerson?.data['first name'] || '').trim() || 'Relative';
+      // Label format: "[Origin Name] and this person are"
       const label = `${originName} and this person are`;
 
       const wrapper = createRelationshipDropdown(
         'relationship-type-selector-new', 
         'relationship_type', 
         label, 
+        'married', 
+        null,
         null
       );
       anchorElement.parentNode.insertBefore(wrapper, anchorElement);
@@ -374,36 +405,41 @@ function ensureRelationshipTypeSelector(form, datumId) {
     const spouse = chartData.find(m => m.id === spouseId);
     if (!spouse || spouse._new_rel_data) return;
 
-    const selectorClass = `relationship-type-selector-existing`;
-    // Create a stable ID based on the two person IDs
+    // Create unique selector name
     const pairId = datum.id < spouseId ? `${datum.id}_${spouseId}` : `${spouseId}_${datum.id}`;
     const selectorName = `rel_type_${pairId}`; 
     
     if (form.querySelector(`select[name="${selectorName}"]`)) return;
 
-    // Try to find existing relationship in DB
+    // 1. Check DB for relationship
     const rel = state.spousalRels.find(r =>
       (r.person1_id === datum.id && r.person2_id === spouseId) ||
       (r.person1_id === spouseId && r.person2_id === datum.id)
     );
     
-    // Get names
+    // 2. Determine current type (Priority: DB -> Local Data -> Default)
+    let currentType = 'married';
+    if (rel) {
+      currentType = rel.relationship_type;
+    } else if (datum.data.spouse_rels && datum.data.spouse_rels[spouseId]) {
+      currentType = datum.data.spouse_rels[spouseId];
+    }
+
+    // Names
     const personAName = `${datum.data['first name'] || ''} ${datum.data['last name'] || ''}`.trim() || 'Unknown';
     const personBName = `${spouse.data['first name'] || ''} ${spouse.data['last name'] || ''}`.trim() || 'Unknown';
+    
+    // Label format: "[Person A] and [Person B] are"
     const label = `${personAName} and ${personBName} are`;
     
     const wrapper = createRelationshipDropdown(
-      selectorClass,
+      `relationship-type-selector-existing`,
       selectorName,
       label,
-      rel
+      currentType,
+      spouseId,
+      rel ? rel.id : null
     );
-    
-    const select = wrapper.querySelector('select');
-    if (select) {
-      select.setAttribute('data-spouse-id', spouseId);
-      select.setAttribute('data-rel-id', rel ? rel.id : 'undefined'); 
-    }
     
     anchorElement.parentNode.insertBefore(wrapper, anchorElement);
   });
@@ -411,20 +447,37 @@ function ensureRelationshipTypeSelector(form, datumId) {
   configureFormInputs(form); 
 }
 
-function createRelationshipDropdown(wrapperClass, name, label, dbRel) {
-  const currentType = dbRel ? dbRel.relationship_type : 'married';
-  
+/**
+ * Creates the HTML for the dropdown.
+ */
+function createRelationshipDropdown(wrapperClass, name, label, currentType, spouseId, relId) {
   const wrapper = document.createElement('div');
   wrapper.className = `f3-form-field ${wrapperClass}`;
-  wrapper.innerHTML = `
-    <label>${label}</label>
-    <select name="${name}" class="relationship-type-select">
-      <option value="married" ${currentType === 'married' ? 'selected' : ''}>Married</option>
-      <option value="partner" ${currentType === 'partner' ? 'selected' : ''}>Partner</option>
-      <option value="divorced" ${currentType === 'divorced' ? 'selected' : ''}>Divorced</option>
-      <option value="separated" ${currentType === 'separated' ? 'selected' : ''}>Separated</option>
-    </select>
-  `;
+  
+  // Create select element
+  const select = document.createElement('select');
+  select.name = name;
+  select.className = 'relationship-type-select relationship-type-select-existing'; // Add existing class for submit handler
+  if (spouseId) select.setAttribute('data-spouse-id', spouseId);
+  if (relId) select.setAttribute('data-rel-id', relId);
+
+  // Options
+  const options = ['married', 'partner', 'divorced', 'separated'];
+  options.forEach(opt => {
+    const option = document.createElement('option');
+    option.value = opt;
+    option.textContent = opt.charAt(0).toUpperCase() + opt.slice(1);
+    if (opt === currentType) option.selected = true;
+    select.appendChild(option);
+  });
+
+  // Label
+  const labelEl = document.createElement('label');
+  labelEl.textContent = label;
+
+  wrapper.appendChild(labelEl);
+  wrapper.appendChild(select);
+  
   return wrapper;
 }
 
@@ -609,11 +662,7 @@ async function syncRelationships(chartData) {
         const key = person.id < spouseId ? `${person.id}-${spouseId}` : `${spouseId}-${person.id}`;
         
         if (!chartSpousalRels.has(key)) {
-          // Determine relationship type:
-          // 1. Check Chart Data (updated by form)
-          // 2. Check New Rel Window Variable
-          // 3. Check Existing DB
-          // 4. Default to Married
+          // Determine relationship type
           let relType = 'married';
           
           const personSpouseRel = person.data.spouse_rels ? person.data.spouse_rels[spouseId] : null;
