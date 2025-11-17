@@ -154,6 +154,7 @@ function createChart(chartData) {
     .setCardHtml()
     .setCardDisplay([
       ['first name', 'last name'],
+      // Date Range
       (d) => {
         const birth = d.data['birthday'] || ''
         const death = d.data['death'] || ''
@@ -161,6 +162,32 @@ function createChart(chartData) {
         if (birth) return birth
         if (death) return `- ${death}`
         return ''
+      },
+      // Relationship Status (Added Logic)
+      (d) => {
+        const spouseRels = d.data['spouse_rels'];
+        if (!spouseRels) return '';
+
+        const relationshipStrings = [];
+
+        // spouseRels is an object: { spouse_id: "married", spouse_id_2: "divorced" }
+        Object.entries(spouseRels).forEach(([spouseId, type]) => {
+          // Look up the spouse name from the global state members list
+          const spouse = state.members.find(m => m.id === spouseId);
+          if (spouse) {
+            const spouseName = `${spouse.first_name || ''} ${spouse.last_name || ''}`.trim();
+            if (type) {
+              // Capitalize the relationship type (e.g., "married" -> "Married")
+              const typeCap = type.charAt(0).toUpperCase() + type.slice(1);
+              relationshipStrings.push(`${typeCap} to ${spouseName}`);
+            }
+          }
+        });
+
+        if (relationshipStrings.length === 0) return '';
+        
+        // Return styled HTML for the card
+        return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2;">${relationshipStrings.join('<br>')}</div>`;
       }
     ])
 
