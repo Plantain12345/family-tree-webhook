@@ -290,6 +290,9 @@ function createChart(chartData) {
       // 5. Trigger DB Sync (marked as delete)
       postSubmit({ delete: true }); 
       scheduleSave(); 
+
+      // 6. REQUIREMENT: Trigger 'Show Full Tree' logic after deletion
+      handleShowFullTree();
     });
 
   applyAddButtonLabels(state.editApi);
@@ -643,10 +646,17 @@ async function syncToDatabase() {
 
   try {
     // 1. Identify "Real" Chart IDs 
-    // (Filter out any "Unknown" or placeholder cards from the chart library)
+    // FIX #3: Filter out any "Unknown" or placeholder cards, AND nameless cards
     const chartData = state.chart.store.getData().filter(d => {
       // Don't sync cards marked as 'unknown' or 'to_add' by the library
-      return !d.unknown && !d.data.unknown && !d.to_add;
+      if (d.unknown || d.data.unknown || d.to_add) return false;
+
+      // Don't sync people with absolutely no name (prevents phantom nameless members)
+      const fName = (d.data['first name'] || '').trim();
+      const lName = (d.data['last name'] || '').trim();
+      if (!fName && !lName) return false;
+
+      return true;
     });
 
     const chartIds = new Set(chartData.map(item => item.id));
@@ -838,6 +848,11 @@ function handleShowFullTree() {
     state.editApi.addRelativeInstance.cleanUp();
   }
   state.editApi.closeForm();
+  
+  // FIX #1: Find the original main person (root) and reset the view to them
+  const mainId = findMainPersonId(state.members);
+  if (mainId) state.chart.updateMainId(mainId);
+
   state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
 }
 
