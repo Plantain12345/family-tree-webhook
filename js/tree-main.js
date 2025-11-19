@@ -140,7 +140,8 @@ function renderTree(chartData) {
     const currentMainExists = chartData.find(d => d.id === currentMainId)
     
     if (!currentMainId || !currentMainExists) {
-      const bestMainId = findYoungestDescendantId(state.members, state.parentChildRels) || findMainPersonId(state.members)
+      // FIX #2 (Part A): Default to Root (Oldest) instead of Youngest to show more branches
+      const bestMainId = findTreeRootId(state.members, state.parentChildRels) || findMainPersonId(state.members)
       if (bestMainId) state.chart.updateMainId(bestMainId)
     }
     
@@ -151,9 +152,9 @@ function renderTree(chartData) {
 function createChart(chartData) {
   const chart = window.f3.createChart('#FamilyChart', chartData)
     .setTransitionTime(1000)
-    .setCardXSpacing(250)
+    .setCardXSpacing(260) // Increased spacing to accommodate wider cards
     .setCardYSpacing(150)
-    .setShowSiblingsOfMain(true) // Helps show more branches
+    .setShowSiblingsOfMain(true)
 
   chart.setAfterUpdate(() => {
     try {
@@ -165,6 +166,8 @@ function createChart(chartData) {
 
   const f3Card = chart
     .setCardHtml()
+    // FIX #4: Widen cards to prevent text cutoff
+    .setCardDim({ w: 260, h: 70, text_x: 75, text_y: 15, img_w: 60, img_h: 60, img_x: 5, img_y: 5 })
     .setCardDisplay([
       ['first name', 'last name'],
       (d) => {
@@ -255,14 +258,12 @@ function createChart(chartData) {
       applyChanges(); 
       postSubmit();   
 
-      // 3. Fix for focusing the new member after adding via bubble
+      // FIX #3: Keep focus on the newly created member
       setTimeout(() => {
         const freshData = state.chart.store.getData();
-        // If we just added a new person (datum.id is the ID of the person being edited/added)
         const newDatum = freshData.find(d => d.id === datum.id);
         
         if (newDatum && !newDatum.to_add && !newDatum.data.to_add) {
-           // Switch view to them and open their form
            state.chart.updateMainId(newDatum.id);
            state.editApi.open(newDatum);
            state.chart.updateTree({ initial: false });
@@ -302,13 +303,11 @@ function createChart(chartData) {
       postSubmit({ delete: true }); 
       scheduleSave(); 
 
-      // Trigger full tree view after delete
       setTimeout(() => handleShowFullTree(), 100);
     });
 
   applyAddButtonLabels(state.editApi);
 
-  // Fix: Ensure we pass the correct datum to addRelative to show bubbles
   f3Card.setOnCardClick((e, d) => {
     const currentDatum = state.chart.store.getDatum(d.data.id);
     
@@ -318,12 +317,13 @@ function createChart(chartData) {
     }
     
     state.editApi.open(currentDatum);
-    state.editApi.addRelative(currentDatum); // This shows the + bubbles
+    state.editApi.addRelative(currentDatum);
     f3Card.onCardClickDefault(e, d);
   });
 
-  const bestId = findYoungestDescendantId(state.members, state.parentChildRels) || findMainPersonId(state.members);
-  if (bestId) chart.updateMainId(bestId);
+  // Initial Load: Focus on Root to show the most branches
+  const rootId = findTreeRootId(state.members, state.parentChildRels) || findMainPersonId(state.members);
+  if (rootId) chart.updateMainId(rootId);
 
   chart.updateTree({ initial: true });
 
@@ -662,7 +662,7 @@ async function syncToDatabase() {
   console.log('Syncing to database...');
 
   try {
-    // 1. Identify "Real" Chart IDs 
+    // Filter out "Unknown", placeholders, AND nameless cards
     const chartData = state.chart.store.getData().filter(d => {
       if (d.unknown || d.data.unknown || d.to_add) return false;
       
@@ -698,7 +698,7 @@ async function syncToDatabase() {
     // 3. Create new members
     for (const id of newIds) {
       const person = chartData.find(datum => datum.id === id);
-      if (!person || person.unknown || person.data.unknown) continue; 
+      if (!person) continue;
 
       await createFamilyMember({
         id,
@@ -804,6 +804,7 @@ async function syncRelationships(chartData) {
     }
   }
 
+  // Sync Parent-Child
   const dbParentChild = new Set(state.parentChildRels.map(rel => `${rel.parent_id}-${rel.child_id}`));
   const chartParentChildIds = new Set(targetParentChild.map(rel => `${rel.parent_id}-${rel.child_id}`));
 
@@ -819,6 +820,7 @@ async function syncRelationships(chartData) {
     }
   }
 
+  // Sync Spousal
   const dbSpousal = new Map(state.spousalRels.map(rel => {
     const key = rel.person1_id < rel.person2_id ? `${rel.person1_id}-${rel.person2_id}` : `${rel.person2_id}-${rel.person1_id}`;
     return [key, rel];
@@ -857,49 +859,46 @@ function handleShowFullTree() {
   }
   state.editApi.closeForm();
   
-  // Find the best main person to show the fullest tree
-  const youngestId = findYoungestDescendantId(state.members, state.parentChildRels);
-  const rootId = findMainPersonId(state.members);
+  // FIX #1 (Part B): Set main_id to the Root of the tree to show maximum branches
+  // This overrides the previous logic of showing the "youngest"
+  const rootId = findTreeRootId(state.members, state.parentChildRels);
   
-  if (youngestId) {
-    state.chart.updateMainId(youngestId);
-  } else if (rootId) {
+  if (rootId) {
     state.chart.updateMainId(rootId);
+  } else {
+    const fallbackId = findMainPersonId(state.members);
+    if (fallbackId) state.chart.updateMainId(fallbackId);
   }
 
   state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
 }
 
-function findYoungestDescendantId(members, relationships) {
+/**
+ * Finds the "Root" ancestor of the tree.
+ * A root is a person who appears in the members list but is NOT listed as a child in any relationship.
+ */
+function findTreeRootId(members, relationships) {
   if (!members || members.length === 0) return null;
 
-  const depths = {};
-  members.forEach(m => depths[m.id] = 0);
+  const childIds = new Set(relationships.map(r => r.child_id));
+  
+  // Potential roots are members who are never a child
+  const potentialRoots = members.filter(m => !childIds.has(m.id));
 
-  let changed = true;
-  let iterations = 0;
-  while (changed && iterations < 100) {
-    changed = false;
-    relationships.forEach(rel => {
-      const pDepth = depths[rel.parent_id] || 0;
-      const cDepth = depths[rel.child_id] || 0;
-      if (pDepth + 1 > cDepth) {
-        depths[rel.child_id] = pDepth + 1;
-        changed = true;
-      }
-    });
-    iterations++;
-  }
+  if (potentialRoots.length === 0) return members[0].id; // Circular or empty logic fallback
 
-  let maxD = -1;
-  let maxId = null;
-  for (const id in depths) {
-    if (depths[id] > maxD) {
-      maxD = depths[id];
-      maxId = id;
-    }
-  }
-  return maxId;
+  // If multiple roots (disjoint trees), prefer the one marked is_main, or the oldest by birth year
+  const mainRoot = potentialRoots.find(m => m.is_main);
+  if (mainRoot) return mainRoot.id;
+
+  // Sort by birth year (ascending) to find the oldest ancestor
+  potentialRoots.sort((a, b) => {
+    const yearA = a.birthday ? parseInt(a.birthday) : 9999;
+    const yearB = b.birthday ? parseInt(b.birthday) : 9999;
+    return yearA - yearB;
+  });
+
+  return potentialRoots[0].id;
 }
 
 function handleCopyTreeCode() {
