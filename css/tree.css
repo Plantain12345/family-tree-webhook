@@ -10,9 +10,8 @@
 
 .tree-info-content {
   width: 100%;
-  /* FIX #2 & #3: Remove max-width constraint to push elements to corners */
-  max-width: none; 
-  padding: 0 40px;
+  max-width: none;
+  padding: 0 20px;
   margin: 0 auto;
   display: flex;
   justify-content: space-between;
@@ -167,6 +166,12 @@
   display: block !important;
   visibility: visible !important;
   opacity: 1 !important;
+}
+
+/* HIDE THE SUPER PARENT CARD */
+.f3 .card[data-id="SUPER_PARENT_GHOST_ID"] {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* Responsive adjustments */
