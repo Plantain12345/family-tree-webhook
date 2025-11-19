@@ -5,11 +5,14 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
   position: relative;
   z-index: 100;
-  font-family: 'Roboto', sans-serif; /* Match card style */
+  font-family: 'Roboto', sans-serif;
 }
 
 .tree-info-content {
-  max-width: 1200px;
+  width: 100%;
+  /* FIX #2 & #3: Remove max-width constraint to push elements to corners */
+  max-width: none; 
+  padding: 0 40px;
   margin: 0 auto;
   display: flex;
   justify-content: space-between;
@@ -38,7 +41,7 @@
   gap: 10px;
   color: #87CEEB;
   font-size: 16px;
-  margin-left: auto; /* Pushes it to the right */
+  margin-left: auto; 
   font-family: 'Roboto', sans-serif;
 }
 
@@ -172,6 +175,7 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 10px;
+    padding: 15px 20px;
   }
   
   .tree-title-group {
@@ -180,13 +184,12 @@
   }
   
   .tree-code-container {
-    margin-left: 0; /* Align left on mobile */
+    margin-left: 0; 
     width: 100%;
     justify-content: space-between;
   }
   
   .btn-action {
-    /* width: 100%;  Make button full-width on mobile */
     text-align: center;
   }
 
@@ -202,7 +205,6 @@
     font-size: 16px;
   }
 
-  /* Make + buttons slightly smaller on mobile */
   .f3 .card_add_relative {
     width: 35px !important;
     height: 35px !important;
