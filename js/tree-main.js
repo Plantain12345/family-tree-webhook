@@ -135,10 +135,15 @@ function renderTree(chartData) {
     window.f3Chart = state.chart
   } else {
     state.chart.updateData(chartData)
-    const mainId = findMainPersonId(state.members)
-    // Only update main ID if the current main ID is no longer in the data
-    const currentMainExists = chartData.find(d => d.id === state.chart.store.getMainId())
-    if (mainId && !currentMainExists) state.chart.updateMainId(mainId)
+    
+    // Ensure we have a valid main ID to display
+    const currentMainId = state.chart.store.getMainId()
+    const currentMainExists = chartData.find(d => d.id === currentMainId)
+    
+    if (!currentMainId || !currentMainExists) {
+      const bestMainId = findYoungestDescendantId(state.members, state.parentChildRels) || findMainPersonId(state.members)
+      if (bestMainId) state.chart.updateMainId(bestMainId)
+    }
     
     state.chart.updateTree({ initial: false })
   }
@@ -245,6 +250,22 @@ function createChart(chartData) {
 
       applyChanges(); 
       postSubmit();   
+
+      // FIX #3: Force form to stay on the new member
+      // The 'datum' here is the member being added/edited.
+      // We find it in the store to get the latest reference, then focus it.
+      const freshData = state.chart.store.getData();
+      const newDatum = freshData.find(d => d.id === datum.id);
+      
+      if (newDatum && !newDatum.to_add) {
+        // Only switch focus if it's a real member (not a placeholder)
+        setTimeout(() => {
+          state.chart.updateMainId(newDatum.id);
+          state.editApi.open(newDatum);
+          state.chart.updateTree({ initial: false });
+        }, 50); // Small delay to allow library animations to settle
+      }
+
       scheduleSave(); 
     })
     .setOnDelete((datum, deletePerson, postSubmit) => {
@@ -254,26 +275,21 @@ function createChart(chartData) {
       // 1. Run the library's standard delete function
       deletePerson();
       
-      // 2. FIX: The library might have converted the person to "Unknown" instead of deleting
-      // We need to find if the ID still exists in data with "unknown: true" or "data.unknown: true"
+      // 2. Remove artifacts converted to "Unknown"
       const data = store.getData();
       const index = data.findIndex(d => d.id === id);
 
       if (index !== -1) {
-        // If the library kept it as unknown/to_add to preserve structure,
-        // but we want to force delete it:
         const node = data[index];
         if (node.unknown || node.data.unknown) {
           console.log('Removing artifact converted to Unknown:', id);
           
-          // Remove references to this ID from other nodes
           data.forEach(d => {
             if (d.rels.parents) d.rels.parents = d.rels.parents.filter(pId => pId !== id);
             if (d.rels.children) d.rels.children = d.rels.children.filter(cId => cId !== id);
             if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(sId => sId !== id);
           });
 
-          // Remove the node itself
           data.splice(index, 1);
         }
       }
@@ -287,12 +303,12 @@ function createChart(chartData) {
       // 4. Update UI immediately
       store.updateTree({ initial: false });
       
-      // 5. Trigger DB Sync (marked as delete)
+      // 5. Trigger DB Sync
       postSubmit({ delete: true }); 
       scheduleSave(); 
 
-      // 6. REQUIREMENT: Trigger 'Show Full Tree' logic after deletion
-      handleShowFullTree();
+      // 6. FIX #2: Trigger 'Show Full Tree' logic after deletion to reset view
+      setTimeout(() => handleShowFullTree(), 100);
     });
 
   applyAddButtonLabels(state.editApi);
@@ -307,8 +323,9 @@ function createChart(chartData) {
     f3Card.onCardClickDefault(e, d);
   });
 
-  const mainId = findMainPersonId(state.members);
-  if (mainId) chart.updateMainId(mainId);
+  // Use youngest descendant as initial view to show most of tree
+  const bestId = findYoungestDescendantId(state.members, state.parentChildRels) || findMainPersonId(state.members);
+  if (bestId) chart.updateMainId(bestId);
 
   chart.updateTree({ initial: true });
 
@@ -645,13 +662,11 @@ async function syncToDatabase() {
   console.log('Syncing to database...');
 
   try {
-    // 1. Identify "Real" Chart IDs 
-    // FIX #3: Filter out any "Unknown" or placeholder cards, AND nameless cards
+    // FIX #3: Filter out "Unknown", placeholders, AND nameless cards
     const chartData = state.chart.store.getData().filter(d => {
-      // Don't sync cards marked as 'unknown' or 'to_add' by the library
       if (d.unknown || d.data.unknown || d.to_add) return false;
-
-      // Don't sync people with absolutely no name (prevents phantom nameless members)
+      
+      // Prevent saving empty "ghost" records
       const fName = (d.data['first name'] || '').trim();
       const lName = (d.data['last name'] || '').trim();
       if (!fName && !lName) return false;
@@ -683,8 +698,7 @@ async function syncToDatabase() {
     // 3. Create new members
     for (const id of newIds) {
       const person = chartData.find(datum => datum.id === id);
-      // Triple check to ensure no phantom members
-      if (!person || person.unknown || person.data.unknown) continue; 
+      if (!person) continue;
 
       await createFamilyMember({
         id,
@@ -727,7 +741,6 @@ async function syncToDatabase() {
     if (membersResult.success) state.members = membersResult.data;
 
     // 6. Sync relationships
-    // Pass filtered chartData to ensure we don't link phantom members
     await syncRelationships(chartData);
 
     // 7. Reload relationships from DB
@@ -748,8 +761,6 @@ async function syncToDatabase() {
 async function syncRelationships(chartData) {
   const targetParentChild = [];
   const chartSpousalRels = new Map();
-
-  // Helper to check if ID is valid (not phantom)
   const validIds = new Set(chartData.map(d => d.id));
 
   for (const person of chartData) {
@@ -757,7 +768,6 @@ async function syncRelationships(chartData) {
 
     if (parents) {
       for (const parentId of parents) {
-        // Only add if both exist in our valid chartData
         if (parentId && validIds.has(parentId) && validIds.has(person.id)) {
           targetParentChild.push({ parent_id: parentId, child_id: person.id });
         }
@@ -766,8 +776,7 @@ async function syncRelationships(chartData) {
 
     if (spouses) {
       for (const spouseId of spouses) {
-        if (!spouseId) continue;
-        if (!validIds.has(spouseId)) continue; // Skip if spouse is phantom
+        if (!spouseId || !validIds.has(spouseId)) continue;
         
         const key = person.id < spouseId ? `${person.id}-${spouseId}` : `${spouseId}-${person.id}`;
         
@@ -842,6 +851,7 @@ async function syncRelationships(chartData) {
 
 function handleShowFullTree() {
   if (!state.chart || !state.editApi) return;
+  
   if (state.editApi.isAddingRelative()) {
     state.editApi.addRelativeInstance.is_active = false;
     state.chart.store.state.one_level_rels = false;
@@ -849,11 +859,57 @@ function handleShowFullTree() {
   }
   state.editApi.closeForm();
   
-  // FIX #1: Find the original main person (root) and reset the view to them
-  const mainId = findMainPersonId(state.members);
-  if (mainId) state.chart.updateMainId(mainId);
+  // FIX #2: Set main_id to the youngest generation person (highest depth)
+  // This ensures maximum ancestry visibility
+  const youngestId = findYoungestDescendantId(state.members, state.parentChildRels);
+  
+  if (youngestId) {
+    state.chart.updateMainId(youngestId);
+  } else {
+    // Fallback to root if no hierarchy found
+    const rootId = findMainPersonId(state.members);
+    if (rootId) state.chart.updateMainId(rootId);
+  }
 
   state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
+}
+
+/**
+ * Algorithm to find the person in the youngest generation (lowest in the tree)
+ * This helps show the full tree by rendering from bottom-up ancestry.
+ */
+function findYoungestDescendantId(members, relationships) {
+  if (!members || members.length === 0) return null;
+
+  const depths = {};
+  members.forEach(m => depths[m.id] = 0);
+
+  // Propagate depths downwards (max 100 iterations to prevent infinite loops)
+  let changed = true;
+  let iterations = 0;
+  while (changed && iterations < 100) {
+    changed = false;
+    relationships.forEach(rel => {
+      const pDepth = depths[rel.parent_id] || 0;
+      const cDepth = depths[rel.child_id] || 0;
+      if (pDepth + 1 > cDepth) {
+        depths[rel.child_id] = pDepth + 1;
+        changed = true;
+      }
+    });
+    iterations++;
+  }
+
+  // Find ID with max depth
+  let maxD = -1;
+  let maxId = null;
+  for (const id in depths) {
+    if (depths[id] > maxD) {
+      maxD = depths[id];
+      maxId = id;
+    }
+  }
+  return maxId;
 }
 
 function handleCopyTreeCode() {
