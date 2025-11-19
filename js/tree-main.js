@@ -34,8 +34,6 @@ const ADD_LABELS = {
 
 const SELECTORS = {
   form: '#familyForm',
-  formDeleteButton: '.f3-delete-btn',
-  relationshipTypeSelect: '.relationship-type-select'
 }
 
 const state = {
@@ -134,11 +132,14 @@ async function loadTreeData() {
 function renderTree(chartData) {
   if (!state.chart) {
     state.chart = createChart(chartData)
-    window.f3Chart = state.chart // For debugging
+    window.f3Chart = state.chart
   } else {
     state.chart.updateData(chartData)
     const mainId = findMainPersonId(state.members)
-    if (mainId) state.chart.updateMainId(mainId)
+    // Only update main ID if the current main ID is no longer in the data
+    const currentMainExists = chartData.find(d => d.id === state.chart.store.getMainId())
+    if (mainId && !currentMainExists) state.chart.updateMainId(mainId)
+    
     state.chart.updateTree({ initial: false })
   }
 }
@@ -149,7 +150,6 @@ function createChart(chartData) {
     .setCardXSpacing(250)
     .setCardYSpacing(150)
 
-  // Hook to render relationship styles after the tree updates
   chart.setAfterUpdate(() => {
     updateRelationshipStyles();
   });
@@ -158,7 +158,6 @@ function createChart(chartData) {
     .setCardHtml()
     .setCardDisplay([
       ['first name', 'last name'],
-      // Date Range
       (d) => {
         const birth = d.data['birthday'] || ''
         const death = d.data['death'] || ''
@@ -167,7 +166,6 @@ function createChart(chartData) {
         if (death) return `- ${death}`
         return ''
       },
-      // Relationship Status Display on Card
       (d) => {
         const spouseRels = d.data['spouse_rels'];
         if (!spouseRels) return '';
@@ -202,50 +200,44 @@ function createChart(chartData) {
       
       if (!validateYearFields(form)) return;
 
-      // 1. Update In-Memory Chart Data for Relationship Types
+      // Update Relationship Types Logic (Optimistic Update)
       const relSelects = form.querySelectorAll('.relationship-type-select-existing');
-      const chartData = state.chart.store.getData();
-      const currentDatum = chartData.find(d => d.id === datum.id);
+      const currentChartData = state.chart.store.getData();
+      const currentDatum = currentChartData.find(d => d.id === datum.id);
 
       for (const select of relSelects) {
         const relId = select.dataset.relId;
         const spouseId = select.dataset.spouseId;
         const newType = select.value;
         
-        // Update Chart Data (Memory)
         if (currentDatum) {
           if (!currentDatum.data.spouse_rels) currentDatum.data.spouse_rels = {};
           currentDatum.data.spouse_rels[spouseId] = newType;
         }
-        const spouseDatum = chartData.find(d => d.id === spouseId);
+        const spouseDatum = currentChartData.find(d => d.id === spouseId);
         if (spouseDatum) {
           if (!spouseDatum.data.spouse_rels) spouseDatum.data.spouse_rels = {};
           spouseDatum.data.spouse_rels[datum.id] = newType;
         }
 
-        // Update Database
         if (relId && relId !== 'undefined' && relId !== 'null') {
           const dbRel = state.spousalRels.find(r => r.id === relId);
           if (dbRel && dbRel.relationship_type !== newType) {
-            console.log(`Updating relationship ${relId} to ${newType}`);
-            dbRel.relationship_type = newType; // Optimistic update
+            dbRel.relationship_type = newType; 
             await updateSpousalRelationship(relId, newType);
           }
         } else {
-          // Fallback: try to find and update via IDs if ID was missing on render
           const existingRel = state.spousalRels.find(r => 
             (r.person1_id === datum.id && r.person2_id === spouseId) ||
             (r.person1_id === spouseId && r.person2_id === datum.id)
           );
           if (existingRel && existingRel.relationship_type !== newType) {
-            console.log(`Updating relationship (by ID lookup) to ${newType}`);
             existingRel.relationship_type = newType;
             await updateSpousalRelationship(existingRel.id, newType);
           }
         }
       }
       
-      // Handle new relationship type (for brand new add)
       const newRelSelect = form.querySelector('.relationship-type-selector-new select');
       if (newRelSelect) {
         window.lastRelationshipType = newRelSelect.value;
@@ -256,59 +248,48 @@ function createChart(chartData) {
       scheduleSave(); 
     })
     .setOnDelete((datum, deletePerson, postSubmit) => {
-      // CUSTOM DELETE LOGIC: Force delete if no dependents
-      const hasChildren = datum.rels.children && datum.rels.children.length > 0;
+      const id = datum.id;
+      const store = state.chart.store;
 
-      if (!hasChildren) {
-        console.log('Force deleting person with no dependents:', datum.id);
-        
-        const store = state.chart.store;
-        const data = store.getData();
-        const id = datum.id;
+      // 1. Run the library's standard delete function
+      deletePerson();
+      
+      // 2. FIX: The library might have converted the person to "Unknown" instead of deleting
+      // We need to find if the ID still exists in data with "unknown: true" or "data.unknown: true"
+      const data = store.getData();
+      const index = data.findIndex(d => d.id === id);
 
-        // 1. Remove references to this person from everyone else
-        data.forEach(d => {
-          if (d.rels.parents) d.rels.parents = d.rels.parents.filter(pId => pId !== id);
-          if (d.rels.children) d.rels.children = d.rels.children.filter(cId => cId !== id);
-          if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(sId => sId !== id);
+      if (index !== -1) {
+        // If the library kept it as unknown/to_add to preserve structure,
+        // but we want to force delete it:
+        const node = data[index];
+        if (node.unknown || node.data.unknown) {
+          console.log('Removing artifact converted to Unknown:', id);
           
-          // Clean up custom spouse_rels
-          if (d.data.spouse_rels && d.data.spouse_rels[id]) {
-            delete d.data.spouse_rels[id];
-          }
-        });
+          // Remove references to this ID from other nodes
+          data.forEach(d => {
+            if (d.rels.parents) d.rels.parents = d.rels.parents.filter(pId => pId !== id);
+            if (d.rels.children) d.rels.children = d.rels.children.filter(cId => cId !== id);
+            if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(sId => sId !== id);
+          });
 
-        // 2. Remove the person object
-        const index = data.findIndex(d => d.id === id);
-        if (index !== -1) {
+          // Remove the node itself
           data.splice(index, 1);
         }
-        
-        // 3. Clean up "Add Relative" placeholder cards (optional library helper)
-        if (window.f3.handlers && window.f3.handlers.removeToAddFromData) {
-           window.f3.handlers.removeToAddFromData(data);
-        }
-
-        // 4. Handle Main Person deletion logic
-        if (store.getMainId() === id) {
-           const newMain = data.length > 0 ? data[0].id : null;
-           if (newMain) store.updateMainId(newMain);
-        }
-        
-        // 5. Update UI immediately
-        store.updateTree({ initial: false });
-        
-        // 6. Trigger database sync
-        postSubmit({ delete: true }); 
-        scheduleSave();
-
-      } else {
-        // If they HAVE children, use the library's default safe delete
-        // (This creates an 'Unknown' card to keep the tree connected)
-        deletePerson(); 
-        postSubmit({ delete: true }); 
-        scheduleSave(); 
       }
+
+      // 3. Handle Main Person deletion logic
+      if (store.getMainId() === id) {
+         const newMain = data.length > 0 ? data[0].id : null;
+         if (newMain) store.updateMainId(newMain);
+      }
+      
+      // 4. Update UI immediately
+      store.updateTree({ initial: false });
+      
+      // 5. Trigger DB Sync (marked as delete)
+      postSubmit({ delete: true }); 
+      scheduleSave(); 
     });
 
   applyAddButtonLabels(state.editApi);
@@ -331,10 +312,6 @@ function createChart(chartData) {
   return chart;
 }
 
-/**
- * Apply CSS classes and SVG markers to links based on relationship status.
- * This runs after every chart update.
- */
 function updateRelationshipStyles() {
   const svg = d3.select('#FamilyChart').select('svg.main_svg');
   const linksGroup = svg.select('.links_view');
@@ -430,9 +407,7 @@ function configureForm(form, datumId) {
   configureFormInputs(form);
   configureGenderField(form);
   hideRemoveRelationship(form);
-  
   ensureRelationshipTypeSelector(form, datumId);
-  
   renameYearLabels(form);
   applyDefaultGenderIfNeeded(form);
 
@@ -498,7 +473,6 @@ function ensureRelationshipTypeSelector(form, datumId) {
   const anchorElement = form.querySelector('.f3-form-buttons');
   if (!anchorElement?.parentNode) return;
 
-  // --- Logic for NEW partners ---
   const isPartnerForm = /partner|spouse/i.test(titleText);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
@@ -519,7 +493,6 @@ function ensureRelationshipTypeSelector(form, datumId) {
     }
   }
 
-  // --- Logic for EXISTING partners ---
   const spouseIds = datum.rels?.spouses || [];
   if (spouseIds.length === 0 || datum._new_rel_data) return;
 
@@ -669,7 +642,13 @@ async function syncToDatabase() {
   console.log('Syncing to database...');
 
   try {
-    const chartData = state.chart.store.getData();
+    // 1. Identify "Real" Chart IDs 
+    // (Filter out any "Unknown" or placeholder cards from the chart library)
+    const chartData = state.chart.store.getData().filter(d => {
+      // Don't sync cards marked as 'unknown' or 'to_add' by the library
+      return !d.unknown && !d.data.unknown && !d.to_add;
+    });
+
     const chartIds = new Set(chartData.map(item => item.id));
     const dbIds = new Set(state.members.map(member => member.id));
 
@@ -677,7 +656,7 @@ async function syncToDatabase() {
     const deletedIds = [...dbIds].filter(id => !chartIds.has(id));
     const existingIds = [...chartIds].filter(id => dbIds.has(id));
 
-    // 1. Delete members
+    // 2. Delete members
     for (const id of deletedIds) {
       const relatedParents = state.parentChildRels.filter(rel => rel.parent_id === id || rel.child_id === id);
       const relatedSpouses = state.spousalRels.filter(rel => rel.person1_id === id || rel.person2_id === id);
@@ -691,10 +670,12 @@ async function syncToDatabase() {
       await deleteFamilyMember(id);
     }
 
-    // 2. Create new members
+    // 3. Create new members
     for (const id of newIds) {
       const person = chartData.find(datum => datum.id === id);
-      if (!person) continue;
+      // Triple check to ensure no phantom members
+      if (!person || person.unknown || person.data.unknown) continue; 
+
       await createFamilyMember({
         id,
         tree_id: state.treeId,
@@ -707,7 +688,7 @@ async function syncToDatabase() {
       });
     }
 
-    // 3. Update existing members
+    // 4. Update existing members
     for (const id of existingIds) {
       const chartPerson = chartData.find(datum => datum.id === id);
       const dbPerson = state.members.find(member => member.id === id);
@@ -731,14 +712,15 @@ async function syncToDatabase() {
       if (changed) await updateFamilyMember(id, updates);
     }
 
-    // 4. Reload members from DB
+    // 5. Reload members from DB
     const membersResult = await getFamilyMembers(state.treeId);
     if (membersResult.success) state.members = membersResult.data;
 
-    // 5. Sync relationships (Pass chartData to ensure we have latest Types)
+    // 6. Sync relationships
+    // Pass filtered chartData to ensure we don't link phantom members
     await syncRelationships(chartData);
 
-    // 6. Reload relationships from DB
+    // 7. Reload relationships from DB
     const pcResult = await getParentChildRelationships(state.treeId);
     if (pcResult.success) state.parentChildRels = pcResult.data;
 
@@ -757,18 +739,25 @@ async function syncRelationships(chartData) {
   const targetParentChild = [];
   const chartSpousalRels = new Map();
 
+  // Helper to check if ID is valid (not phantom)
+  const validIds = new Set(chartData.map(d => d.id));
+
   for (const person of chartData) {
     const { parents, spouses } = person.rels || {};
 
     if (parents) {
       for (const parentId of parents) {
-        if (parentId) targetParentChild.push({ parent_id: parentId, child_id: person.id });
+        // Only add if both exist in our valid chartData
+        if (parentId && validIds.has(parentId) && validIds.has(person.id)) {
+          targetParentChild.push({ parent_id: parentId, child_id: person.id });
+        }
       }
     }
 
     if (spouses) {
       for (const spouseId of spouses) {
         if (!spouseId) continue;
+        if (!validIds.has(spouseId)) continue; // Skip if spouse is phantom
         
         const key = person.id < spouseId ? `${person.id}-${spouseId}` : `${spouseId}-${person.id}`;
         
