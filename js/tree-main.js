@@ -25,6 +25,7 @@ import { setupRealtimeSync } from './tree-sync.js'
 // -----------------------------------------------------------------------------
 
 const FIRST_PERSON_DEFAULT_GENDER = 'M'
+const SUPER_PARENT_ID = 'SUPER_PARENT_GHOST_ID' // Special ID for the invisible root
 
 const ADD_LABELS = {
   parent: 'Add Parent',
@@ -136,13 +137,18 @@ function renderTree(chartData) {
   } else {
     state.chart.updateData(chartData)
     
-    // Standard update: ensure the current view is valid, otherwise default to stored main ID
     const currentMainId = state.chart.store.getMainId()
-    const currentMainExists = chartData.find(d => d.id === currentMainId)
     
-    if (!currentMainId || !currentMainExists) {
-      const fallbackId = findMainPersonId(state.members)
-      if (fallbackId) state.chart.updateMainId(fallbackId)
+    // If we are currently viewing the Super Parent, keep viewing it
+    // This ensures the "Full Tree" view persists across updates
+    if (currentMainId === SUPER_PARENT_ID) {
+      injectSuperParent(state.chart.store.getData());
+    } else {
+      const currentMainExists = chartData.find(d => d.id === currentMainId)
+      if (!currentMainId || !currentMainExists) {
+        const mainId = findMainPersonId(state.members)
+        if (mainId) state.chart.updateMainId(mainId)
+      }
     }
     
     state.chart.updateTree({ initial: false })
@@ -152,7 +158,7 @@ function renderTree(chartData) {
 function createChart(chartData) {
   const chart = window.f3.createChart('#FamilyChart', chartData)
     .setTransitionTime(1000)
-    .setCardXSpacing(260) 
+    .setCardXSpacing(260) // Wider for better text fit
     .setCardYSpacing(150)
     .setShowSiblingsOfMain(true)
 
@@ -190,7 +196,7 @@ function createChart(chartData) {
           }
         });
         if (relationshipStrings.length === 0) return '';
-        return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2;">${relationshipStrings.join('<br>')}</div>`;
+        return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2; white-space: normal;">${relationshipStrings.join('<br>')}</div>`;
       }
     ])
 
@@ -257,12 +263,14 @@ function createChart(chartData) {
       applyChanges(); 
       postSubmit();   
 
-      // Maintain focus on the member being edited/added
+      // Keep focus on the member being edited/added
       setTimeout(() => {
         const freshData = state.chart.store.getData();
         const newDatum = freshData.find(d => d.id === datum.id);
         
         if (newDatum && !newDatum.to_add && !newDatum.data.to_add) {
+           // If we are in "Super Parent" view, this will effectively switch 
+           // the view to focus on the newly added person, which is good for UX
            state.chart.updateMainId(newDatum.id);
            state.editApi.open(newDatum);
            state.chart.updateTree({ initial: false });
@@ -277,7 +285,7 @@ function createChart(chartData) {
 
       deletePerson();
       
-      // Clean up "Unknown" artifacts created by library
+      // Clean up "Unknown" artifacts
       const data = store.getData();
       const index = data.findIndex(d => d.id === id);
 
@@ -302,13 +310,16 @@ function createChart(chartData) {
       postSubmit({ delete: true }); 
       scheduleSave(); 
 
-      // Revert to full view
+      // Revert to full view after delete
       setTimeout(() => handleShowFullTree(), 100);
     });
 
   applyAddButtonLabels(state.editApi);
 
   f3Card.setOnCardClick((e, d) => {
+    // Don't open edit for the invisible Super Parent
+    if (d.data.id === SUPER_PARENT_ID) return;
+
     const currentDatum = state.chart.store.getDatum(d.data.id);
     
     if (currentDatum._new_rel_data) {
@@ -321,8 +332,9 @@ function createChart(chartData) {
     f3Card.onCardClickDefault(e, d);
   });
 
-  const rootId = findMainPersonId(state.members);
-  if (rootId) chart.updateMainId(rootId);
+  // Initial Load
+  const mainId = findMainPersonId(state.members);
+  if (mainId) chart.updateMainId(mainId);
 
   chart.updateTree({ initial: true });
 
@@ -350,6 +362,14 @@ function updateRelationshipStyles() {
     const targetId = d.target?.data?.id || d.target?.id;
     
     if (sourceId && targetId) {
+      // HIDE lines connected to the Super Parent
+      if (sourceId === SUPER_PARENT_ID || targetId === SUPER_PARENT_ID) {
+        linkEl.style('display', 'none');
+        return;
+      } else {
+        linkEl.style('display', 'block');
+      }
+
       const rel = state.spousalRels.find(r => 
         (r.person1_id === sourceId && r.person2_id === targetId) ||
         (r.person1_id === targetId && r.person2_id === sourceId)
@@ -660,9 +680,9 @@ async function syncToDatabase() {
   console.log('Syncing to database...');
 
   try {
-    // Filter out "Unknown", placeholders, AND nameless cards
-    // This prevents "phantom" blank members from being saved to DB
+    // Filter out "Unknown", placeholders, nameless cards, AND the Super Parent
     const chartData = state.chart.store.getData().filter(d => {
+      if (d.id === SUPER_PARENT_ID) return false; // Don't save the ghost
       if (d.unknown || d.data.unknown || d.to_add) return false;
       
       const fName = (d.data['first name'] || '').trim();
@@ -854,10 +874,85 @@ function handleShowFullTree() {
     state.editApi.addRelativeInstance.cleanUp();
   }
   state.editApi.closeForm();
-  
-  // REVERT: Simple fit to screen without changing main_id
-  // This avoids the "one-sided" view issue by keeping the user's current focus
-  state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
+
+  // 1. Get clean data (remove old super parent if exists)
+  let data = state.chart.store.getData().filter(d => d.id !== SUPER_PARENT_ID);
+
+  // 2. Find "True Roots": People who have NO parents in the current dataset
+  const roots = data.filter(d => {
+    return !d.rels.parents || d.rels.parents.length === 0;
+  });
+
+  // 3. Filter out roots that are spouses of other roots
+  // This prevents "double linking" (e.g. if Husband and Wife are both roots,
+  // we only want to link ONE of them to the SuperParent, otherwise they appear as siblings).
+  const finalRoots = [];
+  const processedIds = new Set();
+
+  roots.forEach(root => {
+    if (processedIds.has(root.id)) return; // Already handled as a spouse
+
+    finalRoots.push(root);
+    processedIds.add(root.id);
+
+    // Mark spouses as processed so we don't add them as separate roots
+    if (root.rels.spouses) {
+      root.rels.spouses.forEach(spouseId => processedIds.add(spouseId));
+    }
+  });
+
+  // 4. Inject Super Parent logic
+  if (finalRoots.length > 0) {
+    injectSuperParent(data, finalRoots.map(r => r.id));
+    state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
+  } else {
+    // Fallback: If circular or weird, just center on main
+    const mId = findMainPersonId(state.members);
+    if (mId) {
+      state.chart.updateMainId(mId);
+      state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
+    }
+  }
+}
+
+function injectSuperParent(data, rootIds = []) {
+  // Remove existing
+  const idx = data.findIndex(d => d.id === SUPER_PARENT_ID);
+  if (idx !== -1) data.splice(idx, 1);
+
+  if (rootIds.length === 0) return;
+
+  // Create invisible Super Parent
+  const superParent = {
+    id: SUPER_PARENT_ID,
+    data: {
+      'first name': '',
+      'last name': '',
+      gender: 'M',
+      unknown: true // Helps identify it
+    },
+    rels: {
+      children: rootIds, // All roots are children of this ghost
+      parents: [],
+      spouses: []
+    }
+  };
+
+  // Link roots to Super Parent
+  // This makes them "siblings" in the eyes of the chart, forcing them to render side-by-side
+  rootIds.forEach(id => {
+    const root = data.find(d => d.id === id);
+    if (root) {
+      if (!root.rels.parents) root.rels.parents = [];
+      // Only add if not already there
+      if (!root.rels.parents.includes(SUPER_PARENT_ID)) {
+        root.rels.parents.push(SUPER_PARENT_ID);
+      }
+    }
+  });
+
+  data.push(superParent);
+  state.chart.updateMainId(SUPER_PARENT_ID);
 }
 
 function handleCopyTreeCode() {
