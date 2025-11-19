@@ -5,6 +5,7 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
   position: relative;
   z-index: 100;
+  font-family: 'Roboto', sans-serif; /* Match card style */
 }
 
 .tree-info-content {
@@ -16,12 +17,19 @@
   gap: 20px;
 }
 
+/* Grouping for Name and Show Full Tree button */
+.tree-title-group {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-shrink: 0;
+}
+
 .tree-info h2 {
   margin: 0;
   color: #fff;
   font-size: 24px;
   font-weight: 600;
-  flex-shrink: 0;
 }
 
 .tree-code-container {
@@ -30,7 +38,8 @@
   gap: 10px;
   color: #87CEEB;
   font-size: 16px;
-  margin-left: auto;
+  margin-left: auto; /* Pushes it to the right */
+  font-family: 'Roboto', sans-serif;
 }
 
 .tree-code {
@@ -78,6 +87,7 @@
   transition: all 0.3s ease;
   white-space: nowrap;
   flex-shrink: 0;
+  font-family: 'Roboto', sans-serif;
 }
 
 .btn-action:hover {
@@ -101,6 +111,7 @@
   align-items: center;
   z-index: 9999;
   color: #fff;
+  font-family: 'Roboto', sans-serif;
 }
 
 .loading-overlay.hidden {
@@ -125,6 +136,11 @@
 .loading-overlay p {
   font-size: 18px;
   color: #87CEEB;
+}
+
+/* Hide History Controls */
+.f3-history-controls {
+  display: none !important;
 }
 
 /* CRITICAL: Make Add Relative Buttons Visible and Prominent */
@@ -158,12 +174,19 @@
     gap: 10px;
   }
   
+  .tree-title-group {
+    width: 100%;
+    justify-content: space-between;
+  }
+  
   .tree-code-container {
     margin-left: 0; /* Align left on mobile */
+    width: 100%;
+    justify-content: space-between;
   }
   
   .btn-action {
-    width: 100%; /* Make button full-width on mobile */
+    /* width: 100%;  Make button full-width on mobile */
     text-align: center;
   }
 
