@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="css/tree.css">
   <style>
     body { 
-      font-family: 'Arial', sans-serif; 
+      font-family: 'Roboto', sans-serif;
       margin: 0; 
       padding: 0; 
     }
@@ -168,30 +168,28 @@
   </style>
 </head>
 <body>
-  <!-- Tree Info Header -->
   <div id="treeInfo" class="tree-info">
     <div class="tree-info-content">
-      <h2 id="treeName">Loading...</h2>
+      <div class="tree-title-group">
+        <h2 id="treeName">Loading...</h2>
+        <button id="showFullTreeBtn" class="btn-action">Show Full Tree</button>
+      </div>
+
       <div class="tree-code-container">
         <span>Tree Code: </span>
         <span id="treeCodeDisplay" class="tree-code"></span>
         <button id="copyCodeBtn" class="copy-btn" title="Copy code">📋</button>
       </div>
-      <!-- ADDED THIS BUTTON -->
-      <button id="showFullTreeBtn" class="btn-action">Show Full Tree</button>
     </div>
   </div>
 
-  <!-- Family Chart Container -->
   <div id="FamilyChart" class="f3" style="width:100%;height:calc(100vh - 80px);margin:auto;background-color:rgb(33,33,33);color:#fff;"></div>
 
-  <!-- Loading Overlay -->
   <div id="loadingOverlay" class="loading-overlay">
     <div class="spinner"></div>
     <p>Loading family tree...</p>
   </div>
 
-  <!-- Scripts - Load in correct order -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://unpkg.com/d3@7"></script>
   <script src="https://unpkg.com/family-chart@0.9.0/dist/family-chart.min.js"></script>
