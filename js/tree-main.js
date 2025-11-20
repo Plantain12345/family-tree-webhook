@@ -153,7 +153,7 @@ function createChart(chartData) {
     .setTransitionTime(1000)
     .setCardXSpacing(250)
     .setCardYSpacing(150)
-    .setShowSiblingsOfMain(true) // Helps show more branches
+    .setShowSiblingsOfMain(true) 
 
   chart.setAfterUpdate(() => {
     try {
@@ -191,6 +191,20 @@ function createChart(chartData) {
         return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2;">${relationshipStrings.join('<br>')}</div>`;
       }
     ])
+    // --- UPDATED: Handle "God Mode" Styles ---
+    .setOnCardUpdate(function(d) {
+      const cardInner = this.querySelector('.card-inner');
+      
+      // Hide God Node
+      if (d.data.data.is_god_node) {
+        cardInner.classList.add('god-mode-card');
+      }
+      
+      // Hide Spacer Nodes
+      if (d.data.data.is_spacer) {
+        cardInner.classList.add('spacer-card');
+      }
+    });
 
   state.editApi = chart.editTree()
     .setFields(['first name', 'last name', 'birthday', 'death'])
@@ -209,7 +223,7 @@ function createChart(chartData) {
       
       if (!validateYearFields(form)) return;
 
-      // Update Relationship Types
+      // Update Relationship Types logic
       const relSelects = form.querySelectorAll('.relationship-type-select-existing');
       const currentChartData = state.chart.store.getData();
       const currentDatum = currentChartData.find(d => d.id === datum.id);
@@ -255,14 +269,11 @@ function createChart(chartData) {
       applyChanges(); 
       postSubmit();   
 
-      // 3. Fix for focusing the new member after adding via bubble
       setTimeout(() => {
         const freshData = state.chart.store.getData();
-        // If we just added a new person (datum.id is the ID of the person being edited/added)
         const newDatum = freshData.find(d => d.id === datum.id);
         
         if (newDatum && !newDatum.to_add && !newDatum.data.to_add) {
-           // Switch view to them and open their form
            state.chart.updateMainId(newDatum.id);
            state.editApi.open(newDatum);
            state.chart.updateTree({ initial: false });
@@ -277,7 +288,6 @@ function createChart(chartData) {
 
       deletePerson();
       
-      // Clean up "Unknown" artifacts
       const data = store.getData();
       const index = data.findIndex(d => d.id === id);
 
@@ -308,8 +318,26 @@ function createChart(chartData) {
 
   applyAddButtonLabels(state.editApi);
 
-  // Fix: Ensure we pass the correct datum to addRelative to show bubbles
+  // --- UPDATED: Handle Click Safety in God Mode ---
   f3Card.setOnCardClick((e, d) => {
+    // 1. Prevent clicking the God Node itself
+    if (d.data.id === 'GOD_NODE_TEMP') return;
+
+    // 2. Check if we need to exit God Mode
+    const storeData = state.chart.store.getData();
+    const isGodMode = storeData.some(node => node.id === 'GOD_NODE_TEMP');
+
+    if (isGodMode) {
+      // Reload clean data to exit God Mode
+      const cleanChartData = transformDatabaseToFamilyChart(
+        state.members, 
+        state.parentChildRels, 
+        state.spousalRels
+      );
+      state.chart.updateData(cleanChartData);
+      // Continue to process the click with clean data
+    }
+
     const currentDatum = state.chart.store.getDatum(d.data.id);
     
     if (currentDatum._new_rel_data) {
@@ -318,7 +346,7 @@ function createChart(chartData) {
     }
     
     state.editApi.open(currentDatum);
-    state.editApi.addRelative(currentDatum); // This shows the + bubbles
+    state.editApi.addRelative(currentDatum);
     f3Card.onCardClickDefault(e, d);
   });
 
@@ -344,10 +372,25 @@ function updateRelationshipStyles() {
 
   links.each(function(d) {
     const linkEl = d3.select(this);
+    
+    // --- UPDATED: Hide Spiderweb Lines ---
+    linkEl.style('opacity', 1).style('pointer-events', 'auto'); // Reset
+
+    const isHidden = 
+        (d.source.data.id === 'GOD_NODE_TEMP') || 
+        (d.target.data.id === 'GOD_NODE_TEMP') ||
+        (d.source.data.is_spacer) ||
+        (d.target.data.is_spacer);
+
+    if (isHidden) {
+        linkEl.style('opacity', 0).style('pointer-events', 'none');
+        return;
+    }
+    // -------------------------------------
+
     linkEl.classed('link-married link-partner link-divorced link-separated', false);
 
     let relType = 'married';
-    // Check data existence safely
     const sourceId = d.source?.data?.id || d.source?.id;
     const targetId = d.target?.data?.id || d.target?.id;
     
@@ -380,15 +423,13 @@ function updateRelationshipStyles() {
     }
   });
 
+  // Markers logic remains same
   const markers = markerGroup.selectAll('.divorce-marker')
     .data(divorcedLinksData, d => d.id);
-
   markers.exit().remove();
-
   const markersEnter = markers.enter()
     .append('path')
     .attr('class', 'divorce-marker');
-
   markers.merge(markersEnter).each(function(d) {
     const pathNode = d.pathNode;
     try {
@@ -405,7 +446,6 @@ function updateRelationshipStyles() {
 
 function applyAddButtonLabels(editApi) {
   if (!editApi) return;
-
   if (typeof editApi.setAddRelLabels === 'function') {
     editApi.setAddRelLabels({
       father: ADD_LABELS.parent,
@@ -662,11 +702,12 @@ async function syncToDatabase() {
   console.log('Syncing to database...');
 
   try {
-    // 1. Identify "Real" Chart IDs 
     const chartData = state.chart.store.getData().filter(d => {
       if (d.unknown || d.data.unknown || d.to_add) return false;
+      // --- UPDATED: Prevent saving God/Spacers ---
+      if (d.id === 'GOD_NODE_TEMP' || d.data.is_god_node || d.data.is_spacer) return false; 
+      // -------------------------------------------
       
-      // Prevent saving empty "ghost" records
       const fName = (d.data['first name'] || '').trim();
       const lName = (d.data['last name'] || '').trim();
       if (!fName && !lName) return false;
@@ -681,7 +722,6 @@ async function syncToDatabase() {
     const deletedIds = [...dbIds].filter(id => !chartIds.has(id));
     const existingIds = [...chartIds].filter(id => dbIds.has(id));
 
-    // 2. Delete members
     for (const id of deletedIds) {
       const relatedParents = state.parentChildRels.filter(rel => rel.parent_id === id || rel.child_id === id);
       const relatedSpouses = state.spousalRels.filter(rel => rel.person1_id === id || rel.person2_id === id);
@@ -695,7 +735,6 @@ async function syncToDatabase() {
       await deleteFamilyMember(id);
     }
 
-    // 3. Create new members
     for (const id of newIds) {
       const person = chartData.find(datum => datum.id === id);
       if (!person || person.unknown || person.data.unknown) continue; 
@@ -712,7 +751,6 @@ async function syncToDatabase() {
       });
     }
 
-    // 4. Update existing members
     for (const id of existingIds) {
       const chartPerson = chartData.find(datum => datum.id === id);
       const dbPerson = state.members.find(member => member.id === id);
@@ -736,14 +774,11 @@ async function syncToDatabase() {
       if (changed) await updateFamilyMember(id, updates);
     }
 
-    // 5. Reload members from DB
     const membersResult = await getFamilyMembers(state.treeId);
     if (membersResult.success) state.members = membersResult.data;
 
-    // 6. Sync relationships
     await syncRelationships(chartData);
 
-    // 7. Reload relationships from DB
     const pcResult = await getParentChildRelationships(state.treeId);
     if (pcResult.success) state.parentChildRels = pcResult.data;
 
@@ -844,9 +879,10 @@ async function syncRelationships(chartData) {
 }
 
 // -----------------------------------------------------------------------------
-// Utilities
+// Full Tree & God Mode Logic
 // -----------------------------------------------------------------------------
 
+// UPDATED: Use structural calculation
 function handleShowFullTree() {
   if (!state.chart || !state.editApi) return;
   
@@ -856,19 +892,156 @@ function handleShowFullTree() {
     state.editApi.addRelativeInstance.cleanUp();
   }
   state.editApi.closeForm();
-  
-  // Find the best main person to show the fullest tree
-  const youngestId = findYoungestDescendantId(state.members, state.parentChildRels);
-  const rootId = findMainPersonId(state.members);
-  
-  if (youngestId) {
-    state.chart.updateMainId(youngestId);
-  } else if (rootId) {
-    state.chart.updateMainId(rootId);
-  }
 
-  state.chart.updateTree({ tree_position: 'fit', transition_time: 750 });
+  // 1. Prepare Data
+  const allMembers = state.chart.store.getData().map(d => ({ ...d, rels: { ...d.rels } }));
+  
+  // 2. Calculate Structure
+  const { levels, islands } = calculateRelativeLevels(allMembers);
+  
+  // Identify Roots (people with no parents)
+  const rootMembers = allMembers.filter(member => 
+    !member.rels.parents || member.rels.parents.length === 0
+  );
+
+  if (rootMembers.length === 0) return;
+
+  // 3. Create God Node
+  const godId = 'GOD_NODE_TEMP';
+  const godNode = {
+    id: godId,
+    data: { "first name": "Full", "last name": "Tree", "gender": "M", "is_god_node": true },
+    rels: { parents: [], spouses: [], children: [] }
+  };
+  const tempNodes = [godNode];
+
+  // 4. Determine Spacers for each Root
+  rootMembers.forEach(member => {
+    const myLevel = levels.get(member.id) || 0;
+    
+    const myIsland = islands.find(isl => isl.nodes.has(member.id));
+    const islandTop = myIsland ? myIsland.topLevel : 0;
+
+    const spacersNeeded = myLevel - islandTop;
+
+    let parentId = godId;
+
+    for (let i = 0; i < spacersNeeded; i++) {
+      const spacerId = `SPACER_${member.id}_${i}`;
+      const spacerNode = {
+        id: spacerId,
+        data: { "first name": "", "gender": "M", "is_spacer": true },
+        rels: {
+          parents: [parentId],
+          spouses: [],
+          children: [i === spacersNeeded - 1 ? member.id : `SPACER_${member.id}_${i + 1}`]
+        }
+      };
+      
+      const parentNode = tempNodes.find(n => n.id === parentId);
+      if (parentNode) {
+          if (!parentNode.rels.children) parentNode.rels.children = [];
+          parentNode.rels.children.push(spacerId);
+      }
+      tempNodes.push(spacerNode);
+      parentId = spacerId;
+    }
+
+    if (!member.rels.parents) member.rels.parents = [];
+    member.rels.parents.push(parentId);
+    
+    const lastParent = tempNodes.find(n => n.id === parentId);
+    if (lastParent) {
+        if (!lastParent.rels.children) lastParent.rels.children = [];
+        if (!lastParent.rels.children.includes(member.id)) {
+            lastParent.rels.children.push(member.id);
+        }
+    }
+  });
+
+  const fullTreeData = [...tempNodes, ...allMembers];
+  state.chart.updateData(fullTreeData);
+  state.chart.updateMainId(godId);
+  state.chart.updateTree({ tree_position: 'main_to_middle', transition_time: 750 });
 }
+
+// NEW: Calculates generational levels based on structure
+function calculateRelativeLevels(allMembers) {
+  const levels = new Map(); 
+  const visited = new Set();
+  const islands = []; 
+
+  const getConnections = (id) => {
+    const m = allMembers.find(d => d.id === id);
+    if (!m) return { parents: [], children: [], spouses: [] };
+    return {
+      parents: m.rels.parents || [],
+      children: m.rels.children || [],
+      spouses: m.rels.spouses || []
+    };
+  };
+
+  const processIsland = (startId) => {
+    const islandNodes = new Set();
+    const queue = [{ id: startId, level: 0 }];
+    
+    if (visited.has(startId)) return null;
+    
+    levels.set(startId, 0);
+    visited.add(startId);
+    islandNodes.add(startId);
+    
+    let minLevel = 0; 
+
+    while (queue.length > 0) {
+      const { id, level } = queue.shift();
+      minLevel = Math.min(minLevel, level);
+      
+      const rels = getConnections(id);
+
+      rels.spouses.forEach(nextId => {
+        if (!visited.has(nextId)) {
+          visited.add(nextId);
+          levels.set(nextId, level);
+          queue.push({ id: nextId, level: level });
+          islandNodes.add(nextId);
+        }
+      });
+
+      rels.parents.forEach(nextId => {
+        if (!visited.has(nextId)) {
+          visited.add(nextId);
+          levels.set(nextId, level - 1);
+          queue.push({ id: nextId, level: level - 1 });
+          islandNodes.add(nextId);
+        }
+      });
+
+      rels.children.forEach(nextId => {
+        if (!visited.has(nextId)) {
+          visited.add(nextId);
+          levels.set(nextId, level + 1);
+          queue.push({ id: nextId, level: level + 1 });
+          islandNodes.add(nextId);
+        }
+      });
+    }
+    return { nodes: islandNodes, topLevel: minLevel };
+  };
+
+  allMembers.forEach(m => {
+    if (!visited.has(m.id)) {
+      const islandInfo = processIsland(m.id);
+      if (islandInfo) islands.push(islandInfo);
+    }
+  });
+
+  return { levels, islands };
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
 
 function findYoungestDescendantId(members, relationships) {
   if (!members || members.length === 0) return null;
