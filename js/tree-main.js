@@ -306,10 +306,15 @@ function createChart(chartData) {
   f3Card.setOnCardClick((e, d) => {
     if (d.data.id === 'GOD_NODE_TEMP') return;
 
-    // Reset from God Mode if clicking a real card
     const storeData = state.chart.store.getData();
-    if (storeData.some(node => node.id === 'GOD_NODE_TEMP')) {
-      const cleanChartData = transformDatabaseToFamilyChart(state.members, state.parentChildRels, state.spousalRels);
+    const isGodMode = storeData.some(node => node.id === 'GOD_NODE_TEMP');
+
+    if (isGodMode) {
+      const cleanChartData = transformDatabaseToFamilyChart(
+        state.members, 
+        state.parentChildRels, 
+        state.spousalRels
+      );
       state.chart.updateData(cleanChartData);
     }
 
@@ -422,7 +427,7 @@ function applyAddButtonLabels(editApi) {
 }
 
 // -----------------------------------------------------------------------------
-// Form configuration helpers (Unchanged)
+// Form configuration helpers
 // -----------------------------------------------------------------------------
 function configureForm(form, datumId) {
   if (!form || form.dataset.prepared) return;
@@ -591,15 +596,21 @@ function validateYearFields(form) {
 }
 
 // -----------------------------------------------------------------------------
-// Full Tree Logic (The Fix)
+// Full Tree & God Mode Logic (Strict De-duplication)
 // -----------------------------------------------------------------------------
 
 function handleShowFullTree() {
   if (!state.chart || !state.editApi) return;
+  
+  if (state.editApi.isAddingRelative()) {
+    state.editApi.addRelativeInstance.is_active = false;
+    state.chart.store.state.one_level_rels = false;
+    state.editApi.addRelativeInstance.cleanUp();
+  }
   state.editApi.closeForm();
 
-  // 1. Sanitize: Load fresh data from database state, not current chart state
-  // This removes any existing God/Spacer nodes from previous toggles.
+  // 1. Sanitize & Prepare Data (From DB source, not Chart state)
+  // This ensures no artifacts (Spacers/Gods) from previous runs are included
   const sourceMembers = transformDatabaseToFamilyChart(
     state.members,
     state.parentChildRels,
@@ -660,12 +671,14 @@ function calculateStructuralLevels(members) {
     });
   }
 
-  // Handle disconnected islands
   members.forEach(m => { if (!visited.has(m.id)) levelMap.set(m.id, 0); });
 
   return { levelMap, minLevel };
 }
 
+/**
+ * Strict Tree Builder: Uses Map to ensure ZERO duplicates
+ */
 function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const godId = 'GOD_NODE_TEMP';
   const godNode = {
@@ -674,97 +687,85 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
     rels: { parents: [], spouses: [], children: [] }
   };
 
-  // STRICT REGISTRY: Tracks IDs we have already added to the output array.
-  // If an ID is in here, we NEVER add it again.
-  const processedIds = new Set([godId]);
-  const outputNodes = [godNode];
+  // Map used to ensure uniqueness. Key = ID, Value = Node Object
+  const outputNodesMap = new Map();
+  outputNodesMap.set(godId, godNode);
 
   // 1. Find Roots (No parents)
   let roots = members.filter(m => !m.rels.parents || m.rels.parents.length === 0);
 
-  // 2. Prioritize Large Families to reduce stragglers
-  // (Simple heuristic: count children)
+  // Sort roots to process main branches first
   roots.sort((a, b) => (b.rels.children?.length || 0) - (a.rels.children?.length || 0));
 
   const queue = [];
 
-  // 3. Add Roots to God
+  // 2. Process Roots
   roots.forEach(root => {
-    // Spouse check: If my spouse is ALREADY processed, I should not be added as a root.
-    // I will be rendered by the library as a spouse card automatically.
+    if (outputNodesMap.has(root.id)) return; // Already added (via spouse maybe)
+
+    // Spouse check: If spouse already processed, skip adding this root to God
+    // (They will appear next to spouse automatically)
     const spouseIds = root.rels.spouses || [];
-    const spouseProcessed = spouseIds.some(sid => processedIds.has(sid));
+    const spouseProcessed = spouseIds.some(sid => outputNodesMap.has(sid));
 
     if (spouseProcessed) {
-        // Skip adding this root to God. They are already "in" the tree via marriage.
-        // However, we must ensure they are in the outputNodes array if they aren't already.
-        if (!processedIds.has(root.id)) {
-            outputNodes.push(root);
-            processedIds.add(root.id);
+        if (!outputNodesMap.has(root.id)) {
+            // Add to map, but don't link to God
+            outputNodesMap.set(root.id, root);
         }
         return; 
     }
 
-    // Add Spacers for alignment
+    // Add Spacers
     const myLevel = levelMap.get(root.id) || 0;
     const spacersNeeded = myLevel - globalMinLevel;
     let parentId = godId;
 
     for (let i = 0; i < spacersNeeded; i++) {
       const spacerId = `SPACER_${root.id}_${i}`;
-      // Only create spacer if it doesn't exist (unlikely collision but safe)
-      if (!processedIds.has(spacerId)) {
+      if (!outputNodesMap.has(spacerId)) {
           const spacerNode = {
             id: spacerId,
             data: { "first name": "", "gender": "M", "is_spacer": true },
             rels: { parents: [parentId], spouses: [], children: [] }
           };
-          // Link prev parent to spacer
-          const prevNode = outputNodes.find(n => n.id === parentId);
+          const prevNode = outputNodesMap.get(parentId);
           if (prevNode) {
-              if (!prevNode.rels.children) prevNode.rels.children = [];
-              prevNode.rels.children.push(spacerId);
+             if (!prevNode.rels.children) prevNode.rels.children = [];
+             prevNode.rels.children.push(spacerId);
           }
-          outputNodes.push(spacerNode);
-          processedIds.add(spacerId);
+          outputNodesMap.set(spacerId, spacerNode);
       }
       parentId = spacerId;
     }
 
     // Link Root to God/Spacer
-    const visualParent = outputNodes.find(n => n.id === parentId);
+    const visualParent = outputNodesMap.get(parentId);
     if (visualParent) {
         if (!visualParent.rels.children) visualParent.rels.children = [];
         visualParent.rels.children.push(root.id);
     }
 
-    // Modify root parents to point ONLY to God/Spacer
-    // This prevents "ADD" cards from appearing for real parents that we are suppressing
+    // Overwrite parents to enforce single-parentage in visual tree
     const rootCopy = { ...root, rels: { ...root.rels, parents: [parentId] } };
-    outputNodes.push(rootCopy);
-    processedIds.add(root.id);
+    outputNodesMap.set(root.id, rootCopy);
     queue.push(rootCopy);
   });
 
-  // 4. BFS Down
+  // 3. BFS Down (Processing children)
   while (queue.length > 0) {
     const parent = queue.shift();
     if (!parent.rels.children) continue;
 
     const realChildrenIds = parent.rels.children;
-    // Clean parents children list for the visual tree
+    // Clean parent's visual children list to rebuild it strictly
     parent.rels.children = []; 
 
     realChildrenIds.forEach(childId => {
-      // STRICT CHECK: Is this child already in the tree?
-      if (processedIds.has(childId)) {
-        // Yes. Do not add again.
-        // Visual result: Child appears under the FIRST parent we processed.
-        // We do NOT push to parent.rels.children because that draws the line.
-        // If we want the line, we can push, but D3 might freak out if nodes are duplicated.
-        // Since we strip duplicates, we can safely link the ID.
-        // BUT: family-chart might not support multi-parent links visually.
-        // Better to leave them under the first parent.
+      if (outputNodesMap.has(childId)) {
+        // Child already in tree (via other parent). 
+        // Do NOT add again. Visual compromise: Only shows under first parent processed.
+        // We do NOT link them to this parent to avoid D3 duplicate ID error.
         return; 
       }
 
@@ -774,26 +775,27 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
       // Point child to this parent ONLY
       const childCopy = { ...childNode, rels: { ...childNode.rels, parents: [parent.id] } };
       
-      outputNodes.push(childCopy);
-      processedIds.add(childId);
+      outputNodesMap.set(childId, childCopy);
       queue.push(childCopy);
       
-      // Establish visual link
+      // Visual Link
       parent.rels.children.push(childId);
     });
   }
 
-  // 5. Sweep for missing spouses
-  // (People who were not roots and not children, e.g. spouse of a child)
+  // 4. Sweep for disconnected members (floating spouses, etc)
   members.forEach(m => {
-    if (!processedIds.has(m.id)) {
-      outputNodes.push(m);
-      processedIds.add(m.id);
-    }
+      if (!outputNodesMap.has(m.id)) {
+          outputNodesMap.set(m.id, m);
+      }
   });
 
-  return outputNodes;
+  return Array.from(outputNodesMap.values());
 }
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
 
 function findYoungestDescendantId(members, relationships) {
   if (!members || members.length === 0) return null;
