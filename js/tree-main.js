@@ -191,16 +191,12 @@ function createChart(chartData) {
         return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2;">${relationshipStrings.join('<br>')}</div>`;
       }
     ])
-    // --- GOD MODE STYLE HANDLER ---
+    // --- GOD MODE STYLES ---
     .setOnCardUpdate(function(d) {
       const cardInner = this.querySelector('.card-inner');
-      
-      // Hide God Node
       if (d.data.data.is_god_node) {
         cardInner.classList.add('god-mode-card');
       }
-      
-      // Hide Spacer Nodes
       if (d.data.data.is_spacer) {
         cardInner.classList.add('spacer-card');
       }
@@ -312,7 +308,6 @@ function createChart(chartData) {
       postSubmit({ delete: true }); 
       scheduleSave(); 
 
-      // Trigger full tree view after delete
       setTimeout(() => handleShowFullTree(), 100);
     });
 
@@ -320,15 +315,12 @@ function createChart(chartData) {
 
   // --- GOD MODE CLICK HANDLER ---
   f3Card.setOnCardClick((e, d) => {
-    // 1. Prevent clicking the God Node itself
     if (d.data.id === 'GOD_NODE_TEMP') return;
 
-    // 2. Check if we need to exit God Mode
     const storeData = state.chart.store.getData();
     const isGodMode = storeData.some(node => node.id === 'GOD_NODE_TEMP');
 
     if (isGodMode) {
-      // Reload clean data to exit God Mode
       const cleanChartData = transformDatabaseToFamilyChart(
         state.members, 
         state.parentChildRels, 
@@ -373,10 +365,11 @@ function updateRelationshipStyles() {
     const linkEl = d3.select(this);
     
     // --- GOD MODE: Hide Spiderweb Lines ---
-    linkEl.style('opacity', 1).style('pointer-events', 'auto'); // Reset
+    linkEl.style('opacity', 1).style('pointer-events', 'auto');
 
     const srcId = d.source.data ? d.source.data.id : d.source.id;
     const tgtId = d.target.data ? d.target.data.id : d.target.id;
+    
     const srcIsSpacer = d.source.data ? d.source.data.data.is_spacer : false;
     const tgtIsSpacer = d.target.data ? d.target.data.data.is_spacer : false;
 
@@ -704,9 +697,8 @@ async function syncToDatabase() {
   try {
     const chartData = state.chart.store.getData().filter(d => {
       if (d.unknown || d.data.unknown || d.to_add) return false;
-      // --- UPDATED: Prevent saving God/Spacers ---
+      // --- GOD MODE PROTECTION ---
       if (d.id === 'GOD_NODE_TEMP' || d.data.is_god_node || d.data.is_spacer) return false; 
-      // -------------------------------------------
       
       const fName = (d.data['first name'] || '').trim();
       const lName = (d.data['last name'] || '').trim();
@@ -879,10 +871,9 @@ async function syncRelationships(chartData) {
 }
 
 // -----------------------------------------------------------------------------
-// Full Tree & God Mode Logic
+// Full Tree & God Mode Logic (Corrected for Duplication)
 // -----------------------------------------------------------------------------
 
-// UPDATED: Use structural calculation with strict tree builder
 function handleShowFullTree() {
   if (!state.chart || !state.editApi) return;
   
@@ -893,11 +884,10 @@ function handleShowFullTree() {
   }
   state.editApi.closeForm();
 
-  // 1. Prepare Data
-  // Shallow copy of members to protect original state
+  // 1. Prepare Source Data
   const sourceMembers = state.chart.store.getData().map(d => ({ ...d, rels: { ...d.rels } }));
   
-  // 2. Calculate Structural Levels (Generations)
+  // 2. Calculate Levels
   const { levelMap, minLevel } = calculateStructuralLevels(sourceMembers);
 
   // 3. Build Strict Tree (De-duplicated)
@@ -910,25 +900,20 @@ function handleShowFullTree() {
 }
 
 /**
- * TRAVERSAL ALGORITHM
- * Calculates the relative generation number for every person.
- * Pivot (Main Person) = 0. Parents = -1. Children = +1. Spouses = 0.
+ * Calculate Structural Levels
  */
 function calculateStructuralLevels(members) {
   const levelMap = new Map();
   const queue = [];
   const visited = new Set();
 
-  // Helper to find a member
   const getMember = (id) => members.find(m => m.id === id);
 
-  // 1. Find a good pivot (start with current main, or first member)
   const currentMain = state.chart.store.getMainId();
   const startNode = getMember(currentMain) || members[0];
 
   if (!startNode) return { levelMap, minLevel: 0 };
 
-  // 2. BFS Traversal
   queue.push({ id: startNode.id, level: 0 });
   levelMap.set(startNode.id, 0);
   visited.add(startNode.id);
@@ -942,7 +927,6 @@ function calculateStructuralLevels(members) {
     const m = getMember(id);
     if (!m) continue;
 
-    // Go UP to Parents (Level - 1)
     if (m.rels.parents) {
       m.rels.parents.forEach(pid => {
         if (!visited.has(pid)) {
@@ -953,7 +937,6 @@ function calculateStructuralLevels(members) {
       });
     }
 
-    // Go DOWN to Children (Level + 1)
     if (m.rels.children) {
       m.rels.children.forEach(cid => {
         if (!visited.has(cid)) {
@@ -964,7 +947,6 @@ function calculateStructuralLevels(members) {
       });
     }
 
-    // Go SIDEWAYS to Spouses (Level 0 / Same)
     if (m.rels.spouses) {
       m.rels.spouses.forEach(sid => {
         if (!visited.has(sid)) {
@@ -976,7 +958,6 @@ function calculateStructuralLevels(members) {
     }
   }
 
-  // Handle disconnected islands (if any exist, default them to 0)
   members.forEach(m => {
     if (!visited.has(m.id)) levelMap.set(m.id, 0);
   });
@@ -985,9 +966,7 @@ function calculateStructuralLevels(members) {
 }
 
 /**
- * STRICT TREE BUILDER
- * creates "God" -> "Spacers" -> "Roots" -> ... Descendants
- * Enforces single-parentage to prevent duplication.
+ * Strict Tree Builder with Spouse De-duplication
  */
 function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const godId = 'GOD_NODE_TEMP';
@@ -1000,25 +979,64 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const outputNodes = [godNode];
   const processedIds = new Set([godId]);
 
-  // 1. Identify "Roots"
-  // A root is anyone whose parents are NOT in the dataset (or empty).
-  const roots = members.filter(m => {
+  // Identify initial Roots
+  let roots = members.filter(m => {
     if (!m.rels.parents || m.rels.parents.length === 0) return true;
     return false;
   });
 
-  // 2. Process Queue for Tree Building
-  // We effectively do a BFS from the Roots down to build the visual tree.
-  const queue = [];
+  // --- KEY FIX: CLUSTER SPOUSE ROOTS ---
+  // If A and B are spouses and both Roots, pick one to attach to God.
+  const rootsToAttach = [];
+  const processedRoots = new Set();
 
   roots.forEach(root => {
-    // Calculate Spacers needed for this root
+    if (processedRoots.has(root.id)) return;
+
+    // Check if this root has a spouse who is ALSO a root
+    const spouseRoots = (root.rels.spouses || [])
+      .map(sId => roots.find(r => r.id === sId))
+      .filter(s => s !== undefined);
+
+    if (spouseRoots.length > 0) {
+      // We found a spouse cluster (e.g., Husband & Wife both have no parents)
+      // Pick the one with the lower ID as the "Anchor"
+      const cluster = [root, ...spouseRoots];
+      cluster.sort((a, b) => a.id.localeCompare(b.id));
+      
+      const anchor = cluster[0];
+      rootsToAttach.push(anchor);
+      
+      // Mark all as processed so we don't add them again
+      cluster.forEach(c => processedRoots.add(c.id));
+      
+      // Ensure the secondary spouses are added to outputNodes (floating) so they appear as spouses
+      // We do this by adding them to the queue logic later or ensuring they exist in outputNodes
+      cluster.forEach(c => {
+        if (c.id !== anchor.id) {
+          // Add secondary spouse to outputNodes but NOT as child of God
+           outputNodes.push(c); 
+           processedIds.add(c.id);
+        }
+      });
+
+    } else {
+      // Single root (no spouse or spouse has parents)
+      rootsToAttach.push(root);
+      processedRoots.add(root.id);
+    }
+  });
+  // -------------------------------------
+
+  const queue = [];
+
+  // Attach filtered roots to God
+  rootsToAttach.forEach(root => {
     const myLevel = levelMap.get(root.id) || 0;
     const spacersNeeded = myLevel - globalMinLevel;
     
     let parentId = godId;
 
-    // Insert Spacers
     for (let i = 0; i < spacersNeeded; i++) {
       const spacerId = `SPACER_${root.id}_${i}`;
       const spacerNode = {
@@ -1027,11 +1045,10 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
         rels: {
           parents: [parentId],
           spouses: [],
-          children: [] // Will fill next
+          children: [] 
         }
       };
       
-      // Link to previous
       const prevNode = outputNodes.find(n => n.id === parentId);
       if (prevNode.rels.children) prevNode.rels.children.push(spacerId);
       
@@ -1040,12 +1057,10 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
       parentId = spacerId;
     }
 
-    // Link Root to its visual parent (God or Spacer)
     const visualParent = outputNodes.find(n => n.id === parentId);
     if (visualParent.rels.children) visualParent.rels.children.push(root.id);
     
-    // Add Root to output
-    // We modify the root's 'parents' array to ONLY point to the visual parent
+    // Add root to output with modified parents
     const rootCopy = { ...root, rels: { ...root.rels, parents: [parentId] } };
     outputNodes.push(rootCopy);
     processedIds.add(root.id);
@@ -1053,33 +1068,30 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
     queue.push(rootCopy);
   });
 
-  // 3. Traverse Down to add descendants
+  // Traverse Down
   while (queue.length > 0) {
     const parent = queue.shift();
     
     if (parent.rels.children) {
-      // We must create a new children array for the visual parent
-      // containing ONLY the children we haven't processed yet.
       const originalChildren = parent.rels.children;
-      parent.rels.children = []; 
+      parent.rels.children = []; // Clear visual children
 
       originalChildren.forEach(childId => {
         if (processedIds.has(childId)) {
-          // Child already added via another branch. DO NOT add again.
+          // Child already added (via other parent). Do not add again.
           return;
         }
 
         const childNode = members.find(m => m.id === childId);
         if (!childNode) return;
 
-        // Modify child to point ONLY to this parent
+        // Link only to this parent
         const childCopy = { ...childNode, rels: { ...childNode.rels, parents: [parent.id] } };
         
         outputNodes.push(childCopy);
         processedIds.add(childId);
         queue.push(childCopy);
         
-        // Link visual parent to this child
         parent.rels.children.push(childId);
       });
     }
