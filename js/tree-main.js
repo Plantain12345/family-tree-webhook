@@ -191,7 +191,7 @@ function createChart(chartData) {
         return `<div style="font-size: 10px; font-style: italic; margin-top: 5px; opacity: 0.9; line-height: 1.2;">${relationshipStrings.join('<br>')}</div>`;
       }
     ])
-    // --- UPDATED: Handle "God Mode" Styles ---
+    // --- GOD MODE STYLE HANDLER ---
     .setOnCardUpdate(function(d) {
       const cardInner = this.querySelector('.card-inner');
       
@@ -223,7 +223,7 @@ function createChart(chartData) {
       
       if (!validateYearFields(form)) return;
 
-      // Update Relationship Types logic
+      // Update Relationship Types
       const relSelects = form.querySelectorAll('.relationship-type-select-existing');
       const currentChartData = state.chart.store.getData();
       const currentDatum = currentChartData.find(d => d.id === datum.id);
@@ -318,7 +318,7 @@ function createChart(chartData) {
 
   applyAddButtonLabels(state.editApi);
 
-  // --- UPDATED: Handle Click Safety in God Mode ---
+  // --- GOD MODE CLICK HANDLER ---
   f3Card.setOnCardClick((e, d) => {
     // 1. Prevent clicking the God Node itself
     if (d.data.id === 'GOD_NODE_TEMP') return;
@@ -335,7 +335,6 @@ function createChart(chartData) {
         state.spousalRels
       );
       state.chart.updateData(cleanChartData);
-      // Continue to process the click with clean data
     }
 
     const currentDatum = state.chart.store.getDatum(d.data.id);
@@ -373,14 +372,19 @@ function updateRelationshipStyles() {
   links.each(function(d) {
     const linkEl = d3.select(this);
     
-    // --- UPDATED: Hide Spiderweb Lines ---
+    // --- GOD MODE: Hide Spiderweb Lines ---
     linkEl.style('opacity', 1).style('pointer-events', 'auto'); // Reset
 
+    const srcId = d.source.data ? d.source.data.id : d.source.id;
+    const tgtId = d.target.data ? d.target.data.id : d.target.id;
+    const srcIsSpacer = d.source.data ? d.source.data.data.is_spacer : false;
+    const tgtIsSpacer = d.target.data ? d.target.data.data.is_spacer : false;
+
     const isHidden = 
-        (d.source.data.id === 'GOD_NODE_TEMP') || 
-        (d.target.data.id === 'GOD_NODE_TEMP') ||
-        (d.source.data.is_spacer) ||
-        (d.target.data.is_spacer);
+        srcId === 'GOD_NODE_TEMP' || 
+        tgtId === 'GOD_NODE_TEMP' ||
+        srcIsSpacer ||
+        tgtIsSpacer;
 
     if (isHidden) {
         linkEl.style('opacity', 0).style('pointer-events', 'none');
@@ -391,21 +395,18 @@ function updateRelationshipStyles() {
     linkEl.classed('link-married link-partner link-divorced link-separated', false);
 
     let relType = 'married';
-    const sourceId = d.source?.data?.id || d.source?.id;
-    const targetId = d.target?.data?.id || d.target?.id;
-    
-    if (sourceId && targetId) {
+    if (srcId && tgtId) {
       const rel = state.spousalRels.find(r => 
-        (r.person1_id === sourceId && r.person2_id === targetId) ||
-        (r.person1_id === targetId && r.person2_id === sourceId)
+        (r.person1_id === srcId && r.person2_id === tgtId) ||
+        (r.person1_id === tgtId && r.person2_id === srcId)
       );
 
       if (rel) {
         relType = rel.relationship_type;
       } else {
-        const sourcePerson = state.chart.store.getData().find(p => p.id === sourceId);
-        if (sourcePerson && sourcePerson.data.spouse_rels && sourcePerson.data.spouse_rels[targetId]) {
-          relType = sourcePerson.data.spouse_rels[targetId];
+        const sourcePerson = state.chart.store.getData().find(p => p.id === srcId);
+        if (sourcePerson && sourcePerson.data.spouse_rels && sourcePerson.data.spouse_rels[tgtId]) {
+          relType = sourcePerson.data.spouse_rels[tgtId];
         }
       }
     }
@@ -416,14 +417,13 @@ function updateRelationshipStyles() {
       linkEl.classed('link-divorced', true);
       divorcedLinksData.push({ 
         pathNode: this, 
-        id: `marker-${sourceId}-${targetId}` 
+        id: `marker-${srcId}-${tgtId}` 
       });
     } else {
       linkEl.classed('link-married', true);
     }
   });
 
-  // Markers logic remains same
   const markers = markerGroup.selectAll('.divorce-marker')
     .data(divorcedLinksData, d => d.id);
   markers.exit().remove();
@@ -882,7 +882,7 @@ async function syncRelationships(chartData) {
 // Full Tree & God Mode Logic
 // -----------------------------------------------------------------------------
 
-// UPDATED: Use structural calculation
+// UPDATED: Use structural calculation with strict tree builder
 function handleShowFullTree() {
   if (!state.chart || !state.editApi) return;
   
@@ -894,149 +894,198 @@ function handleShowFullTree() {
   state.editApi.closeForm();
 
   // 1. Prepare Data
-  const allMembers = state.chart.store.getData().map(d => ({ ...d, rels: { ...d.rels } }));
+  // Shallow copy of members to protect original state
+  const sourceMembers = state.chart.store.getData().map(d => ({ ...d, rels: { ...d.rels } }));
   
-  // 2. Calculate Structure
-  const { levels, islands } = calculateRelativeLevels(allMembers);
-  
-  // Identify Roots (people with no parents)
-  const rootMembers = allMembers.filter(member => 
-    !member.rels.parents || member.rels.parents.length === 0
-  );
+  // 2. Calculate Structural Levels (Generations)
+  const { levelMap, minLevel } = calculateStructuralLevels(sourceMembers);
 
-  if (rootMembers.length === 0) return;
+  // 3. Build Strict Tree (De-duplicated)
+  const fullTreeData = buildStrictTreeData(sourceMembers, levelMap, minLevel);
 
-  // 3. Create God Node
+  // 4. Render
+  state.chart.updateData(fullTreeData);
+  state.chart.updateMainId('GOD_NODE_TEMP');
+  state.chart.updateTree({ tree_position: 'main_to_middle', transition_time: 750 });
+}
+
+/**
+ * TRAVERSAL ALGORITHM
+ * Calculates the relative generation number for every person.
+ * Pivot (Main Person) = 0. Parents = -1. Children = +1. Spouses = 0.
+ */
+function calculateStructuralLevels(members) {
+  const levelMap = new Map();
+  const queue = [];
+  const visited = new Set();
+
+  // Helper to find a member
+  const getMember = (id) => members.find(m => m.id === id);
+
+  // 1. Find a good pivot (start with current main, or first member)
+  const currentMain = state.chart.store.getMainId();
+  const startNode = getMember(currentMain) || members[0];
+
+  if (!startNode) return { levelMap, minLevel: 0 };
+
+  // 2. BFS Traversal
+  queue.push({ id: startNode.id, level: 0 });
+  levelMap.set(startNode.id, 0);
+  visited.add(startNode.id);
+
+  let minLevel = 0;
+
+  while (queue.length > 0) {
+    const { id, level } = queue.shift();
+    if (level < minLevel) minLevel = level;
+
+    const m = getMember(id);
+    if (!m) continue;
+
+    // Go UP to Parents (Level - 1)
+    if (m.rels.parents) {
+      m.rels.parents.forEach(pid => {
+        if (!visited.has(pid)) {
+          visited.add(pid);
+          levelMap.set(pid, level - 1);
+          queue.push({ id: pid, level: level - 1 });
+        }
+      });
+    }
+
+    // Go DOWN to Children (Level + 1)
+    if (m.rels.children) {
+      m.rels.children.forEach(cid => {
+        if (!visited.has(cid)) {
+          visited.add(cid);
+          levelMap.set(cid, level + 1);
+          queue.push({ id: cid, level: level + 1 });
+        }
+      });
+    }
+
+    // Go SIDEWAYS to Spouses (Level 0 / Same)
+    if (m.rels.spouses) {
+      m.rels.spouses.forEach(sid => {
+        if (!visited.has(sid)) {
+          visited.add(sid);
+          levelMap.set(sid, level);
+          queue.push({ id: sid, level: level });
+        }
+      });
+    }
+  }
+
+  // Handle disconnected islands (if any exist, default them to 0)
+  members.forEach(m => {
+    if (!visited.has(m.id)) levelMap.set(m.id, 0);
+  });
+
+  return { levelMap, minLevel };
+}
+
+/**
+ * STRICT TREE BUILDER
+ * creates "God" -> "Spacers" -> "Roots" -> ... Descendants
+ * Enforces single-parentage to prevent duplication.
+ */
+function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const godId = 'GOD_NODE_TEMP';
   const godNode = {
     id: godId,
     data: { "first name": "Full", "last name": "Tree", "gender": "M", "is_god_node": true },
     rels: { parents: [], spouses: [], children: [] }
   };
-  const tempNodes = [godNode];
 
-  // 4. Determine Spacers for each Root
-  rootMembers.forEach(member => {
-    const myLevel = levels.get(member.id) || 0;
+  const outputNodes = [godNode];
+  const processedIds = new Set([godId]);
+
+  // 1. Identify "Roots"
+  // A root is anyone whose parents are NOT in the dataset (or empty).
+  const roots = members.filter(m => {
+    if (!m.rels.parents || m.rels.parents.length === 0) return true;
+    return false;
+  });
+
+  // 2. Process Queue for Tree Building
+  // We effectively do a BFS from the Roots down to build the visual tree.
+  const queue = [];
+
+  roots.forEach(root => {
+    // Calculate Spacers needed for this root
+    const myLevel = levelMap.get(root.id) || 0;
+    const spacersNeeded = myLevel - globalMinLevel;
     
-    const myIsland = islands.find(isl => isl.nodes.has(member.id));
-    const islandTop = myIsland ? myIsland.topLevel : 0;
-
-    const spacersNeeded = myLevel - islandTop;
-
     let parentId = godId;
 
+    // Insert Spacers
     for (let i = 0; i < spacersNeeded; i++) {
-      const spacerId = `SPACER_${member.id}_${i}`;
+      const spacerId = `SPACER_${root.id}_${i}`;
       const spacerNode = {
         id: spacerId,
         data: { "first name": "", "gender": "M", "is_spacer": true },
         rels: {
           parents: [parentId],
           spouses: [],
-          children: [i === spacersNeeded - 1 ? member.id : `SPACER_${member.id}_${i + 1}`]
+          children: [] // Will fill next
         }
       };
       
-      const parentNode = tempNodes.find(n => n.id === parentId);
-      if (parentNode) {
-          if (!parentNode.rels.children) parentNode.rels.children = [];
-          parentNode.rels.children.push(spacerId);
-      }
-      tempNodes.push(spacerNode);
+      // Link to previous
+      const prevNode = outputNodes.find(n => n.id === parentId);
+      if (prevNode.rels.children) prevNode.rels.children.push(spacerId);
+      
+      outputNodes.push(spacerNode);
+      processedIds.add(spacerId);
       parentId = spacerId;
     }
 
-    if (!member.rels.parents) member.rels.parents = [];
-    member.rels.parents.push(parentId);
+    // Link Root to its visual parent (God or Spacer)
+    const visualParent = outputNodes.find(n => n.id === parentId);
+    if (visualParent.rels.children) visualParent.rels.children.push(root.id);
     
-    const lastParent = tempNodes.find(n => n.id === parentId);
-    if (lastParent) {
-        if (!lastParent.rels.children) lastParent.rels.children = [];
-        if (!lastParent.rels.children.includes(member.id)) {
-            lastParent.rels.children.push(member.id);
-        }
-    }
+    // Add Root to output
+    // We modify the root's 'parents' array to ONLY point to the visual parent
+    const rootCopy = { ...root, rels: { ...root.rels, parents: [parentId] } };
+    outputNodes.push(rootCopy);
+    processedIds.add(root.id);
+    
+    queue.push(rootCopy);
   });
 
-  const fullTreeData = [...tempNodes, ...allMembers];
-  state.chart.updateData(fullTreeData);
-  state.chart.updateMainId(godId);
-  state.chart.updateTree({ tree_position: 'main_to_middle', transition_time: 750 });
-}
-
-// NEW: Calculates generational levels based on structure
-function calculateRelativeLevels(allMembers) {
-  const levels = new Map(); 
-  const visited = new Set();
-  const islands = []; 
-
-  const getConnections = (id) => {
-    const m = allMembers.find(d => d.id === id);
-    if (!m) return { parents: [], children: [], spouses: [] };
-    return {
-      parents: m.rels.parents || [],
-      children: m.rels.children || [],
-      spouses: m.rels.spouses || []
-    };
-  };
-
-  const processIsland = (startId) => {
-    const islandNodes = new Set();
-    const queue = [{ id: startId, level: 0 }];
+  // 3. Traverse Down to add descendants
+  while (queue.length > 0) {
+    const parent = queue.shift();
     
-    if (visited.has(startId)) return null;
-    
-    levels.set(startId, 0);
-    visited.add(startId);
-    islandNodes.add(startId);
-    
-    let minLevel = 0; 
+    if (parent.rels.children) {
+      // We must create a new children array for the visual parent
+      // containing ONLY the children we haven't processed yet.
+      const originalChildren = parent.rels.children;
+      parent.rels.children = []; 
 
-    while (queue.length > 0) {
-      const { id, level } = queue.shift();
-      minLevel = Math.min(minLevel, level);
-      
-      const rels = getConnections(id);
-
-      rels.spouses.forEach(nextId => {
-        if (!visited.has(nextId)) {
-          visited.add(nextId);
-          levels.set(nextId, level);
-          queue.push({ id: nextId, level: level });
-          islandNodes.add(nextId);
+      originalChildren.forEach(childId => {
+        if (processedIds.has(childId)) {
+          // Child already added via another branch. DO NOT add again.
+          return;
         }
-      });
 
-      rels.parents.forEach(nextId => {
-        if (!visited.has(nextId)) {
-          visited.add(nextId);
-          levels.set(nextId, level - 1);
-          queue.push({ id: nextId, level: level - 1 });
-          islandNodes.add(nextId);
-        }
-      });
+        const childNode = members.find(m => m.id === childId);
+        if (!childNode) return;
 
-      rels.children.forEach(nextId => {
-        if (!visited.has(nextId)) {
-          visited.add(nextId);
-          levels.set(nextId, level + 1);
-          queue.push({ id: nextId, level: level + 1 });
-          islandNodes.add(nextId);
-        }
+        // Modify child to point ONLY to this parent
+        const childCopy = { ...childNode, rels: { ...childNode.rels, parents: [parent.id] } };
+        
+        outputNodes.push(childCopy);
+        processedIds.add(childId);
+        queue.push(childCopy);
+        
+        // Link visual parent to this child
+        parent.rels.children.push(childId);
       });
     }
-    return { nodes: islandNodes, topLevel: minLevel };
-  };
-
-  allMembers.forEach(m => {
-    if (!visited.has(m.id)) {
-      const islandInfo = processIsland(m.id);
-      if (islandInfo) islands.push(islandInfo);
-    }
-  });
-
-  return { levels, islands };
+  }
+  
+  return outputNodes;
 }
 
 // -----------------------------------------------------------------------------
