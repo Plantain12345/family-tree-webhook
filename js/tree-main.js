@@ -21,6 +21,9 @@ import {
 
 import { setupRealtimeSync } from './tree-sync.js'
 
+// Ensure D3 is available
+const d3 = window.d3;
+
 // -----------------------------------------------------------------------------
 // Constants & shared state
 // -----------------------------------------------------------------------------
@@ -48,7 +51,6 @@ const state = {
   parentChildRels: [],
   spousalRels: [],
   isSaving: false,
-  saveTimer: null,
 }
 
 initializePage()
@@ -135,14 +137,17 @@ async function loadTreeData() {
 // -----------------------------------------------------------------------------
 
 function renderTree(chartData) {
+  // CRITICAL FIX: Sanitize data to prevent "more than 1 parent" crashes
+  const safeData = sanitizeChartData(chartData);
+
   if (!state.chart) {
-    state.chart = createChart(chartData)
+    state.chart = createChart(safeData)
     window.f3Chart = state.chart
   } else {
-    state.chart.updateData(chartData)
+    state.chart.updateData(safeData)
     
     const currentMainId = state.chart.store.getMainId()
-    const currentMainExists = chartData.find(d => d.id === currentMainId)
+    const currentMainExists = safeData.find(d => d.id === currentMainId)
     
     if (!currentMainId || !currentMainExists) {
       const bestMainId = findYoungestDescendantId(state.members, state.parentChildRels) || findMainPersonId(state.members)
@@ -151,6 +156,35 @@ function renderTree(chartData) {
     
     state.chart.updateTree({ initial: false })
   }
+}
+
+// IMPORTANT: This function fixes the crash by ensuring 2 parents are always spouses
+function sanitizeChartData(chartData) {
+  chartData.forEach(child => {
+    // If a child has explicit father/mother fields or multiple parents in the array
+    const parents = child.rels.parents || [];
+    
+    // Legacy format support
+    if (child.rels.father && !parents.includes(child.rels.father)) parents.push(child.rels.father);
+    if (child.rels.mother && !parents.includes(child.rels.mother)) parents.push(child.rels.mother);
+
+    if (parents.length === 2) {
+      const p1Id = parents[0];
+      const p2Id = parents[1];
+      const p1 = chartData.find(d => d.id === p1Id);
+      const p2 = chartData.find(d => d.id === p2Id);
+
+      if (p1 && p2) {
+        // Check if they are already linked as spouses
+        if (!p1.rels.spouses.includes(p2Id)) {
+          console.warn(`Auto-linking unconnected parents ${p1Id} and ${p2Id} to prevent crash`);
+          p1.rels.spouses.push(p2Id);
+          p2.rels.spouses.push(p1Id);
+        }
+      }
+    }
+  });
+  return chartData;
 }
 
 function createChart(chartData) {
@@ -224,7 +258,6 @@ function createChart(chartData) {
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
       e.preventDefault();
       
-      // Point 2: Ensure we unlock the UI no matter what
       try {
         state.isSaving = true;
         const form = e.target;
@@ -239,8 +272,9 @@ function createChart(chartData) {
         let memberId = datum.id;
         let newlyCreatedRelPersonId = null;
 
+        // --- 1. HANDLE DATABASE UPDATES ---
         if (!existingMember) {
-          // --- CREATE NEW MEMBER ---
+          // CREATE NEW
           console.log('Creating new member in Supabase...');
           const memberData = createMemberData(state.treeId, formProps);
           memberData.gender = formProps.gender || datum.data.gender;
@@ -250,7 +284,7 @@ function createChart(chartData) {
             memberId = res.data.id;
             datum.id = memberId; 
             
-            // Point 2: Update local state immediately to avoid freeze/delay
+            // Immediate local update for speed
             state.members.push(res.data);
 
             if (datum._new_rel_data) {
@@ -280,7 +314,7 @@ function createChart(chartData) {
             }
           }
         } else {
-          // --- UPDATE EXISTING MEMBER ---
+          // UPDATE EXISTING
           const updates = {
             first_name: formProps['first name'],
             last_name: formProps['last name'],
@@ -290,12 +324,12 @@ function createChart(chartData) {
           };
           await updateFamilyMember(memberId, updates);
           
-          // Update local member state
+          // Local update
           const memIndex = state.members.findIndex(m => m.id === memberId);
           if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
         }
 
-        // --- HANDLE UPDATES TO EXISTING RELATIONSHIPS ---
+        // HANDLE RELATIONSHIP TYPES
         const relSelects = form.querySelectorAll('.relationship-type-select-existing');
         for (const select of relSelects) {
           const relId = select.dataset.relId;
@@ -304,6 +338,7 @@ function createChart(chartData) {
           
           if (spouseId === newlyCreatedRelPersonId && !existingMember) continue;
 
+          // Local chart data update
           if (!datum.data.spouse_rels) datum.data.spouse_rels = {};
           datum.data.spouse_rels[spouseId] = newType;
 
@@ -311,7 +346,6 @@ function createChart(chartData) {
             const dbRel = state.spousalRels.find(r => r.id === relId);
             if (dbRel && dbRel.relationship_type !== newType) {
               await updateSpousalRelationship(relId, newType);
-              // Update local state
               if(dbRel) dbRel.relationship_type = newType;
             }
           } else if (existingMember && spouseId) {
@@ -321,41 +355,39 @@ function createChart(chartData) {
             );
             if (existingRel && existingRel.relationship_type !== newType) {
               await updateSpousalRelationship(existingRel.id, newType);
-              // Update local state
               existingRel.relationship_type = newType;
             }
           }
         }
 
-        // --- SUCCESS SEQUENCE ---
+        // --- 2. UPDATE CHART UI IMMEDIATELY ---
         applyChanges(); 
         postSubmit();   
 
-        // Point 2: Force Immediate Chart Refresh with local data 
-        // This makes the new node appear instantly without waiting for the fetch
+        // Re-transform data from our updated local state
         const updatedChartData = transformDatabaseToFamilyChart(
           state.members,
           state.parentChildRels,
           state.spousalRels
         );
-        state.chart.updateData(updatedChartData);
         
-        // Ensure we are focused on the correct person
-        const newDatum = updatedChartData.find(d => d.id === memberId);
+        // This sanitize step prevents the crash if you added a second parent who isn't married
+        const safeData = sanitizeChartData(updatedChartData);
+        state.chart.updateData(safeData);
+        
+        // Find the datum in the new safe data to ensure focus
+        const newDatum = safeData.find(d => d.id === memberId);
         if (newDatum) {
+           // We only update focus if we just added/edited this person
            state.chart.updateMainId(newDatum.id);
            state.editApi.open(newDatum);
            state.chart.updateTree({ initial: false });
         }
 
-        // Background sync to be 100% sure
-        setTimeout(() => loadTreeData(), 500);
-
       } catch (err) {
         console.error("Save failed", err);
         alert("Error saving data: " + err.message);
       } finally {
-        // Point 2: Always unlock
         state.isSaving = false;
       }
     })
@@ -383,7 +415,7 @@ function createChart(chartData) {
         
         store.updateTree({ initial: false });
         postSubmit({ delete: true }); 
-        handleShowFullTree();
+        
       } catch (err) {
         console.error("Delete failed", err);
       } finally {
@@ -405,7 +437,7 @@ function createChart(chartData) {
         state.parentChildRels, 
         state.spousalRels
       );
-      state.chart.updateData(cleanChartData);
+      state.chart.updateData(sanitizeChartData(cleanChartData));
     }
 
     const currentDatum = state.chart.store.getDatum(d.data.id);
@@ -720,20 +752,17 @@ function handleShowFullTree() {
   }
   state.editApi.closeForm();
 
-  // 1. Sanitize & Prepare Data (From DB source, not Chart state)
   const sourceMembers = transformDatabaseToFamilyChart(
     state.members,
     state.parentChildRels,
     state.spousalRels
   );
 
-  // 2. Calculate Generations
   const { levelMap, minLevel } = calculateStructuralLevels(sourceMembers);
-
-  // 3. Build Non-Duplicating Tree
   const fullTreeData = buildStrictTreeData(sourceMembers, levelMap, minLevel);
 
-  state.chart.updateData(fullTreeData);
+  // God Mode also needs sanitization to be safe
+  state.chart.updateData(sanitizeChartData(fullTreeData));
   state.chart.updateMainId('GOD_NODE_TEMP');
   state.chart.updateTree({ tree_position: 'main_to_middle', transition_time: 750 });
 }
@@ -786,9 +815,6 @@ function calculateStructuralLevels(members) {
   return { levelMap, minLevel };
 }
 
-/**
- * Strict Tree Builder: Uses Map to ensure ZERO duplicates
- */
 function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const godId = 'GOD_NODE_TEMP';
   const godNode = {
@@ -800,31 +826,24 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const outputNodesMap = new Map();
   outputNodesMap.set(godId, godNode);
 
-  // 1. Find Roots (No parents)
   let roots = members.filter(m => !m.rels.parents || m.rels.parents.length === 0);
-
-  // Sort roots to process main branches first
   roots.sort((a, b) => (b.rels.children?.length || 0) - (a.rels.children?.length || 0));
 
   const queue = [];
 
-  // 2. Process Roots
   roots.forEach(root => {
-    if (outputNodesMap.has(root.id)) return; // Already added (via spouse maybe)
+    if (outputNodesMap.has(root.id)) return; 
 
-    // Spouse check: If spouse already processed, skip adding this root to God
     const spouseIds = root.rels.spouses || [];
     const spouseProcessed = spouseIds.some(sid => outputNodesMap.has(sid));
 
     if (spouseProcessed) {
         if (!outputNodesMap.has(root.id)) {
-            // Add to map, but don't link to God
             outputNodesMap.set(root.id, root);
         }
         return; 
     }
 
-    // Add Spacers
     const myLevel = levelMap.get(root.id) || 0;
     const spacersNeeded = myLevel - globalMinLevel;
     let parentId = godId;
@@ -847,51 +866,41 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
       parentId = spacerId;
     }
 
-    // Link Root to God/Spacer
     const visualParent = outputNodesMap.get(parentId);
     if (visualParent) {
         if (!visualParent.rels.children) visualParent.rels.children = [];
         visualParent.rels.children.push(root.id);
     }
 
-    // Overwrite parents to enforce single-parentage in visual tree
     const rootCopy = { ...root, rels: { ...root.rels, parents: [parentId] } };
     outputNodesMap.set(root.id, rootCopy);
     queue.push(rootCopy);
   });
 
-  // 3. BFS Down (Processing children)
   while (queue.length > 0) {
     const parent = queue.shift();
     if (!parent.rels.children) continue;
 
     const realChildrenIds = parent.rels.children;
-    // Clean parent's visual children list to rebuild it strictly
     parent.rels.children = []; 
 
     realChildrenIds.forEach(childId => {
       if (outputNodesMap.has(childId)) {
-        // Child already in tree (via other parent). 
-        // Do NOT add again. Visual compromise: Only shows under first parent processed.
-        // We do NOT link them to this parent to avoid D3 duplicate ID error.
         return; 
       }
 
       const childNode = members.find(m => m.id === childId);
       if (!childNode) return;
 
-      // Point child to this parent ONLY
       const childCopy = { ...childNode, rels: { ...childNode.rels, parents: [parent.id] } };
       
       outputNodesMap.set(childId, childCopy);
       queue.push(childCopy);
       
-      // Visual Link
       parent.rels.children.push(childId);
     });
   }
 
-  // 4. Sweep for disconnected members (floating spouses, etc)
   members.forEach(m => {
       if (!outputNodesMap.has(m.id)) {
           outputNodesMap.set(m.id, m);
@@ -936,4 +945,16 @@ function findYoungestDescendantId(members, relationships) {
 
 function handleCopyTreeCode() {
   if (!state.treeCode) return;
-  navigator.clipboard.writeText(state
+  navigator.clipboard.writeText(state.treeCode);
+  const btn = document.getElementById('copyCodeBtn');
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.textContent = '✓';
+  setTimeout(() => { btn.textContent = original; }, 2000);
+}
+
+function toggleLoading(show) {
+  const overlay = document.getElementById('loadingOverlay');
+  if (!overlay) return;
+  overlay.classList.toggle('hidden', !show);
+}
