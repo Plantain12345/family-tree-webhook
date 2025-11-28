@@ -275,6 +275,10 @@ function createChart(chartData) {
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
       e.preventDefault();
       
+      // Save reference to the OLD ID before it potentially changes (important for logic)
+      const oldId = datum.id;
+      let memberId = oldId;
+      
       try {
         state.isSaving = true;
         const form = e.target;
@@ -283,75 +287,68 @@ function createChart(chartData) {
         
         if (!validateYearFields(form)) return;
 
-        const existingMember = state.members.find(m => m.id === datum.id);
-        let memberId = datum.id;
+        const existingMember = state.members.find(m => m.id === memberId);
         let newlyCreatedRelPersonId = null;
 
+        // 1. DATABASE OPERATIONS
+        // We do not rely on chart internal state here, purely DB operations.
         if (!existingMember) {
           // --- CREATE NEW MEMBER ---
-          console.log('Creating new member in Supabase...');
           const memberData = createMemberData(state.treeId, formProps);
           memberData.gender = formProps.gender || datum.data.gender;
 
           const res = await createFamilyMember(memberData);
-          if (res.success) {
-            memberId = res.data.id;
-            datum.id = memberId; 
+          if (!res.success) throw new Error("Failed to create member: " + res.error);
+          
+          memberId = res.data.id; // Update ID to real DB ID
+          
+          // Push to local state immediately
+          state.members.push(res.data);
+
+          // CASE 1: Standard "Add Relative" Button (Ghost Node)
+          if (datum._new_rel_data) {
+            const relType = datum._new_rel_data.rel_type;
+            const relatedId = datum._new_rel_data.rel_id;
+            newlyCreatedRelPersonId = relatedId;
             
-            // Immediately push to state to prevent race conditions or missing data
-            state.members.push(res.data);
-
-            // CASE 1: Standard "Add Relative" Button
-            if (datum._new_rel_data) {
-              const relType = datum._new_rel_data.rel_type;
-              const relatedId = datum._new_rel_data.rel_id;
-              newlyCreatedRelPersonId = relatedId;
+            if (relType === 'spouse') {
+              const relSelect = form.querySelector('.relationship-type-select-existing'); 
+              const type = relSelect ? relSelect.value : 'married';
               
-              if (relType === 'spouse') {
-                const relSelect = form.querySelector('.relationship-type-select-existing'); 
-                const type = relSelect ? relSelect.value : 'married';
-                
-                const relRes = await createSpousalRelationship(state.treeId, relatedId, memberId, type);
-                if(relRes.success && relRes.data) state.spousalRels.push(relRes.data);
+              const relRes = await createSpousalRelationship(state.treeId, relatedId, memberId, type);
+              if(relRes.success && relRes.data) state.spousalRels.push(relRes.data);
 
-              } else if (relType === 'son' || relType === 'daughter') {
-                const pcRes1 = await createParentChildRelationship(state.treeId, relatedId, memberId);
-                if(pcRes1.success && pcRes1.data) state.parentChildRels.push(pcRes1.data);
+            } else if (relType === 'son' || relType === 'daughter') {
+              const pcRes1 = await createParentChildRelationship(state.treeId, relatedId, memberId);
+              if(pcRes1.success && pcRes1.data) state.parentChildRels.push(pcRes1.data);
 
-                if (datum._new_rel_data.other_parent_id) {
-                  const pcRes2 = await createParentChildRelationship(state.treeId, datum._new_rel_data.other_parent_id, memberId);
-                  if(pcRes2.success && pcRes2.data) state.parentChildRels.push(pcRes2.data);
-                }
-              } else if (relType === 'father' || relType === 'mother') {
-                const pcRes = await createParentChildRelationship(state.treeId, memberId, relatedId); 
-                if(pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
+              if (datum._new_rel_data.other_parent_id) {
+                const pcRes2 = await createParentChildRelationship(state.treeId, datum._new_rel_data.other_parent_id, memberId);
+                if(pcRes2.success && pcRes2.data) state.parentChildRels.push(pcRes2.data);
               }
-            } 
-            // CASE 2: "Unknown" / Placeholder Card (Fix for Issue #2)
-            else {
-              console.log("Resolving Unknown/Placeholder member...");
-              
-              // If we are editing an "Unknown" card, it won't have _new_rel_data.
-              // We must infer relationships from the temporary card's existing links.
-              
-              // Link as parent to existing children
-              if (datum.rels.children && datum.rels.children.length > 0) {
-                for (const childId of datum.rels.children) {
-                  // Ensure childId is a real DB ID (simple check: length > 10)
-                  if (childId && childId.length > 10) {
-                    const pcRes = await createParentChildRelationship(state.treeId, memberId, childId);
-                    if (pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
-                  }
+            } else if (relType === 'father' || relType === 'mother') {
+              const pcRes = await createParentChildRelationship(state.treeId, memberId, relatedId); 
+              if(pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
+            }
+          } 
+          // CASE 2: "Unknown" / Placeholder Card
+          else {
+            console.log("Resolving Unknown/Placeholder member...");
+            // Link as parent to existing children
+            if (datum.rels.children && datum.rels.children.length > 0) {
+              for (const childId of datum.rels.children) {
+                if (childId && childId.length > 10) { // Simple check for valid ID
+                  const pcRes = await createParentChildRelationship(state.treeId, memberId, childId);
+                  if (pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
                 }
               }
-
-              // Link as spouse to existing spouses
-              if (datum.rels.spouses && datum.rels.spouses.length > 0) {
-                for (const spouseId of datum.rels.spouses) {
-                  if (spouseId && spouseId.length > 10) {
-                    const spRes = await createSpousalRelationship(state.treeId, memberId, spouseId, 'married');
-                    if (spRes.success && spRes.data) state.spousalRels.push(spRes.data);
-                  }
+            }
+            // Link as spouse to existing spouses
+            if (datum.rels.spouses && datum.rels.spouses.length > 0) {
+              for (const spouseId of datum.rels.spouses) {
+                if (spouseId && spouseId.length > 10) {
+                  const spRes = await createSpousalRelationship(state.treeId, memberId, spouseId, 'married');
+                  if (spRes.success && spRes.data) state.spousalRels.push(spRes.data);
                 }
               }
             }
@@ -365,13 +362,14 @@ function createChart(chartData) {
             death: formProps['death'] || null,
             gender: formProps['gender']
           };
-          await updateFamilyMember(memberId, updates);
+          const res = await updateFamilyMember(memberId, updates);
+          if (!res.success) throw new Error("Failed to update member");
           
           const memIndex = state.members.findIndex(m => m.id === memberId);
           if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
         }
 
-        // --- HANDLE RELATIONSHIPS (Existing) ---
+        // --- HANDLE RELATIONSHIPS (Updates) ---
         const relSelects = form.querySelectorAll('.relationship-type-select-existing');
         for (const select of relSelects) {
           const relId = select.dataset.relId;
@@ -380,6 +378,8 @@ function createChart(chartData) {
           
           if (spouseId === newlyCreatedRelPersonId && !existingMember) continue;
 
+          // Update local datum data strictly for form persistence if needed, 
+          // but relying on refreshChartUI is better
           if (!datum.data.spouse_rels) datum.data.spouse_rels = {};
           datum.data.spouse_rels[spouseId] = newType;
 
@@ -401,30 +401,31 @@ function createChart(chartData) {
           }
         }
 
-        applyChanges(); 
-        postSubmit();   
+        // 2. UI OPERATIONS
+        // We deliberately do NOT use applyChanges() if we created a new member, 
+        // because the ID mismatch between temp ID and DB UUID causes the library to crash.
+        // Instead, we close the form and force a full refresh.
+        
+        postSubmit(); // Closes the form
 
-        // Force UI Refresh with new state
+        // Immediate Refresh of Tree Data
         refreshChartUI();
         
-        // Attempt to switch view to the new/updated person
-        // We use a small timeout to let D3 calculation finish
+        // Switch view to the person we just edited/created
         setTimeout(() => {
           const treeData = state.chart.store.getData();
-          // Verify the node actually exists in the processed tree data
           const freshDatum = treeData.find(d => d.id === memberId);
           
           if (freshDatum) {
              state.chart.updateMainId(freshDatum.id);
-             state.editApi.open(freshDatum);
+             // Optional: Re-open form if you want them to keep editing
+             // state.editApi.open(freshDatum); 
              state.chart.updateTree({ initial: false });
-          } else {
-            console.warn("New member created but not found in tree topology yet.");
           }
-        }, 100);
+        }, 50);
 
       } catch (err) {
-        console.error("Save failed", err);
+        console.error("Save error details:", err);
         alert("Failed to save changes. Please try again.");
       } finally {
         state.isSaving = false;
@@ -442,7 +443,7 @@ function createChart(chartData) {
         const hasSpouses = state.spousalRels.some(r => r.person1_id === id || r.person2_id === id);
 
         if (hasChildren || hasSpouses) {
-          // Soft delete logic: Replace with "Unknown" to preserve tree structure
+          // Soft delete logic
           const updates = {
             first_name: "Unknown",
             last_name: "",
