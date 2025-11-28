@@ -94,6 +94,7 @@ async function initializeTree(code) {
 
     await loadTreeData()
     setupRealtimeSync(state.treeId, () => {
+      // Only reload if we aren't currently editing/saving to prevent jumps
       if (!state.isSaving) loadTreeData()
     })
   } catch (error) {
@@ -132,7 +133,6 @@ function refreshChartUI() {
     state.spousalRels
   );
   
-  // Sanitize to prevent "more than 1 parent" crash
   const safeData = sanitizeChartData(chartData);
 
   if (!state.chart) {
@@ -141,6 +141,7 @@ function refreshChartUI() {
   } else {
     state.chart.updateData(safeData)
     
+    // Ensure main ID is valid
     const currentMainId = state.chart.store.getMainId()
     const currentMainExists = safeData.find(d => d.id === currentMainId)
     
@@ -153,18 +154,14 @@ function refreshChartUI() {
   }
 }
 
-// Fixes Issue #2: Removes "Add" buttons when switching focus so they don't stack up
 function cleanupGhostNodes() {
   if (!state.chart || !state.chart.store) return;
   const data = state.chart.store.getData();
   
   let hasChanges = false;
-  // Iterate backwards to remove safely
   for (let i = data.length - 1; i >= 0; i--) {
-    // Check if this is a "ghost" node (Add button)
     if (data[i]._new_rel_data || data[i].to_add) {
       const ghostId = data[i].id;
-      // Clean up references to this ghost in other nodes
       data.forEach(d => {
         if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(id => id !== ghostId);
         if (d.rels.children) d.rels.children = d.rels.children.filter(id => id !== ghostId);
@@ -181,8 +178,10 @@ function cleanupGhostNodes() {
 
 function sanitizeChartData(chartData) {
   if (!Array.isArray(chartData)) return [];
+  // Basic filter for valid objects
   const cleanData = chartData.filter(d => d && d.id && d.rels);
 
+  // Ensure 2-parent logic is consistent for family-chart
   cleanData.forEach(child => {
     if (!child.rels) return;
     const parents = child.rels.parents || [];
@@ -190,6 +189,7 @@ function sanitizeChartData(chartData) {
     if (child.rels.father && !parents.includes(child.rels.father)) parents.push(child.rels.father);
     if (child.rels.mother && !parents.includes(child.rels.mother)) parents.push(child.rels.mother);
 
+    // If a child has 2 parents, ensure those parents are marked as spouses
     if (parents.length === 2) {
       const p1Id = parents[0];
       const p2Id = parents[1];
@@ -216,7 +216,6 @@ function createChart(chartData) {
     .setCardXSpacing(250)
     .setCardYSpacing(150)
     .setShowSiblingsOfMain(true)
-    // Fix Issue #3: Change "Add Parent" cards to "Unknown"
     .setSingleParentEmptyCard(true, { label: 'Unknown' })
 
   state.chart = chart;
@@ -299,8 +298,10 @@ function createChart(chartData) {
             memberId = res.data.id;
             datum.id = memberId; 
             
+            // Immediately push to state to prevent race conditions or missing data
             state.members.push(res.data);
 
+            // CASE 1: Standard "Add Relative" Button
             if (datum._new_rel_data) {
               const relType = datum._new_rel_data.rel_type;
               const relatedId = datum._new_rel_data.rel_id;
@@ -325,6 +326,34 @@ function createChart(chartData) {
                 const pcRes = await createParentChildRelationship(state.treeId, memberId, relatedId); 
                 if(pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
               }
+            } 
+            // CASE 2: "Unknown" / Placeholder Card (Fix for Issue #2)
+            else {
+              console.log("Resolving Unknown/Placeholder member...");
+              
+              // If we are editing an "Unknown" card, it won't have _new_rel_data.
+              // We must infer relationships from the temporary card's existing links.
+              
+              // Link as parent to existing children
+              if (datum.rels.children && datum.rels.children.length > 0) {
+                for (const childId of datum.rels.children) {
+                  // Ensure childId is a real DB ID (simple check: length > 10)
+                  if (childId && childId.length > 10) {
+                    const pcRes = await createParentChildRelationship(state.treeId, memberId, childId);
+                    if (pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
+                  }
+                }
+              }
+
+              // Link as spouse to existing spouses
+              if (datum.rels.spouses && datum.rels.spouses.length > 0) {
+                for (const spouseId of datum.rels.spouses) {
+                  if (spouseId && spouseId.length > 10) {
+                    const spRes = await createSpousalRelationship(state.treeId, memberId, spouseId, 'married');
+                    if (spRes.success && spRes.data) state.spousalRels.push(spRes.data);
+                  }
+                }
+              }
             }
           }
         } else {
@@ -342,7 +371,7 @@ function createChart(chartData) {
           if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
         }
 
-        // --- HANDLE RELATIONSHIPS ---
+        // --- HANDLE RELATIONSHIPS (Existing) ---
         const relSelects = form.querySelectorAll('.relationship-type-select-existing');
         for (const select of relSelects) {
           const relId = select.dataset.relId;
@@ -375,20 +404,28 @@ function createChart(chartData) {
         applyChanges(); 
         postSubmit();   
 
-        // Immediate Refresh
+        // Force UI Refresh with new state
         refreshChartUI();
         
+        // Attempt to switch view to the new/updated person
+        // We use a small timeout to let D3 calculation finish
         setTimeout(() => {
-          const freshDatum = state.chart.store.getData().find(d => d.id === memberId);
+          const treeData = state.chart.store.getData();
+          // Verify the node actually exists in the processed tree data
+          const freshDatum = treeData.find(d => d.id === memberId);
+          
           if (freshDatum) {
              state.chart.updateMainId(freshDatum.id);
              state.editApi.open(freshDatum);
              state.chart.updateTree({ initial: false });
+          } else {
+            console.warn("New member created but not found in tree topology yet.");
           }
-        }, 50);
+        }, 100);
 
       } catch (err) {
         console.error("Save failed", err);
+        alert("Failed to save changes. Please try again.");
       } finally {
         state.isSaving = false;
       }
@@ -405,6 +442,7 @@ function createChart(chartData) {
         const hasSpouses = state.spousalRels.some(r => r.person1_id === id || r.person2_id === id);
 
         if (hasChildren || hasSpouses) {
+          // Soft delete logic: Replace with "Unknown" to preserve tree structure
           const updates = {
             first_name: "Unknown",
             last_name: "",
@@ -421,6 +459,7 @@ function createChart(chartData) {
           refreshChartUI();
           
         } else {
+          // Hard delete
           await deleteFamilyMember(id);
           deletePerson();
           
@@ -451,8 +490,6 @@ function createChart(chartData) {
   f3Card.setOnCardClick((e, d) => {
     if (d.data.id === 'GOD_NODE_TEMP') return;
 
-    // FIX #1: Only cleanup ghosts if we are clicking a REAL person
-    // If we click a ghost (Add button), we MUST NOT cleanup, otherwise the button disappears!
     if (!d.data._new_rel_data && !d.data.to_add) {
       cleanupGhostNodes();
     }
@@ -467,7 +504,6 @@ function createChart(chartData) {
     const currentDatum = state.chart.store.getDatum(d.data.id);
     if (currentDatum) {
         state.editApi.open(currentDatum);
-        // Only trigger addRelative if it's not a button itself
         if (!currentDatum._new_rel_data) {
             state.editApi.addRelative(currentDatum);
         }
@@ -483,7 +519,6 @@ function createChart(chartData) {
   return chart;
 }
 
-// ... (updateRelationshipStyles, configureForm, etc. remain the same) ...
 function updateRelationshipStyles() {
   if (!state.chart || !state.chart.store) return;
 
