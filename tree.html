@@ -165,14 +165,36 @@
       color: currentColor;
       font-size: 14px;
     }
+
+    /* New styles for instructions */
+    .instruction-text {
+      color: #87CEEB;
+      font-size: 14px;
+      margin-top: 5px;
+      margin-bottom: 0;
+      font-style: italic;
+      opacity: 0.9;
+    }
+
+    .tree-name-label {
+      opacity: 0.7;
+      font-weight: normal;
+      margin-right: 5px;
+    }
   </style>
 </head>
 <body>
   <div id="treeInfo" class="tree-info">
     <div class="tree-info-content">
       <div class="tree-title-group">
-        <h2 id="treeName">Loading...</h2>
-        <button id="showFullTreeBtn" class="btn-action">Show Full Tree</button>
+        <div>
+          <h2 id="treeName">
+            <span class="tree-name-label">Family Tree Name:</span> 
+            <span>Loading...</span>
+          </h2>
+          <p class="instruction-text">Click on a member to build or edit your tree</p>
+        </div>
+        <button id="showFullTreeBtn" class="btn-action">Show Direct Lineage</button>
       </div>
 
       <div class="tree-code-container">
