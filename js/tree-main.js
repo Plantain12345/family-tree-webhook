@@ -50,6 +50,10 @@ const state = {
 
 initializePage()
 
+// -----------------------------------------------------------------------------
+// Initialisation & data loading
+// -----------------------------------------------------------------------------
+
 function initializePage() {
   const params = new URLSearchParams(window.location.search)
   const code = params.get('code')
@@ -111,20 +115,24 @@ async function loadTreeData() {
     state.parentChildRels = pcRes.data || []
     state.spousalRels = spRes.data || []
 
-    const chartData = transformDatabaseToFamilyChart(
-      state.members,
-      state.parentChildRels,
-      state.spousalRels
-    )
-
-    renderTree(chartData)
+    refreshChartUI();
   } catch (error) {
     console.error('Load error:', error)
   }
 }
 
-function renderTree(chartData) {
-  // CRITICAL FIX: Ensure no undefined nodes pass through
+// -----------------------------------------------------------------------------
+// Chart Logic
+// -----------------------------------------------------------------------------
+
+function refreshChartUI() {
+  const chartData = transformDatabaseToFamilyChart(
+    state.members,
+    state.parentChildRels,
+    state.spousalRels
+  );
+  
+  // Sanitize to prevent "more than 1 parent" crash
   const safeData = sanitizeChartData(chartData);
 
   if (!state.chart) {
@@ -145,19 +153,36 @@ function renderTree(chartData) {
   }
 }
 
-// Fixed sanitizer that prevents "undefined reading 'rels'"
+// Helper to remove "Ghost" Add buttons from the data before adding new ones
+// Fixes Issue #2: "Nonsensical chart" with multiple "Add Partner x2"
+function cleanupGhostNodes() {
+  if (!state.chart || !state.chart.store) return;
+  const data = state.chart.store.getData();
+  
+  // Remove any node that is a placeholder for adding a relative
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i]._new_rel_data || data[i].to_add) {
+      // Also remove references to this ghost node from other nodes
+      const ghostId = data[i].id;
+      data.forEach(d => {
+        if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(id => id !== ghostId);
+        if (d.rels.children) d.rels.children = d.rels.children.filter(id => id !== ghostId);
+        if (d.rels.parents) d.rels.parents = d.rels.parents.filter(id => id !== ghostId);
+      });
+      data.splice(i, 1);
+    }
+  }
+  state.chart.updateData(data);
+}
+
 function sanitizeChartData(chartData) {
   if (!Array.isArray(chartData)) return [];
-
-  // Filter out any potential null/undefined entries first
   const cleanData = chartData.filter(d => d && d.id && d.rels);
 
   cleanData.forEach(child => {
     if (!child.rels) return;
-
     const parents = child.rels.parents || [];
     
-    // Legacy format support safety check
     if (child.rels.father && !parents.includes(child.rels.father)) parents.push(child.rels.father);
     if (child.rels.mother && !parents.includes(child.rels.mother)) parents.push(child.rels.mother);
 
@@ -167,7 +192,6 @@ function sanitizeChartData(chartData) {
       const p1 = cleanData.find(d => d.id === p1Id);
       const p2 = cleanData.find(d => d.id === p2Id);
 
-      // Only attempt to access rels if both parents definitely exist in the dataset
       if (p1 && p2 && p1.rels && p2.rels) {
         if (!p1.rels.spouses) p1.rels.spouses = [];
         if (!p2.rels.spouses) p2.rels.spouses = [];
@@ -194,9 +218,7 @@ function createChart(chartData) {
   chart.setAfterUpdate(() => {
     try {
       updateRelationshipStyles();
-    } catch (e) {
-      // Suppress minor styling errors to prevent rendering freeze
-    }
+    } catch (e) {}
   });
 
   const f3Card = chart
@@ -220,12 +242,7 @@ function createChart(chartData) {
           if (spouse && type) {
             const spouseName = `${spouse.first_name || ''} ${spouse.last_name || ''}`.trim();
             const typeCap = type.charAt(0).toUpperCase() + type.slice(1);
-            
-            let preposition = "to";
-            if (type === 'divorced' || type === 'separated') {
-              preposition = "from";
-            }
-            
+            let preposition = (type === 'divorced' || type === 'separated') ? "from" : "to";
             relationshipStrings.push(`${typeCap} ${preposition} ${spouseName}`);
           }
         });
@@ -266,6 +283,8 @@ function createChart(chartData) {
         let newlyCreatedRelPersonId = null;
 
         if (!existingMember) {
+          // --- CREATE NEW MEMBER ---
+          console.log('Creating new member in Supabase...');
           const memberData = createMemberData(state.treeId, formProps);
           memberData.gender = formProps.gender || datum.data.gender;
 
@@ -274,6 +293,7 @@ function createChart(chartData) {
             memberId = res.data.id;
             datum.id = memberId; 
             
+            // Fix Issue #1: Immediate Local State Update
             state.members.push(res.data);
 
             if (datum._new_rel_data) {
@@ -303,6 +323,7 @@ function createChart(chartData) {
             }
           }
         } else {
+          // --- UPDATE EXISTING MEMBER ---
           const updates = {
             first_name: formProps['first name'],
             last_name: formProps['last name'],
@@ -316,7 +337,7 @@ function createChart(chartData) {
           if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
         }
 
-        // Relationship updates
+        // --- HANDLE RELATIONSHIPS ---
         const relSelects = form.querySelectorAll('.relationship-type-select-existing');
         for (const select of relSelects) {
           const relId = select.dataset.relId;
@@ -346,30 +367,26 @@ function createChart(chartData) {
           }
         }
 
+        // Close form visually
         applyChanges(); 
         postSubmit();   
 
-        const updatedChartData = transformDatabaseToFamilyChart(
-          state.members,
-          state.parentChildRels,
-          state.spousalRels
-        );
+        // Fix Issue #1: Immediate UI Refresh without fetch
+        // We use the locally updated arrays (state.members etc) to redraw immediately
+        refreshChartUI();
         
-        // Sanitize immediately with new data to prevent crashes
-        const safeData = sanitizeChartData(updatedChartData);
-        state.chart.updateData(safeData);
-        
-        const newDatum = safeData.find(d => d.id === memberId);
-        if (newDatum) {
-           state.chart.updateMainId(newDatum.id);
-           state.editApi.open(newDatum);
-           state.chart.updateTree({ initial: false });
-        }
+        // Ensure focus
+        setTimeout(() => {
+          const freshDatum = state.chart.store.getData().find(d => d.id === memberId);
+          if (freshDatum) {
+             state.chart.updateMainId(freshDatum.id);
+             state.editApi.open(freshDatum);
+             state.chart.updateTree({ initial: false });
+          }
+        }, 50);
 
       } catch (err) {
         console.error("Save failed", err);
-        // Only alert critical errors that stop the flow
-        // alert("Error saving data"); 
       } finally {
         state.isSaving = false;
       }
@@ -380,24 +397,53 @@ function createChart(chartData) {
       try {
         state.isSaving = true;
         const id = datum.id;
-        await deleteFamilyMember(id);
-        deletePerson();
-        
-        state.members = state.members.filter(m => m.id !== id);
-        state.parentChildRels = state.parentChildRels.filter(r => r.parent_id !== id && r.child_id !== id);
-        state.spousalRels = state.spousalRels.filter(r => r.person1_id !== id && r.person2_id !== id);
 
-        const store = state.chart.store;
-        const data = store.getData();
-        
-        if (store.getMainId() === id) {
-           const newMain = data.length > 0 ? data[0].id : null;
-           if (newMain) store.updateMainId(newMain);
+        // Fix Issue #3: Check if this person is structurally important (has children/spouses)
+        const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
+        const hasSpouses = state.spousalRels.some(r => r.person1_id === id || r.person2_id === id);
+
+        if (hasChildren || hasSpouses) {
+          // If they have dependents/partners, turn them into "Unknown" instead of removing
+          console.log("Person has dependents, converting to Unknown instead of deleting");
+          
+          const updates = {
+            first_name: "Unknown",
+            last_name: "",
+            birthday: null,
+            death: null
+          };
+          
+          await updateFamilyMember(id, updates);
+          
+          // Local update
+          const memIndex = state.members.findIndex(m => m.id === id);
+          if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
+          
+          // Close form but don't delete from chart view
+          state.editApi.closeForm();
+          refreshChartUI();
+          
+        } else {
+          // Safe to fully delete
+          await deleteFamilyMember(id);
+          deletePerson();
+          
+          // Remove from local state
+          state.members = state.members.filter(m => m.id !== id);
+          state.parentChildRels = state.parentChildRels.filter(r => r.parent_id !== id && r.child_id !== id);
+          state.spousalRels = state.spousalRels.filter(r => r.person1_id !== id && r.person2_id !== id);
+
+          const store = state.chart.store;
+          const data = store.getData();
+          
+          if (store.getMainId() === id) {
+             const newMain = data.length > 0 ? data[0].id : null;
+             if (newMain) store.updateMainId(newMain);
+          }
+          
+          store.updateTree({ initial: false });
+          postSubmit({ delete: true }); 
         }
-        
-        store.updateTree({ initial: false });
-        postSubmit({ delete: true }); 
-        
       } catch (err) {
         console.error("Delete failed", err);
       } finally {
@@ -410,21 +456,21 @@ function createChart(chartData) {
   f3Card.setOnCardClick((e, d) => {
     if (d.data.id === 'GOD_NODE_TEMP') return;
 
+    // Fix Issue #2: Cleanup ghost nodes before processing new click
+    cleanupGhostNodes();
+
     const storeData = state.chart.store.getData();
     const isGodMode = storeData.some(node => node.id === 'GOD_NODE_TEMP');
 
     if (isGodMode) {
-      const cleanChartData = transformDatabaseToFamilyChart(
-        state.members, 
-        state.parentChildRels, 
-        state.spousalRels
-      );
-      state.chart.updateData(sanitizeChartData(cleanChartData));
+      // Re-render standard tree if we were in God mode
+      refreshChartUI();
     }
 
     const currentDatum = state.chart.store.getDatum(d.data.id);
     if (currentDatum) {
         state.editApi.open(currentDatum);
+        // Only trigger addRelative if it's not a button itself
         if (!currentDatum._new_rel_data) {
             state.editApi.addRelative(currentDatum);
         }
@@ -440,6 +486,7 @@ function createChart(chartData) {
   return chart;
 }
 
+// ... (Rest of file: updateRelationshipStyles, configureForm, etc. remain the same) ...
 function updateRelationshipStyles() {
   if (!state.chart || !state.chart.store) return;
 
@@ -736,17 +783,13 @@ function handleShowFullTree() {
   }
   state.editApi.closeForm();
 
-  // 1. Sanitize & Prepare Data (From DB source, not Chart state)
   const sourceMembers = transformDatabaseToFamilyChart(
     state.members,
     state.parentChildRels,
     state.spousalRels
   );
 
-  // 2. Calculate Generations
   const { levelMap, minLevel } = calculateStructuralLevels(sourceMembers);
-
-  // 3. Build Non-Duplicating Tree
   const fullTreeData = buildStrictTreeData(sourceMembers, levelMap, minLevel);
 
   // God Mode also needs sanitization to be safe
@@ -814,31 +857,24 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const outputNodesMap = new Map();
   outputNodesMap.set(godId, godNode);
 
-  // 1. Find Roots (No parents)
   let roots = members.filter(m => !m.rels.parents || m.rels.parents.length === 0);
-
-  // Sort roots to process main branches first
   roots.sort((a, b) => (b.rels.children?.length || 0) - (a.rels.children?.length || 0));
 
   const queue = [];
 
-  // 2. Process Roots
   roots.forEach(root => {
-    if (outputNodesMap.has(root.id)) return; // Already added (via spouse maybe)
+    if (outputNodesMap.has(root.id)) return; 
 
-    // Spouse check: If spouse already processed, skip adding this root to God
     const spouseIds = root.rels.spouses || [];
     const spouseProcessed = spouseIds.some(sid => outputNodesMap.has(sid));
 
     if (spouseProcessed) {
         if (!outputNodesMap.has(root.id)) {
-            // Add to map, but don't link to God
             outputNodesMap.set(root.id, root);
         }
         return; 
     }
 
-    // Add Spacers
     const myLevel = levelMap.get(root.id) || 0;
     const spacersNeeded = myLevel - globalMinLevel;
     let parentId = godId;
@@ -861,26 +897,22 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
       parentId = spacerId;
     }
 
-    // Link Root to God/Spacer
     const visualParent = outputNodesMap.get(parentId);
     if (visualParent) {
         if (!visualParent.rels.children) visualParent.rels.children = [];
         visualParent.rels.children.push(root.id);
     }
 
-    // Overwrite parents to enforce single-parentage in visual tree
     const rootCopy = { ...root, rels: { ...root.rels, parents: [parentId] } };
     outputNodesMap.set(root.id, rootCopy);
     queue.push(rootCopy);
   });
 
-  // 3. BFS Down (Processing children)
   while (queue.length > 0) {
     const parent = queue.shift();
     if (!parent.rels.children) continue;
 
     const realChildrenIds = parent.rels.children;
-    // Clean parent's visual children list to rebuild it strictly
     parent.rels.children = []; 
 
     realChildrenIds.forEach(childId => {
@@ -891,18 +923,15 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
       const childNode = members.find(m => m.id === childId);
       if (!childNode) return;
 
-      // Point child to this parent ONLY
       const childCopy = { ...childNode, rels: { ...childNode.rels, parents: [parent.id] } };
       
       outputNodesMap.set(childId, childCopy);
       queue.push(childCopy);
       
-      // Visual Link
       parent.rels.children.push(childId);
     });
   }
 
-  // 4. Sweep for disconnected members (floating spouses, etc)
   members.forEach(m => {
       if (!outputNodesMap.has(m.id)) {
           outputNodesMap.set(m.id, m);
