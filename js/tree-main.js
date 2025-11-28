@@ -418,7 +418,6 @@ function createChart(chartData) {
              });
 
              // VISUAL: Re-open the form for the new person so user can continue editing
-             // We do this after a slight delay so the camera starts moving first
              setTimeout(() => {
                 if (state.editApi) state.editApi.open(freshDatum);
              }, 300);
@@ -429,24 +428,54 @@ function createChart(chartData) {
         console.error("Save error details:", err);
         alert("Failed to save changes. Please try again.");
       } finally {
-        // VISUAL FEEDBACK: Hide loading spinner
         toggleLoading(false);
         state.isSaving = false;
       }
     })
     .setOnDelete(async (datum, deletePerson, postSubmit) => {
+      const id = datum.id;
+
+      // 1. CALCULATE DEPENDENTS
+      const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
+
+      const mySpouseRels = state.spousalRels.filter(r => r.person1_id === id || r.person2_id === id);
+      const hasUntetheredSpouse = mySpouseRels.some(rel => {
+          const spouseId = rel.person1_id === id ? rel.person2_id : rel.person1_id;
+          const spouseHasParents = state.parentChildRels.some(r => r.child_id === spouseId);
+          const spouseHasChildren = state.parentChildRels.some(r => r.parent_id === spouseId);
+          const spouseHasOtherSpouses = state.spousalRels.some(r => 
+            (r.person1_id === spouseId || r.person2_id === spouseId) && r.id !== rel.id
+          );
+          return !spouseHasParents && !spouseHasChildren && !spouseHasOtherSpouses;
+      });
+
+      const myParentRels = state.parentChildRels.filter(r => r.child_id === id);
+      const hasUntetheredParent = myParentRels.some(rel => {
+          const parentId = rel.parent_id;
+          const parentHasOtherChildren = state.parentChildRels.some(r => r.parent_id === parentId && r.child_id !== id);
+          const parentHasSpouse = state.spousalRels.some(r => r.person1_id === parentId || r.person2_id === parentId);
+          const parentHasParents = state.parentChildRels.some(r => r.child_id === parentId);
+          return !parentHasOtherChildren && !parentHasSpouse && !parentHasParents;
+      });
+
+      const hasDependents = hasChildren || hasUntetheredSpouse || hasUntetheredParent;
+      const isUnknown = datum.data['first name'] === 'Unknown';
+
+      // 2. BLOCK DELETION if it's already an Unknown placeholder with dependents
+      if (isUnknown && hasDependents) {
+        alert("This placeholder cannot be deleted because it is required to link other family members to the tree.\n\nPlease delete the attached relatives (children, partners, or parents) first.");
+        return; 
+      }
+
       if(!confirm("Are you sure you want to delete this person?")) return;
       
       try {
         state.isSaving = true;
         toggleLoading(true, "Deleting...");
 
-        const id = datum.id;
-
-        const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
-        const hasSpouses = state.spousalRels.some(r => r.person1_id === id || r.person2_id === id);
-
-        if (hasChildren || hasSpouses) {
+        if (hasDependents) {
+          // --- SOFT DELETE: Convert to Unknown ---
+          console.log("Performing Soft Delete (Reverting to Unknown)");
           const updates = {
             first_name: "Unknown",
             last_name: "",
@@ -463,6 +492,8 @@ function createChart(chartData) {
           refreshChartUI();
           
         } else {
+          // --- HARD DELETE: Remove Completely ---
+          console.log("Performing Hard Delete (Removing Completely)");
           await deleteFamilyMember(id);
           deletePerson();
           
@@ -471,16 +502,19 @@ function createChart(chartData) {
           state.spousalRels = state.spousalRels.filter(r => r.person1_id !== id && r.person2_id !== id);
 
           const store = state.chart.store;
-          const data = store.getData();
           
+          // If we deleted the "main" person, try to find a fallback
           if (store.getMainId() === id) {
-             const newMain = data.length > 0 ? data[0].id : null;
+             const newMain = state.members.length > 0 ? state.members[0].id : null;
              if (newMain) store.updateMainId(newMain);
           }
           
-          store.updateTree({ initial: false });
           postSubmit({ delete: true }); 
+          
+          // Trigger Full Tree View to ensure we don't end up on a blank screen
+          handleShowFullTree();
         }
+
       } catch (err) {
         console.error("Delete failed", err);
         alert("Failed to delete person.");
