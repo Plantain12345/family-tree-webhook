@@ -178,10 +178,8 @@ function cleanupGhostNodes() {
 
 function sanitizeChartData(chartData) {
   if (!Array.isArray(chartData)) return [];
-  // Basic filter for valid objects
   const cleanData = chartData.filter(d => d && d.id && d.rels);
 
-  // Ensure 2-parent logic is consistent for family-chart
   cleanData.forEach(child => {
     if (!child.rels) return;
     const parents = child.rels.parents || [];
@@ -189,7 +187,6 @@ function sanitizeChartData(chartData) {
     if (child.rels.father && !parents.includes(child.rels.father)) parents.push(child.rels.father);
     if (child.rels.mother && !parents.includes(child.rels.mother)) parents.push(child.rels.mother);
 
-    // If a child has 2 parents, ensure those parents are marked as spouses
     if (parents.length === 2) {
       const p1Id = parents[0];
       const p2Id = parents[1];
@@ -275,23 +272,28 @@ function createChart(chartData) {
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
       e.preventDefault();
       
-      // Save reference to the OLD ID before it potentially changes (important for logic)
       const oldId = datum.id;
       let memberId = oldId;
       
       try {
         state.isSaving = true;
+        
+        // VISUAL FEEDBACK: Show loading spinner immediately
+        toggleLoading(true, "Saving changes...");
+
         const form = e.target;
         const formData = new FormData(form);
         const formProps = Object.fromEntries(formData);
         
-        if (!validateYearFields(form)) return;
+        if (!validateYearFields(form)) {
+          toggleLoading(false);
+          return;
+        }
 
         const existingMember = state.members.find(m => m.id === memberId);
         let newlyCreatedRelPersonId = null;
 
         // 1. DATABASE OPERATIONS
-        // We do not rely on chart internal state here, purely DB operations.
         if (!existingMember) {
           // --- CREATE NEW MEMBER ---
           const memberData = createMemberData(state.treeId, formProps);
@@ -300,12 +302,10 @@ function createChart(chartData) {
           const res = await createFamilyMember(memberData);
           if (!res.success) throw new Error("Failed to create member: " + res.error);
           
-          memberId = res.data.id; // Update ID to real DB ID
+          memberId = res.data.id; 
           
-          // Push to local state immediately
           state.members.push(res.data);
 
-          // CASE 1: Standard "Add Relative" Button (Ghost Node)
           if (datum._new_rel_data) {
             const relType = datum._new_rel_data.rel_type;
             const relatedId = datum._new_rel_data.rel_id;
@@ -333,17 +333,14 @@ function createChart(chartData) {
           } 
           // CASE 2: "Unknown" / Placeholder Card
           else {
-            console.log("Resolving Unknown/Placeholder member...");
-            // Link as parent to existing children
             if (datum.rels.children && datum.rels.children.length > 0) {
               for (const childId of datum.rels.children) {
-                if (childId && childId.length > 10) { // Simple check for valid ID
+                if (childId && childId.length > 10) {
                   const pcRes = await createParentChildRelationship(state.treeId, memberId, childId);
                   if (pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
                 }
               }
             }
-            // Link as spouse to existing spouses
             if (datum.rels.spouses && datum.rels.spouses.length > 0) {
               for (const spouseId of datum.rels.spouses) {
                 if (spouseId && spouseId.length > 10) {
@@ -369,7 +366,7 @@ function createChart(chartData) {
           if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
         }
 
-        // --- HANDLE RELATIONSHIPS (Updates) ---
+        // --- HANDLE RELATIONSHIPS ---
         const relSelects = form.querySelectorAll('.relationship-type-select-existing');
         for (const select of relSelects) {
           const relId = select.dataset.relId;
@@ -378,8 +375,6 @@ function createChart(chartData) {
           
           if (spouseId === newlyCreatedRelPersonId && !existingMember) continue;
 
-          // Update local datum data strictly for form persistence if needed, 
-          // but relying on refreshChartUI is better
           if (!datum.data.spouse_rels) datum.data.spouse_rels = {};
           datum.data.spouse_rels[spouseId] = newType;
 
@@ -402,32 +397,40 @@ function createChart(chartData) {
         }
 
         // 2. UI OPERATIONS
-        // We deliberately do NOT use applyChanges() if we created a new member, 
-        // because the ID mismatch between temp ID and DB UUID causes the library to crash.
-        // Instead, we close the form and force a full refresh.
-        
         postSubmit(); // Closes the form
 
-        // Immediate Refresh of Tree Data
+        // Immediate Refresh
         refreshChartUI();
         
-        // Switch view to the person we just edited/created
+        // FOCUS LOGIC: Pan to new person and open form
         setTimeout(() => {
           const treeData = state.chart.store.getData();
           const freshDatum = treeData.find(d => d.id === memberId);
           
           if (freshDatum) {
              state.chart.updateMainId(freshDatum.id);
-             // Optional: Re-open form if you want them to keep editing
-             // state.editApi.open(freshDatum); 
-             state.chart.updateTree({ initial: false });
+             
+             // VISUAL: Move camera to the new person smoothly
+             state.chart.updateTree({ 
+               initial: false,
+               tree_position: 'main_to_middle',
+               transition_time: 1000 
+             });
+
+             // VISUAL: Re-open the form for the new person so user can continue editing
+             // We do this after a slight delay so the camera starts moving first
+             setTimeout(() => {
+                if (state.editApi) state.editApi.open(freshDatum);
+             }, 300);
           }
-        }, 50);
+        }, 100);
 
       } catch (err) {
         console.error("Save error details:", err);
         alert("Failed to save changes. Please try again.");
       } finally {
+        // VISUAL FEEDBACK: Hide loading spinner
+        toggleLoading(false);
         state.isSaving = false;
       }
     })
@@ -436,14 +439,14 @@ function createChart(chartData) {
       
       try {
         state.isSaving = true;
+        toggleLoading(true, "Deleting...");
+
         const id = datum.id;
 
-        // Check if person has dependents
         const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
         const hasSpouses = state.spousalRels.some(r => r.person1_id === id || r.person2_id === id);
 
         if (hasChildren || hasSpouses) {
-          // Soft delete logic
           const updates = {
             first_name: "Unknown",
             last_name: "",
@@ -460,7 +463,6 @@ function createChart(chartData) {
           refreshChartUI();
           
         } else {
-          // Hard delete
           await deleteFamilyMember(id);
           deletePerson();
           
@@ -481,7 +483,9 @@ function createChart(chartData) {
         }
       } catch (err) {
         console.error("Delete failed", err);
+        alert("Failed to delete person.");
       } finally {
+        toggleLoading(false);
         state.isSaving = false;
       }
     });
@@ -1016,8 +1020,15 @@ function handleCopyTreeCode() {
   setTimeout(() => { btn.textContent = original; }, 2000);
 }
 
-function toggleLoading(show) {
+function toggleLoading(show, message = "Loading...") {
   const overlay = document.getElementById('loadingOverlay');
   if (!overlay) return;
-  overlay.classList.toggle('hidden', !show);
+  
+  if (show) {
+    const msgEl = overlay.querySelector('p');
+    if (msgEl) msgEl.textContent = message;
+    overlay.classList.remove('hidden');
+  } else {
+    overlay.classList.add('hidden');
+  }
 }
