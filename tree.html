@@ -121,28 +121,6 @@
       to { opacity: 1; }
     }
     
-    /* Relationship link styling */
-    .link-divorced {
-      stroke: #f44336 !important;
-      stroke-dasharray: 8, 4;
-      stroke-width: 2px;
-    }
-    
-    .link-partner {
-      stroke-dasharray: 2, 2;
-      stroke-width: 2px;
-    }
-    
-    .link-separated {
-      stroke: #ff9800 !important;
-      stroke-dasharray: 8, 4;
-      stroke-width: 2px;
-    }
-    
-    .link-married {
-      stroke-width: 2px;
-    }
-    
     /* Relationship type selector in form */
     .relationship-type-selector {
       margin: 15px 0;
@@ -196,10 +174,13 @@
         <button id="showFullTreeBtn" class="btn-action">Show Direct Lineage (Last Selected Person)</button>
       </div>
 
-      <div class="tree-code-container">
-        <span>Tree Code: </span>
-        <span id="treeCodeDisplay" class="tree-code"></span>
-        <button id="copyCodeBtn" class="copy-btn" title="Copy code">📋</button>
+      <div class="tree-code-group">
+        <div class="tree-code-container">
+          <span>Tree Code: </span>
+          <span id="treeCodeDisplay" class="tree-code"></span>
+          <button id="copyCodeBtn" class="copy-btn" title="Copy code">📋</button>
+        </div>
+        <div class="tree-code-helper">Build your tree with your family by sharing this code.</div>
       </div>
     </div>
   </div>
