@@ -208,3 +208,23 @@
     height: 35px !important;
   }
 }
+
+/* NEW: Patch to help visualize overlapping spouse lines */
+.link-married {
+  stroke-width: 2px;
+  stroke: #fff; /* Ensure it's white to stand out against background */
+}
+
+/* If a line is very long (crossing another spouse), we can try to style it differently,
+   but pure CSS cannot detect line length. 
+   Instead, ensure divorced lines are very distinct. */
+.link-divorced {
+  stroke: #ff6b6b !important;
+  stroke-dasharray: 6, 6;
+  stroke-width: 3px; /* Thicker to be seen if behind */
+}
+
+.link-separated {
+  stroke: #fca5a5 !important; /* Lighter red */
+  stroke-dasharray: 4, 8;
+}
