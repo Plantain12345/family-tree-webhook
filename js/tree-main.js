@@ -15,7 +15,8 @@ import {
 
 import {
   transformDatabaseToFamilyChart,
-  findMainPersonId
+  findMainPersonId,
+  createMemberData
 } from './tree-data.js'
 
 import { setupRealtimeSync } from './tree-sync.js'
@@ -26,10 +27,13 @@ import { setupRealtimeSync } from './tree-sync.js'
 
 const FIRST_PERSON_DEFAULT_GENDER = 'M'
 
+// Updated labels for Point 4
 const ADD_LABELS = {
-  parent: 'Add Parent',
-  child: 'Add Child',
-  partner: 'Add Partner'
+  father: 'Add Father',
+  mother: 'Add Mother',
+  son: 'Add Son',
+  daughter: 'Add Daughter',
+  spouse: 'Add Partner' // Using 'Partner' generally, gender is handled by library
 }
 
 const SELECTORS = {
@@ -87,11 +91,15 @@ async function initializeTree(code) {
     state.treeId = tree.id
     state.treeCode = tree.tree_code
 
-    document.getElementById('treeName').textContent = tree.tree_name
+    // Update the name display (Point 1 handled in HTML structure, here we insert text)
+    const nameEl = document.querySelector('#treeName span:last-child');
+    if (nameEl) nameEl.textContent = tree.tree_name;
+    
     document.getElementById('treeCodeDisplay').textContent = tree.tree_code
 
     await loadTreeData()
     setupRealtimeSync(state.treeId, () => {
+      // Only refresh if we aren't currently editing/saving to avoid jitter
       if (!state.isSaving) loadTreeData()
     })
   } catch (error) {
@@ -209,87 +217,139 @@ function createChart(chartData) {
       }
     })
     .setOnSubmit(async (e, datum, applyChanges, postSubmit) => {
-      e.preventDefault(); 
+      e.preventDefault();
+      state.isSaving = true;
       const form = e.target;
+      const formData = new FormData(form);
+      const formProps = Object.fromEntries(formData);
       
-      if (!validateYearFields(form)) return;
+      if (!validateYearFields(form)) {
+        state.isSaving = false;
+        return;
+      }
 
-      const relSelects = form.querySelectorAll('.relationship-type-select-existing');
-      const currentChartData = state.chart.store.getData();
-      const currentDatum = currentChartData.find(d => d.id === datum.id);
+      // Check if this is a NEW person (temp ID from library) or existing
+      // Supabase UUIDs are long, family-chart temp IDs are usually short or timestamp based
+      // Better check: does it exist in our state.members list?
+      const existingMember = state.members.find(m => m.id === datum.id);
+      let memberId = datum.id;
 
-      for (const select of relSelects) {
-        const relId = select.dataset.relId;
-        const spouseId = select.dataset.spouseId;
-        const newType = select.value;
-        
-        if (currentDatum) {
-          if (!currentDatum.data.spouse_rels) currentDatum.data.spouse_rels = {};
-          currentDatum.data.spouse_rels[spouseId] = newType;
-        }
-        const spouseDatum = currentChartData.find(d => d.id === spouseId);
-        if (spouseDatum) {
-          if (!spouseDatum.data.spouse_rels) spouseDatum.data.spouse_rels = {};
-          spouseDatum.data.spouse_rels[datum.id] = newType;
-        }
+      try {
+        if (!existingMember) {
+          // --- CREATE NEW MEMBER ---
+          console.log('Creating new member in Supabase...');
+          const memberData = createMemberData(state.treeId, formProps);
+          
+          // Force gender from form if available, else from datum
+          memberData.gender = formProps.gender || datum.data.gender;
 
-        if (relId && relId !== 'undefined' && relId !== 'null') {
-          const dbRel = state.spousalRels.find(r => r.id === relId);
-          if (dbRel && dbRel.relationship_type !== newType) {
-            await updateSpousalRelationship(relId, newType);
+          const res = await createFamilyMember(memberData);
+          if (res.success) {
+            memberId = res.data.id;
+            // Update datum ID to match DB immediately so chart works
+            datum.id = memberId;
+            
+            // --- CREATE RELATIONSHIPS (The Missing Link for Point 5) ---
+            if (datum._new_rel_data) {
+              const relType = datum._new_rel_data.rel_type;
+              const relatedId = datum._new_rel_data.rel_id;
+              
+              if (relType === 'spouse') {
+                // Determine relationship type from selector if present
+                const relSelect = form.querySelector('.relationship-type-select-existing'); // New rels use same class in my dynamic builder
+                const type = relSelect ? relSelect.value : 'married';
+                await createSpousalRelationship(state.treeId, relatedId, memberId, type);
+              } else if (relType === 'son' || relType === 'daughter') {
+                // If adding child, relatedId is one parent. 
+                // datum._new_rel_data.other_parent_id might exist
+                await createParentChildRelationship(state.treeId, relatedId, memberId); // Link to main parent
+                
+                if (datum._new_rel_data.other_parent_id) {
+                  await createParentChildRelationship(state.treeId, datum._new_rel_data.other_parent_id, memberId);
+                }
+              } else if (relType === 'father' || relType === 'mother') {
+                await createParentChildRelationship(state.treeId, memberId, relatedId); // Member is parent of relatedId
+              }
+            }
           }
         } else {
-          const existingRel = state.spousalRels.find(r => 
-            (r.person1_id === datum.id && r.person2_id === spouseId) ||
-            (r.person1_id === spouseId && r.person2_id === datum.id)
-          );
-          if (existingRel && existingRel.relationship_type !== newType) {
-            await updateSpousalRelationship(existingRel.id, newType);
+          // --- UPDATE EXISTING MEMBER ---
+          const updates = {
+            first_name: formProps['first name'],
+            last_name: formProps['last name'],
+            birthday: formProps['birthday'] || null,
+            death: formProps['death'] || null,
+            gender: formProps['gender']
+          };
+          await updateFamilyMember(memberId, updates);
+        }
+
+        // --- HANDLE RELATIONSHIP TYPE UPDATES ---
+        const relSelects = form.querySelectorAll('.relationship-type-select-existing');
+        for (const select of relSelects) {
+          const relId = select.dataset.relId;
+          const spouseId = select.dataset.spouseId;
+          const newType = select.value;
+          
+          // Update local data for immediate feedback
+          if (!datum.data.spouse_rels) datum.data.spouse_rels = {};
+          datum.data.spouse_rels[spouseId] = newType;
+
+          // Update DB
+          if (relId && relId !== 'undefined' && relId !== 'null') {
+            const dbRel = state.spousalRels.find(r => r.id === relId);
+            if (dbRel && dbRel.relationship_type !== newType) {
+              await updateSpousalRelationship(relId, newType);
+            }
+          } else if (existingMember && spouseId) {
+            // Fallback: look up by IDs
+            const existingRel = state.spousalRels.find(r => 
+              (r.person1_id === memberId && r.person2_id === spouseId) ||
+              (r.person1_id === spouseId && r.person2_id === memberId)
+            );
+            if (existingRel && existingRel.relationship_type !== newType) {
+              await updateSpousalRelationship(existingRel.id, newType);
+            }
           }
         }
+
+        // Apply changes to local chart view
+        applyChanges(); 
+        postSubmit();   
+
+        // Force a data reload to ensure everything is synced and IDs are clean
+        setTimeout(async () => {
+          await loadTreeData();
+          const freshData = state.chart.store.getData();
+          const newDatum = freshData.find(d => d.id === memberId);
+          if (newDatum && !newDatum.to_add && !newDatum.data.to_add) {
+             state.chart.updateMainId(newDatum.id);
+             state.editApi.open(newDatum);
+             state.chart.updateTree({ initial: false });
+          }
+          state.isSaving = false;
+        }, 200);
+
+      } catch (err) {
+        console.error("Save failed", err);
+        alert("Error saving data");
+        state.isSaving = false;
       }
-      
-      const newRelSelect = form.querySelector('.relationship-type-selector-new select');
-      if (newRelSelect) {
-        window.lastRelationshipType = newRelSelect.value;
-      }
-
-      applyChanges(); 
-      postSubmit();   
-
-      setTimeout(() => {
-        const freshData = state.chart.store.getData();
-        const newDatum = freshData.find(d => d.id === datum.id);
-        if (newDatum && !newDatum.to_add && !newDatum.data.to_add) {
-           state.chart.updateMainId(newDatum.id);
-           state.editApi.open(newDatum);
-           state.chart.updateTree({ initial: false });
-        }
-      }, 100);
-
-      scheduleSave(); 
     })
-    .setOnDelete((datum, deletePerson, postSubmit) => {
+    .setOnDelete(async (datum, deletePerson, postSubmit) => {
+      if(!confirm("Are you sure you want to delete this person?")) return;
+      
       const id = datum.id;
-      const store = state.chart.store;
+      // Database delete
+      await deleteFamilyMember(id);
 
+      // Local chart delete
       deletePerson();
       
+      // Cleanup local data
+      const store = state.chart.store;
       const data = store.getData();
-      const index = data.findIndex(d => d.id === id);
-
-      if (index !== -1) {
-        const node = data[index];
-        if (node.unknown || node.data.unknown) {
-          data.forEach(d => {
-            if (d.rels.parents) d.rels.parents = d.rels.parents.filter(pId => pId !== id);
-            if (d.rels.children) d.rels.children = d.rels.children.filter(cId => cId !== id);
-            if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(sId => sId !== id);
-          });
-          data.splice(index, 1);
-        }
-      }
-
+      
       if (store.getMainId() === id) {
          const newMain = data.length > 0 ? data[0].id : null;
          if (newMain) store.updateMainId(newMain);
@@ -297,8 +357,9 @@ function createChart(chartData) {
       
       store.updateTree({ initial: false });
       postSubmit({ delete: true }); 
-      scheduleSave(); 
-      setTimeout(() => handleShowFullTree(), 100);
+      
+      await loadTreeData();
+      handleShowFullTree();
     });
 
   applyAddButtonLabels(state.editApi);
@@ -416,13 +477,7 @@ function updateRelationshipStyles() {
 function applyAddButtonLabels(editApi) {
   if (!editApi) return;
   if (typeof editApi.setAddRelLabels === 'function') {
-    editApi.setAddRelLabels({
-      father: ADD_LABELS.parent,
-      mother: ADD_LABELS.parent,
-      son: ADD_LABELS.child,
-      daughter: ADD_LABELS.child,
-      spouse: ADD_LABELS.partner
-    });
+    editApi.setAddRelLabels(ADD_LABELS);
   }
 }
 
@@ -493,6 +548,7 @@ function ensureRelationshipTypeSelector(form, datumId) {
   const anchorElement = form.querySelector('.f3-form-buttons');
   if (!anchorElement?.parentNode) return;
 
+  // Handle NEW relationships
   const isPartnerForm = /partner|spouse/i.test(titleText);
   if (isPartnerForm && datum._new_rel_data) {
     if (!form.querySelector('.relationship-type-selector-new')) {
@@ -504,6 +560,7 @@ function ensureRelationshipTypeSelector(form, datumId) {
     }
   }
 
+  // Handle EXISTING relationships
   const spouseIds = datum.rels?.spouses || [];
   if (spouseIds.length === 0 || datum._new_rel_data) return;
 
@@ -609,18 +666,13 @@ function handleShowFullTree() {
   }
   state.editApi.closeForm();
 
-  // 1. Sanitize & Prepare Data (From DB source, not Chart state)
-  // This ensures no artifacts (Spacers/Gods) from previous runs are included
   const sourceMembers = transformDatabaseToFamilyChart(
     state.members,
     state.parentChildRels,
     state.spousalRels
   );
 
-  // 2. Calculate Generations
   const { levelMap, minLevel } = calculateStructuralLevels(sourceMembers);
-
-  // 3. Build Non-Duplicating Tree
   const fullTreeData = buildStrictTreeData(sourceMembers, levelMap, minLevel);
 
   state.chart.updateData(fullTreeData);
@@ -676,9 +728,6 @@ function calculateStructuralLevels(members) {
   return { levelMap, minLevel };
 }
 
-/**
- * Strict Tree Builder: Uses Map to ensure ZERO duplicates
- */
 function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const godId = 'GOD_NODE_TEMP';
   const godNode = {
@@ -687,36 +736,27 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
     rels: { parents: [], spouses: [], children: [] }
   };
 
-  // Map used to ensure uniqueness. Key = ID, Value = Node Object
   const outputNodesMap = new Map();
   outputNodesMap.set(godId, godNode);
 
-  // 1. Find Roots (No parents)
   let roots = members.filter(m => !m.rels.parents || m.rels.parents.length === 0);
-
-  // Sort roots to process main branches first
   roots.sort((a, b) => (b.rels.children?.length || 0) - (a.rels.children?.length || 0));
 
   const queue = [];
 
-  // 2. Process Roots
   roots.forEach(root => {
-    if (outputNodesMap.has(root.id)) return; // Already added (via spouse maybe)
+    if (outputNodesMap.has(root.id)) return; 
 
-    // Spouse check: If spouse already processed, skip adding this root to God
-    // (They will appear next to spouse automatically)
     const spouseIds = root.rels.spouses || [];
     const spouseProcessed = spouseIds.some(sid => outputNodesMap.has(sid));
 
     if (spouseProcessed) {
         if (!outputNodesMap.has(root.id)) {
-            // Add to map, but don't link to God
             outputNodesMap.set(root.id, root);
         }
         return; 
     }
 
-    // Add Spacers
     const myLevel = levelMap.get(root.id) || 0;
     const spacersNeeded = myLevel - globalMinLevel;
     let parentId = godId;
@@ -739,51 +779,41 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
       parentId = spacerId;
     }
 
-    // Link Root to God/Spacer
     const visualParent = outputNodesMap.get(parentId);
     if (visualParent) {
         if (!visualParent.rels.children) visualParent.rels.children = [];
         visualParent.rels.children.push(root.id);
     }
 
-    // Overwrite parents to enforce single-parentage in visual tree
     const rootCopy = { ...root, rels: { ...root.rels, parents: [parentId] } };
     outputNodesMap.set(root.id, rootCopy);
     queue.push(rootCopy);
   });
 
-  // 3. BFS Down (Processing children)
   while (queue.length > 0) {
     const parent = queue.shift();
     if (!parent.rels.children) continue;
 
     const realChildrenIds = parent.rels.children;
-    // Clean parent's visual children list to rebuild it strictly
     parent.rels.children = []; 
 
     realChildrenIds.forEach(childId => {
       if (outputNodesMap.has(childId)) {
-        // Child already in tree (via other parent). 
-        // Do NOT add again. Visual compromise: Only shows under first parent processed.
-        // We do NOT link them to this parent to avoid D3 duplicate ID error.
         return; 
       }
 
       const childNode = members.find(m => m.id === childId);
       if (!childNode) return;
 
-      // Point child to this parent ONLY
       const childCopy = { ...childNode, rels: { ...childNode.rels, parents: [parent.id] } };
       
       outputNodesMap.set(childId, childCopy);
       queue.push(childCopy);
       
-      // Visual Link
       parent.rels.children.push(childId);
     });
   }
 
-  // 4. Sweep for disconnected members (floating spouses, etc)
   members.forEach(m => {
       if (!outputNodesMap.has(m.id)) {
           outputNodesMap.set(m.id, m);
