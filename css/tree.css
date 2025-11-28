@@ -205,48 +205,48 @@
 
 /* --- RELATIONSHIP LINES & MARKERS --- */
 
-/* Base styling for links to be visible on dark background */
+/* Base styling for links */
 .link-married, .link-partner, .link-divorced, .link-separated {
   fill: none;
   stroke-linecap: round;
+  transition: all 0.3s ease;
 }
 
+/* 1. Married: Solid White */
 .link-married {
   stroke: #fff;
   stroke-width: 2px;
 }
 
-/* Distinct visual for divorce/separation */
+/* 2. Divorced: Red Dashed */
 .link-divorced {
   stroke: #ff6b6b !important;
   stroke-dasharray: 6, 6;
   stroke-width: 2px;
 }
 
+/* 3. Partner: White Dotted */
 .link-partner {
   stroke: #fff;
   stroke-dasharray: 2, 2;
   stroke-width: 2px;
 }
 
+/* 4. Separated: Orange Dashed */
 .link-separated {
   stroke: #fca5a5 !important;
   stroke-dasharray: 4, 8;
   stroke-width: 2px;
 }
 
-/* Markers */
+/* Divorce Markers (The double slash) */
 .divorce-marker {
   stroke: #ff6b6b;
   stroke-width: 2px;
   fill: none;
 }
 
-/* Child Junction Dot (Optional visual aid) */
-.child-junction-dot {
-  fill: #fff;
-}
-
+/* Ensure lines appear behind cards */
 .f3 .card_cont {
   z-index: 10;
 }
