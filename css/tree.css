@@ -228,3 +228,32 @@
   stroke: #fca5a5 !important; /* Lighter red */
   stroke-dasharray: 4, 8;
 }
+
+/* ... existing code ... */
+
+/* Ensure cards are above lines */
+.f3 .card_cont {
+  z-index: 10;
+}
+
+/* Ensure lines are behind */
+.f3 .links_view {
+  z-index: 1;
+}
+
+/* Updated visual styles for lines */
+.link-married {
+  stroke-width: 2px;
+  stroke: #fff; 
+}
+
+.link-divorced {
+  stroke: #ff6b6b !important;
+  stroke-dasharray: 6, 6;
+  stroke-width: 3px; 
+}
+
+.link-separated {
+  stroke: #fca5a5 !important; 
+  stroke-dasharray: 4, 8;
+}
