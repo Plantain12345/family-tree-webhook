@@ -32,7 +32,7 @@ const ADD_LABELS = {
   mother: 'Add Mother',
   son: 'Add Son',
   daughter: 'Add Daughter',
-  spouse: 'Add Partner'
+  spouse: 'Add Partner' 
 }
 
 const SELECTORS = {
@@ -90,7 +90,6 @@ async function initializeTree(code) {
     state.treeId = tree.id
     state.treeCode = tree.tree_code
 
-    // Update the name safely
     const nameEl = document.querySelector('#treeName span:last-child');
     if (nameEl) nameEl.textContent = tree.tree_name;
     
@@ -182,7 +181,6 @@ function createChart(chartData) {
         return ''
       },
       (d) => {
-        // FIX FOR ISSUE #2: Grammar correction
         const spouseRels = d.data['spouse_rels'];
         if (!spouseRels) return '';
         const relationshipStrings = [];
@@ -235,12 +233,10 @@ function createChart(chartData) {
 
       const existingMember = state.members.find(m => m.id === datum.id);
       let memberId = datum.id;
-      // Track the relationship we just created so we don't try to update it immediately
       let newlyCreatedRelPersonId = null;
 
       try {
         if (!existingMember) {
-          // --- CREATE NEW MEMBER ---
           console.log('Creating new member in Supabase...');
           const memberData = createMemberData(state.treeId, formProps);
           memberData.gender = formProps.gender || datum.data.gender;
@@ -248,17 +244,16 @@ function createChart(chartData) {
           const res = await createFamilyMember(memberData);
           if (res.success) {
             memberId = res.data.id;
-            datum.id = memberId; // CRITICAL: Update chart datum to use real ID
+            datum.id = memberId; 
             
             if (datum._new_rel_data) {
               const relType = datum._new_rel_data.rel_type;
               const relatedId = datum._new_rel_data.rel_id;
-              newlyCreatedRelPersonId = relatedId; // Mark this connection
+              newlyCreatedRelPersonId = relatedId;
               
               if (relType === 'spouse') {
                 const relSelect = form.querySelector('.relationship-type-select-existing'); 
                 const type = relSelect ? relSelect.value : 'married';
-                // FIX FOR ISSUE #1: Create relationship immediately
                 await createSpousalRelationship(state.treeId, relatedId, memberId, type);
               } else if (relType === 'son' || relType === 'daughter') {
                 await createParentChildRelationship(state.treeId, relatedId, memberId);
@@ -271,7 +266,6 @@ function createChart(chartData) {
             }
           }
         } else {
-          // --- UPDATE EXISTING MEMBER ---
           const updates = {
             first_name: formProps['first name'],
             last_name: formProps['last name'],
@@ -282,29 +276,23 @@ function createChart(chartData) {
           await updateFamilyMember(memberId, updates);
         }
 
-        // --- HANDLE UPDATES TO EXISTING RELATIONSHIPS ---
-        // FIX FOR ISSUE #1: Logic refined to prevent updating non-existent or just-created relationships
         const relSelects = form.querySelectorAll('.relationship-type-select-existing');
         for (const select of relSelects) {
           const relId = select.dataset.relId;
           const spouseId = select.dataset.spouseId;
           const newType = select.value;
           
-          // Skip if this is the spouse we just created above (to avoid race condition)
           if (spouseId === newlyCreatedRelPersonId && !existingMember) continue;
 
-          // Visual update
           if (!datum.data.spouse_rels) datum.data.spouse_rels = {};
           datum.data.spouse_rels[spouseId] = newType;
 
-          // DB Update
           if (relId && relId !== 'undefined' && relId !== 'null') {
             const dbRel = state.spousalRels.find(r => r.id === relId);
             if (dbRel && dbRel.relationship_type !== newType) {
               await updateSpousalRelationship(relId, newType);
             }
           } else if (existingMember && spouseId) {
-            // Find by person IDs
             const existingRel = state.spousalRels.find(r => 
               (r.person1_id === memberId && r.person2_id === spouseId) ||
               (r.person1_id === spouseId && r.person2_id === memberId)
@@ -315,11 +303,9 @@ function createChart(chartData) {
           }
         }
 
-        // --- SUCCESS SEQUENCE ---
         applyChanges(); 
         postSubmit();   
 
-        // Reload data to ensure clean state
         setTimeout(async () => {
           await loadTreeData();
           const freshData = state.chart.store.getData();
@@ -334,8 +320,6 @@ function createChart(chartData) {
 
       } catch (err) {
         console.error("Save failed", err);
-        // Don't show alert if it's a minor error, check console
-        // alert("Error saving data"); 
         state.isSaving = false;
       }
     })
@@ -391,12 +375,17 @@ function createChart(chartData) {
   const bestId = findYoungestDescendantId(state.members, state.parentChildRels) || findMainPersonId(state.members);
   if (bestId) chart.updateMainId(bestId);
 
+  // FIX FOR ISSUE #1: Assign chart to state BEFORE initial update to prevent 'store' of null error
+  state.chart = chart;
+  
   chart.updateTree({ initial: true });
 
   return chart;
 }
 
 function updateRelationshipStyles() {
+  if (!state.chart || !state.chart.store) return; // Guard clause
+
   const svg = d3.select('#FamilyChart').select('svg.main_svg');
   const linksGroup = svg.select('.links_view');
   
@@ -426,6 +415,50 @@ function updateRelationshipStyles() {
     linkEl.classed('link-married link-partner link-divorced link-separated', false);
 
     let relType = 'married';
+    
+    // VISUAL FIX FOR ISSUE #4:
+    // If we have a spouse link, and it spans more than one node distance,
+    // we assume it is "crossing" an intermediate node (like your Nambi case).
+    // We visually "bump" the vertical segment of the line so it doesn't look connected to the middle node.
+    if (d.spouse) {
+        // Calculate the horizontal distance between partners
+        const deltaX = Math.abs(d.target.x - d.source.x);
+        const nodeSeparation = 250; // Should match cardXSpacing
+        
+        // If distance is significantly larger than one separation step, it's a long jump
+        if (deltaX > nodeSeparation * 1.5) {
+            // Modify the path data to shift the vertical drop point
+            // Standard path: Start -> Midpoint(X) -> End
+            // Modified path: Start -> ShiftedMidpoint(X) -> End
+            // Shift towards the target to bypass the middle node
+            const sourceX = d.source.x;
+            const targetX = d.target.x;
+            const sourceY = d.source.y;
+            const targetY = d.target.y;
+            
+            // Default halfway point used by library
+            // const midX = (sourceX + targetX) / 2;
+            
+            // Create a custom offset. We move the vertical segment closer to the "target"
+            // so it drops down next to the target, avoiding the center of the middle node.
+            const direction = targetX > sourceX ? 1 : -1;
+            const shift = nodeSeparation * 0.5 * direction;
+            const safeX = targetX - shift; 
+
+            // Create custom cubic bezier or simple polyline to bypass
+            const path = d3.path();
+            path.moveTo(sourceX, sourceY);
+            // Go horizontally to safeX
+            path.lineTo(safeX, sourceY);
+            // Go vertically to target height
+            path.lineTo(safeX, targetY);
+            // Go horizontally to target
+            path.lineTo(targetX, targetY);
+            
+            linkEl.attr('d', path.toString());
+        }
+    }
+
     if (srcId && tgtId) {
       const rel = state.spousalRels.find(r => 
         (r.person1_id === srcId && r.person2_id === tgtId) ||
@@ -743,31 +776,24 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
   const outputNodesMap = new Map();
   outputNodesMap.set(godId, godNode);
 
-  // 1. Find Roots (No parents)
   let roots = members.filter(m => !m.rels.parents || m.rels.parents.length === 0);
-
-  // Sort roots to process main branches first
   roots.sort((a, b) => (b.rels.children?.length || 0) - (a.rels.children?.length || 0));
 
   const queue = [];
 
-  // 2. Process Roots
   roots.forEach(root => {
-    if (outputNodesMap.has(root.id)) return; // Already added (via spouse maybe)
+    if (outputNodesMap.has(root.id)) return; 
 
-    // Spouse check: If spouse already processed, skip adding this root to God
     const spouseIds = root.rels.spouses || [];
     const spouseProcessed = spouseIds.some(sid => outputNodesMap.has(sid));
 
     if (spouseProcessed) {
         if (!outputNodesMap.has(root.id)) {
-            // Add to map, but don't link to God
             outputNodesMap.set(root.id, root);
         }
         return; 
     }
 
-    // Add Spacers
     const myLevel = levelMap.get(root.id) || 0;
     const spacersNeeded = myLevel - globalMinLevel;
     let parentId = godId;
@@ -790,51 +816,41 @@ function buildStrictTreeData(members, levelMap, globalMinLevel) {
       parentId = spacerId;
     }
 
-    // Link Root to God/Spacer
     const visualParent = outputNodesMap.get(parentId);
     if (visualParent) {
         if (!visualParent.rels.children) visualParent.rels.children = [];
         visualParent.rels.children.push(root.id);
     }
 
-    // Overwrite parents to enforce single-parentage in visual tree
     const rootCopy = { ...root, rels: { ...root.rels, parents: [parentId] } };
     outputNodesMap.set(root.id, rootCopy);
     queue.push(rootCopy);
   });
 
-  // 3. BFS Down (Processing children)
   while (queue.length > 0) {
     const parent = queue.shift();
     if (!parent.rels.children) continue;
 
     const realChildrenIds = parent.rels.children;
-    // Clean parent's visual children list to rebuild it strictly
     parent.rels.children = []; 
 
     realChildrenIds.forEach(childId => {
       if (outputNodesMap.has(childId)) {
-        // Child already in tree (via other parent). 
-        // Do NOT add again. Visual compromise: Only shows under first parent processed.
-        // We do NOT link them to this parent to avoid D3 duplicate ID error.
         return; 
       }
 
       const childNode = members.find(m => m.id === childId);
       if (!childNode) return;
 
-      // Point child to this parent ONLY
       const childCopy = { ...childNode, rels: { ...childNode.rels, parents: [parent.id] } };
       
       outputNodesMap.set(childId, childCopy);
       queue.push(childCopy);
       
-      // Visual Link
       parent.rels.children.push(childId);
     });
   }
 
-  // 4. Sweep for disconnected members (floating spouses, etc)
   members.forEach(m => {
       if (!outputNodesMap.has(m.id)) {
           outputNodesMap.set(m.id, m);
