@@ -208,21 +208,21 @@ function sanitizeChartData(chartData) {
 function createChartInstance(chartData) {
   const chart = window.f3.createChart('#FamilyChart', chartData)
     .setTransitionTime(1000)
-    .setCardXSpacing(260) // Slightly wider to accommodate stepped lines
+    .setCardXSpacing(250)
     .setCardYSpacing(150)
     .setShowSiblingsOfMain(true)
     .setSingleParentEmptyCard(true, { label: 'Unknown' })
 
   state.chart = chart;
 
-  // IMPORTANT: This hook handles the custom line drawing
+  // CUSTOM PATH LOGIC HOOK
   chart.setAfterUpdate(() => {
-    // Small timeout to let D3 transitions finish or at least start
+    // Timeout allows D3 transitions to begin before we hijack the paths
     setTimeout(() => {
       try {
-        optimizePaths();
+        updateRelationshipStyles();
       } catch (e) {
-        console.error("Path optimization error", e);
+        console.error("Path update error:", e);
       }
     }, 50);
   });
@@ -305,6 +305,7 @@ function createChartInstance(chartData) {
           if (!res.success) throw new Error("Failed to create member: " + res.error);
           
           memberId = res.data.id; 
+          
           state.members.push(res.data);
 
           if (datum._new_rel_data) {
@@ -315,6 +316,7 @@ function createChartInstance(chartData) {
             if (relType === 'spouse') {
               const relSelect = form.querySelector('.relationship-type-select-existing'); 
               const type = relSelect ? relSelect.value : 'married';
+              
               const relRes = await createSpousalRelationship(state.treeId, relatedId, memberId, type);
               if(relRes.success && relRes.data) state.spousalRels.push(relRes.data);
 
@@ -506,7 +508,6 @@ function checkDependents(id) {
   const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
   const mySpouseRels = state.spousalRels.filter(r => r.person1_id === id || r.person2_id === id);
   
-  // Check if spouse would be orphaned
   const hasUntetheredSpouse = mySpouseRels.some(rel => {
       const spouseId = rel.person1_id === id ? rel.person2_id : rel.person1_id;
       const spouseHasParents = state.parentChildRels.some(r => r.child_id === spouseId);
@@ -521,133 +522,130 @@ function checkDependents(id) {
 }
 
 /**
- * CUSTOM PATH OPTIMIZER
- * This replaces the standard straight lines with "Stepped" lines for distinct partners,
- * and ensures children connect specifically to the line belonging to their parents.
+ * =========================================================================
+ * CUSTOM PATH & STYLE UPDATER
+ * =========================================================================
+ * This function runs after D3 renders the tree. It:
+ * 1. Applies distinct styles (colors/dashes) to relationship lines.
+ * 2. Detects overlaps (Anne between Martin/Sabena) and turns them into Arcs.
+ * 3. Colors child lines to match their parents' relationship style.
+ * 4. Connects child lines to the TOP of the Arc if it exists.
  */
-function optimizePaths() {
+function updateRelationshipStyles() {
   if (!state.chart || !state.chart.store) return;
 
   const svg = d3.select('#FamilyChart').select('svg.main_svg');
   const linksGroup = svg.select('.links_view');
   
-  // 1. Map Spouses per person to calculate offsets
-  const treeData = state.chart.store.getTree().data;
-  const spouseGroups = {}; // { 'martin_id': ['anne_id', 'sabena_id'] }
+  let markerGroup = linksGroup.select('.relationship-markers');
+  if (markerGroup.empty()) markerGroup = linksGroup.append('g').attr('class', 'relationship-markers');
 
-  treeData.forEach(d => {
-    if (d.data.main || d.is_ancestry) {
-      if (d.spouses && d.spouses.length > 0) {
-        // Sort spouses by X position to determine vertical stacking order
-        const sortedSpouses = [...d.spouses].sort((a, b) => a.x - b.x);
-        spouseGroups[d.data.id] = sortedSpouses.map(s => s.data.id);
-      }
-    }
-  });
-
-  // 2. Identify and Style Links
   const links = linksGroup.selectAll('path.link');
   const divorcedLinksData = [];
+  const spacing = 250; // Standard spacing between nodes
+
+  // Store arcs info for child connection lookup
+  const arcRegistry = {}; // key: pairId, value: arcHeight (y-apex)
 
   links.each(function(d) {
     const linkEl = d3.select(this);
-    const src = d.source; 
-    const tgt = d.target;
     
-    // Ignore ghost/god nodes
-    if (src.data.id === 'GOD_NODE_TEMP' || tgt.data.id === 'GOD_NODE_TEMP') {
-      linkEl.style('opacity', 0);
+    // Safety check for god/ghost nodes
+    if (!d.source.data || !d.target.data) return;
+    if (d.source.data.id === 'GOD_NODE_TEMP' || d.target.data.id === 'GOD_NODE_TEMP') {
+      linkEl.style('opacity', 0).style('pointer-events', 'none');
       return;
     }
 
-    // --- SPOUSE LINKS ---
+    linkEl.style('opacity', 1).style('pointer-events', 'auto');
+    linkEl.classed('link-married link-partner link-divorced link-separated', false);
+
+    // ----------------------------------------------------
+    // 1. HANDLE SPOUSE LINKS (Horizontal)
+    // ----------------------------------------------------
     if (d.spouse) {
-      // Determine which node is the "Hub" (the one with potential multiple spouses)
-      // Usually the one that is NOT added (d.added is true for spouses added for visual purposes)
-      let hub = !src.added ? src : tgt;
-      let spouse = src.added ? src : tgt;
+      const srcId = d.source.data.id;
+      const tgtId = d.target.data.id;
       
-      // If both seem equal (e.g. main node relation), fallback to data check
-      if(hub === spouse) {
-         hub = src; spouse = tgt; 
-      }
+      // Determine Relationship Type for Color
+      let relType = getRelationshipType(srcId, tgtId);
+      linkEl.classed(`link-${relType}`, true);
 
-      const spousesList = spouseGroups[hub.data.id];
-      let verticalOffset = 0;
-
-      if (spousesList && spousesList.length > 1) {
-        const index = spousesList.indexOf(spouse.data.id);
-        // Step logic: If 2 spouses: -15, +15. If 3: -15, 0, +15.
-        // Formula: (index - (total-1)/2) * stepSize
-        if (index !== -1) {
-          verticalOffset = (index - (spousesList.length - 1) / 2) * 30; // 30px spacing
-        }
-      }
-
-      // Draw the Stepped Path: Up/Down -> Over -> Down/Up
-      const newPath = calculateSteppedPath(hub, spouse, verticalOffset);
-      linkEl.attr('d', newPath);
+      // Detect "Jump" (Overlap)
+      // If horizontal distance is greater than standard spacing + buffer, we are skipping a node
+      const dist = Math.abs(d.target.x - d.source.x);
       
-      // Store the offset in the DOM element for the child links to find later
-      const pairId = [hub.data.id, spouse.data.id].sort().join('_');
-      linkEl.attr('data-pair-id', pairId);
-      linkEl.attr('data-vertical-offset', verticalOffset);
+      if (dist > spacing * 1.5) {
+        // Draw Quadratic Curve (Arc)
+        const startX = d.source.x;
+        const startY = d.source.y;
+        const endX = d.target.x;
+        const endY = d.target.y;
+        
+        // Arc goes UP (negative Y). Height depends on distance slightly for aesthetics
+        const arcHeight = 40; 
+        const controlX = (startX + endX) / 2;
+        const controlY = startY - arcHeight; // Move point UP
+        
+        const path = `M ${startX} ${startY} Q ${controlX} ${controlY} ${endX} ${endY}`;
+        linkEl.attr('d', path);
+        linkEl.style('fill', 'none'); // Ensure arcs don't fill
+
+        // Save arc apex info for children
+        const pairId = [srcId, tgtId].sort().join('_');
+        arcRegistry[pairId] = controlY; // Store the high point
+      } 
+      
+      // Collect Markers
+      if (relType === 'divorced') {
+        divorcedLinksData.push({ pathNode: this, id: `marker-${srcId}-${tgtId}` });
+      }
     } 
     
-    // --- CHILD LINKS ---
+    // ----------------------------------------------------
+    // 2. HANDLE CHILD LINKS (Vertical)
+    // ----------------------------------------------------
     else {
-      // d.target is the child. d.source is [parent1, parent2] or parent1
-      const child = d.target;
+      // Parents are in d.source (Array or Object)
       let parents = Array.isArray(d.source) ? d.source : [d.source];
       
-      // If we have 2 parents, we need to connect to their specific spouse line
       if (parents.length === 2) {
-        const p1 = parents[0];
-        const p2 = parents[1];
-        const pairId = [p1.data.id, p2.data.id].sort().join('_');
-        
-        // Find the spouse link element to get its offset
-        const spouseLinkEl = linksGroup.select(`path[data-pair-id="${pairId}"]`);
-        
-        if (!spouseLinkEl.empty()) {
-          const offset = parseFloat(spouseLinkEl.attr('data-vertical-offset')) || 0;
+        const p1Id = parents[0].data.id;
+        const p2Id = parents[1].data.id;
+        const pairId = [p1Id, p2Id].sort().join('_');
+
+        // Apply Parent's Relationship Color to Child Link
+        let parentRelType = getRelationshipType(p1Id, p2Id);
+        linkEl.classed(`link-${parentRelType}`, true);
+
+        // If Parents have an Arc (Bridge), connect child to the top of the bridge
+        if (arcRegistry[pairId] !== undefined) {
+          const arcApexY = arcRegistry[pairId];
+          const child = d.target;
           
-          // Re-calculate child path starting from the offset height
-          const startX = (p1.x + p2.x) / 2;
-          const startY = p1.y + offset; // Start from the stepped line height
+          // Original logic usually drops from (p1.y + p2.y)/2 which is basically 0 relative to parents
+          // We want to start from arcApexY instead.
+          
+          const startX = (parents[0].x + parents[1].x) / 2;
+          const startY = arcApexY; // Start from top of arc
           const endX = child.x;
           const endY = child.y;
-          
-          // Standard elbow for child: Down -> Over -> Down
-          // But startY is shifted
-          const midY = (startY + endY) / 2;
-          
+          const midY = (parents[0].y + endY) / 2; // Standard elbow level below parents
+
+          // Path: Top of Bridge -> Down to Elbow -> Over -> Down to Child
+          // We add a small straight line segment down from the arc to the standard elbow level
           const path = `M ${startX} ${startY} 
                         L ${startX} ${midY} 
                         L ${endX} ${midY} 
                         L ${endX} ${endY}`;
           
           linkEl.attr('d', path);
-          
-          // Optional: Add a junction dot
-          // appendJunctionDot(linksGroup, startX, startY);
         }
       }
     }
-
-    // Apply Styles (Married, Divorced, etc.) based on DB data
-    applyLinkStyle(linkEl, src.data.id, tgt.data.id);
-    
-    // Collect divorce markers
-    if (linkEl.classed('link-divorced')) {
-      divorcedLinksData.push({ pathNode: this, id: `marker-${src.data.id}-${tgt.data.id}` });
-    }
   });
 
-  // Render Divorce/Separation Markers (Double slash)
-  let markerGroup = linksGroup.select('.relationship-markers');
-  if (markerGroup.empty()) markerGroup = linksGroup.append('g').attr('class', 'relationship-markers');
-  
+  // Render Divorce Markers
   const markers = markerGroup.selectAll('.divorce-marker')
     .data(divorcedLinksData, d => d.id);
   markers.exit().remove();
@@ -660,6 +658,7 @@ function optimizePaths() {
         if (totalLength > 0) {
           const point = pathNode.getPointAtLength(totalLength / 2);
           const size = 6;
+          // Simple X or Slash
           const dPath = `M ${point.x - size} ${point.y + size} L ${point.x + size} ${point.y - size}`;
           d3.select(this).attr('d', dPath);
         }
@@ -667,42 +666,20 @@ function optimizePaths() {
   });
 }
 
-// Draw the "bracket" style line for spouses
-function calculateSteppedPath(source, target, offset) {
-  const sx = source.x;
-  const sy = source.y;
-  const tx = target.x;
-  const ty = target.y; // Usually same as sy in horizontal layouts
-  
-  const midY = sy + offset;
-  
-  // Path: Start -> Vertical Shift -> Horizontal -> Vertical Shift -> End
-  return `M ${sx} ${sy} 
-          L ${sx} ${midY} 
-          L ${tx} ${midY} 
-          L ${tx} ${ty}`;
-}
-
-function applyLinkStyle(linkEl, srcId, tgtId) {
-  linkEl.classed('link-married link-partner link-divorced link-separated', false);
-  
-  let relType = 'married';
+// Helper to find rel type between two IDs
+function getRelationshipType(id1, id2) {
   const rel = state.spousalRels.find(r => 
-    (r.person1_id === srcId && r.person2_id === tgtId) ||
-    (r.person1_id === tgtId && r.person2_id === srcId)
+    (r.person1_id === id1 && r.person2_id === id2) ||
+    (r.person1_id === id2 && r.person2_id === id1)
   );
-
-  if (rel) {
-    relType = rel.relationship_type;
-  } else {
-    // Fallback to data attached to node if rel not found in global array
-    const sourcePerson = state.chart.store.getData().find(p => p.id === srcId);
-    if (sourcePerson && sourcePerson.data.spouse_rels && sourcePerson.data.spouse_rels[tgtId]) {
-      relType = sourcePerson.data.spouse_rels[tgtId];
-    }
+  if (rel) return rel.relationship_type;
+  
+  // Fallback to data attached to node if not in global list yet (e.g. during edit)
+  const p1 = state.chart.store.getData().find(p => p.id === id1);
+  if (p1 && p1.data.spouse_rels && p1.data.spouse_rels[id2]) {
+    return p1.data.spouse_rels[id2];
   }
-
-  linkEl.classed(`link-${relType}`, true);
+  return 'married';
 }
 
 function applyAddButtonLabels(editApi) {
