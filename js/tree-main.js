@@ -153,26 +153,30 @@ function refreshChartUI() {
   }
 }
 
-// Helper to remove "Ghost" Add buttons from the data before adding new ones
-// Fixes Issue #2: "Nonsensical chart" with multiple "Add Partner x2"
+// Fixes Issue #2: Removes "Add" buttons when switching focus so they don't stack up
 function cleanupGhostNodes() {
   if (!state.chart || !state.chart.store) return;
   const data = state.chart.store.getData();
   
-  // Remove any node that is a placeholder for adding a relative
+  let hasChanges = false;
+  // Iterate backwards to remove safely
   for (let i = data.length - 1; i >= 0; i--) {
+    // Check if this is a "ghost" node (Add button)
     if (data[i]._new_rel_data || data[i].to_add) {
-      // Also remove references to this ghost node from other nodes
       const ghostId = data[i].id;
+      // Clean up references to this ghost in other nodes
       data.forEach(d => {
         if (d.rels.spouses) d.rels.spouses = d.rels.spouses.filter(id => id !== ghostId);
         if (d.rels.children) d.rels.children = d.rels.children.filter(id => id !== ghostId);
         if (d.rels.parents) d.rels.parents = d.rels.parents.filter(id => id !== ghostId);
       });
       data.splice(i, 1);
+      hasChanges = true;
     }
   }
-  state.chart.updateData(data);
+  if (hasChanges) {
+    state.chart.updateData(data);
+  }
 }
 
 function sanitizeChartData(chartData) {
@@ -211,7 +215,9 @@ function createChart(chartData) {
     .setTransitionTime(1000)
     .setCardXSpacing(250)
     .setCardYSpacing(150)
-    .setShowSiblingsOfMain(true) 
+    .setShowSiblingsOfMain(true)
+    // Fix Issue #3: Change "Add Parent" cards to "Unknown"
+    .setSingleParentEmptyCard(true, { label: 'Unknown' })
 
   state.chart = chart;
 
@@ -293,7 +299,6 @@ function createChart(chartData) {
             memberId = res.data.id;
             datum.id = memberId; 
             
-            // Fix Issue #1: Immediate Local State Update
             state.members.push(res.data);
 
             if (datum._new_rel_data) {
@@ -367,15 +372,12 @@ function createChart(chartData) {
           }
         }
 
-        // Close form visually
         applyChanges(); 
         postSubmit();   
 
-        // Fix Issue #1: Immediate UI Refresh without fetch
-        // We use the locally updated arrays (state.members etc) to redraw immediately
+        // Immediate Refresh
         refreshChartUI();
         
-        // Ensure focus
         setTimeout(() => {
           const freshDatum = state.chart.store.getData().find(d => d.id === memberId);
           if (freshDatum) {
@@ -398,14 +400,11 @@ function createChart(chartData) {
         state.isSaving = true;
         const id = datum.id;
 
-        // Fix Issue #3: Check if this person is structurally important (has children/spouses)
+        // Check if person has dependents
         const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
         const hasSpouses = state.spousalRels.some(r => r.person1_id === id || r.person2_id === id);
 
         if (hasChildren || hasSpouses) {
-          // If they have dependents/partners, turn them into "Unknown" instead of removing
-          console.log("Person has dependents, converting to Unknown instead of deleting");
-          
           const updates = {
             first_name: "Unknown",
             last_name: "",
@@ -415,20 +414,16 @@ function createChart(chartData) {
           
           await updateFamilyMember(id, updates);
           
-          // Local update
           const memIndex = state.members.findIndex(m => m.id === id);
           if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
           
-          // Close form but don't delete from chart view
           state.editApi.closeForm();
           refreshChartUI();
           
         } else {
-          // Safe to fully delete
           await deleteFamilyMember(id);
           deletePerson();
           
-          // Remove from local state
           state.members = state.members.filter(m => m.id !== id);
           state.parentChildRels = state.parentChildRels.filter(r => r.parent_id !== id && r.child_id !== id);
           state.spousalRels = state.spousalRels.filter(r => r.person1_id !== id && r.person2_id !== id);
@@ -456,14 +451,16 @@ function createChart(chartData) {
   f3Card.setOnCardClick((e, d) => {
     if (d.data.id === 'GOD_NODE_TEMP') return;
 
-    // Fix Issue #2: Cleanup ghost nodes before processing new click
-    cleanupGhostNodes();
+    // FIX #1: Only cleanup ghosts if we are clicking a REAL person
+    // If we click a ghost (Add button), we MUST NOT cleanup, otherwise the button disappears!
+    if (!d.data._new_rel_data && !d.data.to_add) {
+      cleanupGhostNodes();
+    }
 
     const storeData = state.chart.store.getData();
     const isGodMode = storeData.some(node => node.id === 'GOD_NODE_TEMP');
 
     if (isGodMode) {
-      // Re-render standard tree if we were in God mode
       refreshChartUI();
     }
 
@@ -486,7 +483,7 @@ function createChart(chartData) {
   return chart;
 }
 
-// ... (Rest of file: updateRelationshipStyles, configureForm, etc. remain the same) ...
+// ... (updateRelationshipStyles, configureForm, etc. remain the same) ...
 function updateRelationshipStyles() {
   if (!state.chart || !state.chart.store) return;
 
@@ -792,7 +789,6 @@ function handleShowFullTree() {
   const { levelMap, minLevel } = calculateStructuralLevels(sourceMembers);
   const fullTreeData = buildStrictTreeData(sourceMembers, levelMap, minLevel);
 
-  // God Mode also needs sanitization to be safe
   state.chart.updateData(sanitizeChartData(fullTreeData));
   state.chart.updateMainId('GOD_NODE_TEMP');
   state.chart.updateTree({ tree_position: 'main_to_middle', transition_time: 750 });
