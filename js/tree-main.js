@@ -8,8 +8,6 @@ import {
   deleteFamilyMember,
   createParentChildRelationship,
   createSpousalRelationship,
-  deleteParentChildRelationship,
-  deleteSpousalRelationship,
   updateSpousalRelationship
 } from './supabase-client.js'
 
@@ -136,7 +134,7 @@ function refreshChartUI() {
   const safeData = sanitizeChartData(chartData);
 
   if (!state.chart) {
-    state.chart = createChart(safeData)
+    state.chart = createChartInstance(safeData)
     window.f3Chart = state.chart
   } else {
     state.chart.updateData(safeData)
@@ -207,20 +205,26 @@ function sanitizeChartData(chartData) {
   return cleanData;
 }
 
-function createChart(chartData) {
+function createChartInstance(chartData) {
   const chart = window.f3.createChart('#FamilyChart', chartData)
     .setTransitionTime(1000)
-    .setCardXSpacing(250)
+    .setCardXSpacing(260) // Slightly wider to accommodate stepped lines
     .setCardYSpacing(150)
     .setShowSiblingsOfMain(true)
     .setSingleParentEmptyCard(true, { label: 'Unknown' })
 
   state.chart = chart;
 
+  // IMPORTANT: This hook handles the custom line drawing
   chart.setAfterUpdate(() => {
-    try {
-      updateRelationshipStyles();
-    } catch (e) {}
+    // Small timeout to let D3 transitions finish or at least start
+    setTimeout(() => {
+      try {
+        optimizePaths();
+      } catch (e) {
+        console.error("Path optimization error", e);
+      }
+    }, 50);
   });
 
   const f3Card = chart
@@ -277,8 +281,6 @@ function createChart(chartData) {
       
       try {
         state.isSaving = true;
-        
-        // VISUAL FEEDBACK: Show loading spinner immediately
         toggleLoading(true, "Saving changes...");
 
         const form = e.target;
@@ -303,7 +305,6 @@ function createChart(chartData) {
           if (!res.success) throw new Error("Failed to create member: " + res.error);
           
           memberId = res.data.id; 
-          
           state.members.push(res.data);
 
           if (datum._new_rel_data) {
@@ -314,7 +315,6 @@ function createChart(chartData) {
             if (relType === 'spouse') {
               const relSelect = form.querySelector('.relationship-type-select-existing'); 
               const type = relSelect ? relSelect.value : 'married';
-              
               const relRes = await createSpousalRelationship(state.treeId, relatedId, memberId, type);
               if(relRes.success && relRes.data) state.spousalRels.push(relRes.data);
 
@@ -331,7 +331,7 @@ function createChart(chartData) {
               if(pcRes.success && pcRes.data) state.parentChildRels.push(pcRes.data);
             }
           } 
-          // CASE 2: "Unknown" / Placeholder Card
+          // Placeholder Card case
           else {
             if (datum.rels.children && datum.rels.children.length > 0) {
               for (const childId of datum.rels.children) {
@@ -396,28 +396,20 @@ function createChart(chartData) {
           }
         }
 
-        // 2. UI OPERATIONS
-        postSubmit(); // Closes the form
-
-        // Immediate Refresh
+        postSubmit();
         refreshChartUI();
         
-        // FOCUS LOGIC: Pan to new person and open form
         setTimeout(() => {
           const treeData = state.chart.store.getData();
           const freshDatum = treeData.find(d => d.id === memberId);
           
           if (freshDatum) {
              state.chart.updateMainId(freshDatum.id);
-             
-             // VISUAL: Move camera to the new person smoothly
              state.chart.updateTree({ 
                initial: false,
                tree_position: 'main_to_middle',
                transition_time: 1000 
              });
-
-             // VISUAL: Re-open the form for the new person so user can continue editing
              setTimeout(() => {
                 if (state.editApi) state.editApi.open(freshDatum);
              }, 300);
@@ -434,66 +426,25 @@ function createChart(chartData) {
     })
     .setOnDelete(async (datum, deletePerson, postSubmit) => {
       const id = datum.id;
-
-      // 1. CALCULATE DEPENDENTS
-      const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
-
-      const mySpouseRels = state.spousalRels.filter(r => r.person1_id === id || r.person2_id === id);
-      const hasUntetheredSpouse = mySpouseRels.some(rel => {
-          const spouseId = rel.person1_id === id ? rel.person2_id : rel.person1_id;
-          const spouseHasParents = state.parentChildRels.some(r => r.child_id === spouseId);
-          const spouseHasChildren = state.parentChildRels.some(r => r.parent_id === spouseId);
-          const spouseHasOtherSpouses = state.spousalRels.some(r => 
-            (r.person1_id === spouseId || r.person2_id === spouseId) && r.id !== rel.id
-          );
-          return !spouseHasParents && !spouseHasChildren && !spouseHasOtherSpouses;
-      });
-
-      const myParentRels = state.parentChildRels.filter(r => r.child_id === id);
-      const hasUntetheredParent = myParentRels.some(rel => {
-          const parentId = rel.parent_id;
-          const parentHasOtherChildren = state.parentChildRels.some(r => r.parent_id === parentId && r.child_id !== id);
-          const parentHasSpouse = state.spousalRels.some(r => r.person1_id === parentId || r.person2_id === parentId);
-          const parentHasParents = state.parentChildRels.some(r => r.child_id === parentId);
-          return !parentHasOtherChildren && !parentHasSpouse && !parentHasParents;
-      });
-
-      const hasDependents = hasChildren || hasUntetheredSpouse || hasUntetheredParent;
-      const isUnknown = datum.data['first name'] === 'Unknown';
-
-      // 2. BLOCK DELETION if it's already an Unknown placeholder with dependents
-      if (isUnknown && hasDependents) {
-        alert("This placeholder cannot be deleted because it is required to link other family members to the tree.\n\nPlease delete the attached relatives (children, partners, or parents) first.");
-        return; 
-      }
-
       if(!confirm("Are you sure you want to delete this person?")) return;
       
       try {
         state.isSaving = true;
         toggleLoading(true, "Deleting...");
 
+        const hasDependents = checkDependents(id);
+
         if (hasDependents) {
-          // --- SOFT DELETE: Convert to Unknown ---
-          console.log("Performing Soft Delete (Reverting to Unknown)");
-          const updates = {
-            first_name: "Unknown",
-            last_name: "",
-            birthday: null,
-            death: null
-          };
-          
+          // Soft Delete
+          const updates = { first_name: "Unknown", last_name: "", birthday: null, death: null };
           await updateFamilyMember(id, updates);
-          
           const memIndex = state.members.findIndex(m => m.id === id);
           if (memIndex >= 0) state.members[memIndex] = { ...state.members[memIndex], ...updates };
           
           state.editApi.closeForm();
           refreshChartUI();
-          
         } else {
-          // --- HARD DELETE: Remove Completely ---
-          console.log("Performing Hard Delete (Removing Completely)");
+          // Hard Delete
           await deleteFamilyMember(id);
           deletePerson();
           
@@ -502,19 +453,14 @@ function createChart(chartData) {
           state.spousalRels = state.spousalRels.filter(r => r.person1_id !== id && r.person2_id !== id);
 
           const store = state.chart.store;
-          
-          // If we deleted the "main" person, try to find a fallback
           if (store.getMainId() === id) {
              const newMain = state.members.length > 0 ? state.members[0].id : null;
              if (newMain) store.updateMainId(newMain);
           }
           
           postSubmit({ delete: true }); 
-          
-          // Trigger Full Tree View to ensure we don't end up on a blank screen
           handleShowFullTree();
         }
-
       } catch (err) {
         console.error("Delete failed", err);
         alert("Failed to delete person.");
@@ -536,9 +482,7 @@ function createChart(chartData) {
     const storeData = state.chart.store.getData();
     const isGodMode = storeData.some(node => node.id === 'GOD_NODE_TEMP');
 
-    if (isGodMode) {
-      refreshChartUI();
-    }
+    if (isGodMode) refreshChartUI();
 
     const currentDatum = state.chart.store.getDatum(d.data.id);
     if (currentDatum) {
@@ -558,110 +502,207 @@ function createChart(chartData) {
   return chart;
 }
 
-function updateRelationshipStyles() {
+function checkDependents(id) {
+  const hasChildren = state.parentChildRels.some(r => r.parent_id === id);
+  const mySpouseRels = state.spousalRels.filter(r => r.person1_id === id || r.person2_id === id);
+  
+  // Check if spouse would be orphaned
+  const hasUntetheredSpouse = mySpouseRels.some(rel => {
+      const spouseId = rel.person1_id === id ? rel.person2_id : rel.person1_id;
+      const spouseHasParents = state.parentChildRels.some(r => r.child_id === spouseId);
+      const spouseHasChildren = state.parentChildRels.some(r => r.parent_id === spouseId);
+      const spouseHasOtherSpouses = state.spousalRels.some(r => 
+        (r.person1_id === spouseId || r.person2_id === spouseId) && r.id !== rel.id
+      );
+      return !spouseHasParents && !spouseHasChildren && !spouseHasOtherSpouses;
+  });
+
+  return hasChildren || hasUntetheredSpouse;
+}
+
+/**
+ * CUSTOM PATH OPTIMIZER
+ * This replaces the standard straight lines with "Stepped" lines for distinct partners,
+ * and ensures children connect specifically to the line belonging to their parents.
+ */
+function optimizePaths() {
   if (!state.chart || !state.chart.store) return;
 
   const svg = d3.select('#FamilyChart').select('svg.main_svg');
   const linksGroup = svg.select('.links_view');
   
-  let markerGroup = linksGroup.select('.relationship-markers');
-  if (markerGroup.empty()) {
-    markerGroup = linksGroup.append('g').attr('class', 'relationship-markers');
-  }
+  // 1. Map Spouses per person to calculate offsets
+  const treeData = state.chart.store.getTree().data;
+  const spouseGroups = {}; // { 'martin_id': ['anne_id', 'sabena_id'] }
 
+  treeData.forEach(d => {
+    if (d.data.main || d.is_ancestry) {
+      if (d.spouses && d.spouses.length > 0) {
+        // Sort spouses by X position to determine vertical stacking order
+        const sortedSpouses = [...d.spouses].sort((a, b) => a.x - b.x);
+        spouseGroups[d.data.id] = sortedSpouses.map(s => s.data.id);
+      }
+    }
+  });
+
+  // 2. Identify and Style Links
   const links = linksGroup.selectAll('path.link');
   const divorcedLinksData = [];
 
   links.each(function(d) {
     const linkEl = d3.select(this);
+    const src = d.source; 
+    const tgt = d.target;
     
-    linkEl.style('opacity', 1).style('pointer-events', 'auto');
-
-    if (!d.source.data || !d.target.data) return;
-
-    const srcId = d.source.data.id;
-    const tgtId = d.target.data.id;
-    const srcIsGodOrSpacer = (d.source.data.data.is_god_node || d.source.data.data.is_spacer);
-    const tgtIsGodOrSpacer = (d.target.data.data.is_god_node || d.target.data.data.is_spacer);
-
-    if (srcId === 'GOD_NODE_TEMP' || tgtId === 'GOD_NODE_TEMP' || srcIsGodOrSpacer || tgtIsGodOrSpacer) {
-        linkEl.style('opacity', 0).style('pointer-events', 'none');
-        return;
+    // Ignore ghost/god nodes
+    if (src.data.id === 'GOD_NODE_TEMP' || tgt.data.id === 'GOD_NODE_TEMP') {
+      linkEl.style('opacity', 0);
+      return;
     }
 
-    linkEl.classed('link-married link-partner link-divorced link-separated', false);
-
-    let relType = 'married';
-    
+    // --- SPOUSE LINKS ---
     if (d.spouse) {
-        const deltaX = Math.abs(d.target.x - d.source.x);
-        const nodeSeparation = 250; 
-        
-        if (deltaX > nodeSeparation * 1.5) {
-            const sourceX = d.source.x;
-            const targetX = d.target.x;
-            const sourceY = d.source.y;
-            const targetY = d.target.y;
-            
-            const direction = targetX > sourceX ? 1 : -1;
-            const shift = nodeSeparation * 0.5 * direction;
-            const safeX = targetX - shift; 
+      // Determine which node is the "Hub" (the one with potential multiple spouses)
+      // Usually the one that is NOT added (d.added is true for spouses added for visual purposes)
+      let hub = !src.added ? src : tgt;
+      let spouse = src.added ? src : tgt;
+      
+      // If both seem equal (e.g. main node relation), fallback to data check
+      if(hub === spouse) {
+         hub = src; spouse = tgt; 
+      }
 
-            const path = d3.path();
-            path.moveTo(sourceX, sourceY);
-            path.lineTo(safeX, sourceY);
-            path.lineTo(safeX, targetY);
-            path.lineTo(targetX, targetY);
-            
-            linkEl.attr('d', path.toString());
+      const spousesList = spouseGroups[hub.data.id];
+      let verticalOffset = 0;
+
+      if (spousesList && spousesList.length > 1) {
+        const index = spousesList.indexOf(spouse.data.id);
+        // Step logic: If 2 spouses: -15, +15. If 3: -15, 0, +15.
+        // Formula: (index - (total-1)/2) * stepSize
+        if (index !== -1) {
+          verticalOffset = (index - (spousesList.length - 1) / 2) * 30; // 30px spacing
         }
-    }
+      }
 
-    if (srcId && tgtId) {
-      const rel = state.spousalRels.find(r => 
-        (r.person1_id === srcId && r.person2_id === tgtId) ||
-        (r.person1_id === tgtId && r.person2_id === srcId)
-      );
-
-      if (rel) {
-        relType = rel.relationship_type;
-      } else {
-        const sourcePerson = state.chart.store.getData().find(p => p.id === srcId);
-        if (sourcePerson && sourcePerson.data.spouse_rels && sourcePerson.data.spouse_rels[tgtId]) {
-          relType = sourcePerson.data.spouse_rels[tgtId];
+      // Draw the Stepped Path: Up/Down -> Over -> Down/Up
+      const newPath = calculateSteppedPath(hub, spouse, verticalOffset);
+      linkEl.attr('d', newPath);
+      
+      // Store the offset in the DOM element for the child links to find later
+      const pairId = [hub.data.id, spouse.data.id].sort().join('_');
+      linkEl.attr('data-pair-id', pairId);
+      linkEl.attr('data-vertical-offset', verticalOffset);
+    } 
+    
+    // --- CHILD LINKS ---
+    else {
+      // d.target is the child. d.source is [parent1, parent2] or parent1
+      const child = d.target;
+      let parents = Array.isArray(d.source) ? d.source : [d.source];
+      
+      // If we have 2 parents, we need to connect to their specific spouse line
+      if (parents.length === 2) {
+        const p1 = parents[0];
+        const p2 = parents[1];
+        const pairId = [p1.data.id, p2.data.id].sort().join('_');
+        
+        // Find the spouse link element to get its offset
+        const spouseLinkEl = linksGroup.select(`path[data-pair-id="${pairId}"]`);
+        
+        if (!spouseLinkEl.empty()) {
+          const offset = parseFloat(spouseLinkEl.attr('data-vertical-offset')) || 0;
+          
+          // Re-calculate child path starting from the offset height
+          const startX = (p1.x + p2.x) / 2;
+          const startY = p1.y + offset; // Start from the stepped line height
+          const endX = child.x;
+          const endY = child.y;
+          
+          // Standard elbow for child: Down -> Over -> Down
+          // But startY is shifted
+          const midY = (startY + endY) / 2;
+          
+          const path = `M ${startX} ${startY} 
+                        L ${startX} ${midY} 
+                        L ${endX} ${midY} 
+                        L ${endX} ${endY}`;
+          
+          linkEl.attr('d', path);
+          
+          // Optional: Add a junction dot
+          // appendJunctionDot(linksGroup, startX, startY);
         }
       }
     }
 
-    if (relType === 'partner') linkEl.classed('link-partner', true);
-    else if (relType === 'separated') linkEl.classed('link-separated', true);
-    else if (relType === 'divorced') {
-      linkEl.classed('link-divorced', true);
-      divorcedLinksData.push({ 
-        pathNode: this, 
-        id: `marker-${srcId}-${tgtId}` 
-      });
-    } else {
-      linkEl.classed('link-married', true);
+    // Apply Styles (Married, Divorced, etc.) based on DB data
+    applyLinkStyle(linkEl, src.data.id, tgt.data.id);
+    
+    // Collect divorce markers
+    if (linkEl.classed('link-divorced')) {
+      divorcedLinksData.push({ pathNode: this, id: `marker-${src.data.id}-${tgt.data.id}` });
     }
   });
 
+  // Render Divorce/Separation Markers (Double slash)
+  let markerGroup = linksGroup.select('.relationship-markers');
+  if (markerGroup.empty()) markerGroup = linksGroup.append('g').attr('class', 'relationship-markers');
+  
   const markers = markerGroup.selectAll('.divorce-marker')
     .data(divorcedLinksData, d => d.id);
   markers.exit().remove();
   const markersEnter = markers.enter().append('path').attr('class', 'divorce-marker');
+  
   markers.merge(markersEnter).each(function(d) {
     const pathNode = d.pathNode;
     try {
         const totalLength = pathNode.getTotalLength();
         if (totalLength > 0) {
-        const point = pathNode.getPointAtLength(totalLength / 2);
-        const size = 6;
-        const dPath = `M ${point.x - size} ${point.y + size} L ${point.x + size} ${point.y - size}`;
-        d3.select(this).attr('d', dPath);
+          const point = pathNode.getPointAtLength(totalLength / 2);
+          const size = 6;
+          const dPath = `M ${point.x - size} ${point.y + size} L ${point.x + size} ${point.y - size}`;
+          d3.select(this).attr('d', dPath);
         }
     } catch(e) {}
   });
+}
+
+// Draw the "bracket" style line for spouses
+function calculateSteppedPath(source, target, offset) {
+  const sx = source.x;
+  const sy = source.y;
+  const tx = target.x;
+  const ty = target.y; // Usually same as sy in horizontal layouts
+  
+  const midY = sy + offset;
+  
+  // Path: Start -> Vertical Shift -> Horizontal -> Vertical Shift -> End
+  return `M ${sx} ${sy} 
+          L ${sx} ${midY} 
+          L ${tx} ${midY} 
+          L ${tx} ${ty}`;
+}
+
+function applyLinkStyle(linkEl, srcId, tgtId) {
+  linkEl.classed('link-married link-partner link-divorced link-separated', false);
+  
+  let relType = 'married';
+  const rel = state.spousalRels.find(r => 
+    (r.person1_id === srcId && r.person2_id === tgtId) ||
+    (r.person1_id === tgtId && r.person2_id === srcId)
+  );
+
+  if (rel) {
+    relType = rel.relationship_type;
+  } else {
+    // Fallback to data attached to node if rel not found in global array
+    const sourcePerson = state.chart.store.getData().find(p => p.id === srcId);
+    if (sourcePerson && sourcePerson.data.spouse_rels && sourcePerson.data.spouse_rels[tgtId]) {
+      relType = sourcePerson.data.spouse_rels[tgtId];
+    }
+  }
+
+  linkEl.classed(`link-${relType}`, true);
 }
 
 function applyAddButtonLabels(editApi) {
@@ -841,7 +882,7 @@ function validateYearFields(form) {
 }
 
 // -----------------------------------------------------------------------------
-// Full Tree & God Mode Logic (Strict De-duplication)
+// Full Tree & God Mode Logic
 // -----------------------------------------------------------------------------
 
 function handleShowFullTree() {
